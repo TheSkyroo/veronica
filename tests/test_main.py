@@ -144,3 +144,23 @@ def test_text_mode_prompts_for_confirm_class(monkeypatch, tmp_home, capsys):
     monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: (prompts.append(prompt), "n")[1])
     ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
     assert ok is False
+
+
+def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):
+    def raising_input(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raising_input)
+
+    async def handle_text(orch, text):
+        return ["Hi."]
+
+    stub = _StubOrchestrator(handle_text)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+
+    asyncio.run(main_mod._text_mode("x"))
+
+    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    assert ok is False
+    out = capsys.readouterr().out
+    assert "[tool] Bash: rm x -> declined" in out

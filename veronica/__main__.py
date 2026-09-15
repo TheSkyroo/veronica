@@ -35,7 +35,10 @@ def build_orchestrator(s: Settings, on_state=None, *, audio: bool = True) -> Orc
 
 
 def _ask_stdin(prompt: str) -> str:
-    return input(prompt)
+    try:
+        return input(prompt)
+    except EOFError:
+        return "n"
 
 
 async def _text_mode(text: str) -> None:
