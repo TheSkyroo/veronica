@@ -184,34 +184,42 @@ class Orchestrator:
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str) -> bool:
-        queue = self._speech_queue
-        if queue is not None:
-            # don't jump ahead of sentences already queued for playback by
-            # an in-flight handle_text pipeline. Bounded by brain_timeout_s
-            # as a belt-and-braces guard against ever hanging here.
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(queue.join(), timeout=self.s.brain_timeout_s)
-        if self._barged:
-            # a barge landed while we were waiting for the queue to drain;
-            # the turn this confirmation belongs to is already being torn
-            # down, so don't speak the prompt or eat the follow-up capture.
-            log.info("confirm aborted by barge")
+        if self.muted:
+            log.info("confirm skipped (muted): %s", summary)
             return False
-        async with self._speech_lock:
-            self.player.reset()
-            await self._say_unlocked(f"Run {summary}?")
+        prev = self.state
+        self._set("confirming")
+        try:
+            queue = self._speech_queue
+            if queue is not None:
+                # don't jump ahead of sentences already queued for playback by
+                # an in-flight handle_text pipeline. Bounded by brain_timeout_s
+                # as a belt-and-braces guard against ever hanging here.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(queue.join(), timeout=self.s.brain_timeout_s)
             if self._barged:
-                # barged while the prompt was being spoken.
+                # a barge landed while we were waiting for the queue to drain;
+                # the turn this confirmation belongs to is already being torn
+                # down, so don't speak the prompt or eat the follow-up capture.
                 log.info("confirm aborted by barge")
                 return False
-            self._confirm_capturing = True
-            try:
-                pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
-            finally:
-                self._confirm_capturing = False
-            if pcm is None:
-                return False
-            heard = await self.stt.atranscribe(pcm)
+            async with self._speech_lock:
+                self.player.reset()
+                await self._say_unlocked(f"Run {summary}?")
+                if self._barged:
+                    # barged while the prompt was being spoken.
+                    log.info("confirm aborted by barge")
+                    return False
+                self._confirm_capturing = True
+                try:
+                    pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
+                finally:
+                    self._confirm_capturing = False
+                if pcm is None:
+                    return False
+                heard = await self.stt.atranscribe(pcm)
+        finally:
+            self._set(prev)
         ok = self.is_confirmation(heard)
         log.info("confirm heard=%r -> %s", heard, ok)
         return ok
@@ -304,6 +312,7 @@ class Orchestrator:
                 log.exception("wake listener failed; retrying in %s s", self.s.wake_retry_s)
                 self._set("error")
                 await asyncio.sleep(self.s.wake_retry_s)
+                self._set("idle")
                 continue
             if not detected:
                 # a stale one-shot stop() (e.g. consumed in the same frame a

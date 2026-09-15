@@ -150,6 +150,17 @@ def test_on_state_warming_updates_title(fake_env):
         _quit_and_join(app)
 
 
+def test_on_state_confirming_updates_title(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._on_state("confirming")
+        app._refresh(None)
+        assert app.title == "V ?"
+    finally:
+        _quit_and_join(app)
+
+
 def test_toggle_mute(fake_env):
     menubar, fake_rumps, orch_holder = fake_env
     app, orch = _make_app(menubar, orch_holder)

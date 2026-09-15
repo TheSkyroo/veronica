@@ -102,10 +102,12 @@ def test_text_mode_closes_brain_on_error(monkeypatch, tmp_home, capsys):
 
     assert stub.brain.closed is True
     out = capsys.readouterr().out
-    assert "[text mode] all tool calls are auto-approved — no voice confirmation" in out
+    assert "[text mode] safe tools run automatically; risky tools ask y/N on this terminal" in out
 
 
 def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
+    monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: "y")
+
     async def handle_text(orch, text):
         await orch.brain._confirm("Bash: ls")
         return ["Hi."]
@@ -117,6 +119,28 @@ def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
 
     assert stub.brain.closed is True
     out = capsys.readouterr().out
-    assert "[text mode] all tool calls are auto-approved — no voice confirmation" in out
+    assert "[text mode] safe tools run automatically; risky tools ask y/N on this terminal" in out
     assert "[tool] Bash: ls -> allowed" in out
     assert "Hi." in out
+
+
+def test_text_mode_prompts_for_confirm_class(monkeypatch, tmp_home, capsys):
+    prompts = []
+    monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: (prompts.append(prompt), "y")[1])
+
+    async def handle_text(orch, text):
+        return ["Hi."]
+
+    stub = _StubOrchestrator(handle_text)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+
+    asyncio.run(main_mod._text_mode("x"))
+
+    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    assert ok is True
+    assert prompts == ["Run Bash: rm x? [y/N] "]
+
+    prompts.clear()
+    monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: (prompts.append(prompt), "n")[1])
+    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    assert ok is False

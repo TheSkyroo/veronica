@@ -7,7 +7,7 @@ import rumps
 from veronica.__main__ import build_orchestrator
 from veronica.config import settings
 
-ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…"}
+ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
 
 
 class VeronicaApp(rumps.App):

@@ -84,6 +84,45 @@ async def test_confirm_no_speech_is_deny():
     assert await o.confirm("Write file a") is False
 
 
+async def test_confirm_when_muted_denies_silently():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    o.muted = True
+    assert await o.confirm("Bash: rm x") is False
+    assert o.tts.said == []
+
+
+async def test_confirming_state_emitted():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    await o.confirm("Bash: rm x")
+    assert "confirming" in states
+
+
+async def test_wake_retry_returns_to_idle(monkeypatch):
+    o, states = build()
+
+    class W:
+        n = 0
+
+        async def wait(self, threshold=None):
+            self.n += 1
+            if self.n == 1:
+                raise RuntimeError("no mic")
+            raise asyncio.CancelledError
+
+        def stop(self):
+            pass
+
+    o.wake = W()
+
+    async def nosleep(_):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", nosleep)
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert states[-2:] == ["error", "idle"]
+
+
 async def test_empty_transcript_prompts_retry():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[""])
     await o.one_turn()
