@@ -90,6 +90,8 @@ async def test_options_wired(brain):
     assert "You are Veronica" in o.system_prompt
     assert o.can_use_tool is not None
     assert o.setting_sources == []
+    assert "mac" in o.mcp_servers
+    assert "mcp__mac__open_app" in o.allowed_tools
 
 
 async def test_resume_from_saved_session(brain, tmp_home):
