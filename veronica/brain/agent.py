@@ -16,7 +16,7 @@ from veronica.brain.policy import classify
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
-from veronica.tools.mac import MAC_TOOL_NAMES, mac_server
+from veronica.tools.mac import mac_server
 
 log = logging.getLogger("veronica.brain")
 
@@ -88,7 +88,7 @@ class Brain:
             can_use_tool=self._can_use_tool,
             resume=resume,
             mcp_servers={"mac": mac_server},
-            allowed_tools=[f"mcp__mac__{n}" for n in MAC_TOOL_NAMES],
+            # do not set allowed_tools — it auto-approves and bypasses can_use_tool
             # Only our confirmation gate may allow tools; ignore any
             # ~/.claude/settings.json (or project/local) permissions.allow
             # rules that would otherwise bypass can_use_tool entirely.
