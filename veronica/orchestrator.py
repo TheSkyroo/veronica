@@ -82,6 +82,7 @@ class Orchestrator:
         self._set("thinking")
         t0 = time.monotonic()
         spoken: list[str] = []
+        first = True
         self.player.reset()
         queue: asyncio.Queue = asyncio.Queue(maxsize=2)
 
@@ -89,8 +90,13 @@ class Orchestrator:
             try:
                 async for sent in self.brain.ask(text):
                     spoken.append(sent)
-                    samples, _ = await self.tts.asynth(sent)
-                    await queue.put((sent, samples))
+                    # Enqueue at yield time (synth kicked off but not
+                    # necessarily finished) so: (a) maxsize=2 bounds how far
+                    # ahead synthesis can run, and (b) a concurrent confirm()
+                    # joining the queue sees this sentence as pending *before*
+                    # it's been spoken, closing the production ordering race.
+                    fut = asyncio.ensure_future(self.tts.asynth(sent))
+                    await queue.put((sent, fut))
             finally:
                 await queue.put(None)
 
@@ -105,9 +111,12 @@ class Orchestrator:
             while True:
                 item = await queue.get()
                 if item is None:
+                    queue.task_done()
                     break
-                sent, samples = item
-                if len(spoken) and sent == spoken[0]:
+                sent, fut = item
+                samples, _ = await fut
+                if first:
+                    first = False
                     self._set("speaking")
                     log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
                 if not self.muted:
@@ -115,12 +124,39 @@ class Orchestrator:
                         await self.player.play(samples)
                 queue.task_done()
             await prod
-        except BaseException:
+        finally:
+            # Cancellation-safe teardown: whether we exit normally, via an
+            # exception raised from the loop above, or because this task
+            # itself was cancelled, the producer must be stopped and the
+            # queue must never be left with unbalanced put()/task_done()
+            # counts — an unbalanced queue would hang any confirm() blocked
+            # in queue.join() forever.
             prod.cancel()
+            # Drain BEFORE awaiting prod: if the queue was full, the
+            # producer's own `finally: await queue.put(None)` would block
+            # forever with nobody left to consume it. Freeing space here
+            # lets that put() (and thus `await prod` below) complete.
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is not None:
+                    item[1].cancel()
+                queue.task_done()
             with contextlib.suppress(BaseException):
                 await prod
-            raise
-        finally:
+            # The producer's finally may have just put its None sentinel
+            # (normal exit already consumed it above, so this is a no-op
+            # then); drain it too so unfinished_tasks balances to zero.
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is not None:
+                    item[1].cancel()
+                queue.task_done()
             self._speech_queue = None
         if not spoken:
             await self.say("I have nothing to say to that.")
@@ -128,10 +164,21 @@ class Orchestrator:
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str) -> bool:
-        if self._speech_queue is not None:
+        # Yield once before consulting self._speech_queue: a brain may call
+        # confirm() from a task it creates and then hands off to (rather than
+        # awaiting inline), in which case this task can start running before
+        # the producer's own already-scheduled continuation has had a chance
+        # to enqueue the sentence that "caused" this confirm(). One tick lets
+        # that continuation run first, so the queue reflects reality before
+        # we decide whether there's anything to wait for.
+        await asyncio.sleep(0)
+        queue = self._speech_queue
+        if queue is not None:
             # don't jump ahead of sentences already queued for playback by
-            # an in-flight handle_text pipeline.
-            await self._speech_queue.join()
+            # an in-flight handle_text pipeline. Bounded by brain_timeout_s
+            # as a belt-and-braces guard against ever hanging here.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(queue.join(), timeout=self.s.brain_timeout_s)
         async with self._speech_lock:
             self.player.reset()
             await self._say_unlocked(f"Run {summary}?")

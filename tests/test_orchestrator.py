@@ -379,3 +379,107 @@ async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
     assert len(o.player.played) == 3
     # synth of B must start before play of A finishes: synth B appears before play 1
     assert order.index(("synth", "B.")) < order.index(("play", 1))
+
+
+# -- task 5 fix round 1: cancellation-safe pipeline, yield-time ordering -----
+
+async def test_handle_text_cancel_with_full_queue_does_not_hang():
+    class FastTTS:
+        async def asynth(self, text):
+            return np.zeros(10, dtype=np.float32), 24000
+
+    class SlowPlayer:
+        def __init__(self): self.played = 0
+        async def play(self, s):
+            self.played += 1
+            await asyncio.sleep(10)
+        def stop(self): pass
+        def reset(self): pass
+
+    class FastPlayer:
+        def __init__(self): self.played = 0
+        async def play(self, s):
+            self.played += 1
+        def stop(self): pass
+        def reset(self): pass
+
+    class Brain5:
+        async def ask(self, text):
+            for s in ["A.", "B.", "C.", "D.", "E."]:
+                yield s
+
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    o.tts, o.brain = FastTTS(), Brain5()
+    o.player = SlowPlayer()
+
+    turn = asyncio.create_task(o.handle_text("x"))
+    await asyncio.sleep(0.05)
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(turn, 1)
+
+    assert o._speech_queue is None
+
+    o.player = FastPlayer()
+    o.brain = Brain5()
+    out = await asyncio.wait_for(o.handle_text("y"), 1)
+    assert out == ["A.", "B.", "C.", "D.", "E."]
+
+    assert await asyncio.wait_for(o.confirm("Bash: rm x"), 1) is True
+
+
+async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
+    texts_by_index: list[str] = []
+
+    class DelayedTTS:
+        async def asynth(self, text):
+            idx = len(texts_by_index)
+            texts_by_index.append(text)
+            await asyncio.sleep(0.05)
+            return np.full(1, idx, dtype=np.float32), 24000
+
+    class OrderPlayer:
+        def __init__(self): self.played_texts = []
+        async def play(self, s):
+            self.played_texts.append(texts_by_index[int(s[0])])
+        def stop(self): pass
+        def reset(self): pass
+
+    holder = {}
+
+    class ConcurrentConfirmBrain:
+        def __init__(self, orch): self.orch = orch
+        async def ask(self, text):
+            holder["task"] = asyncio.create_task(self.orch.confirm("Bash: ls"))
+            await asyncio.sleep(0)
+            yield "First."
+            assert await holder["task"] is True
+            yield "Second."
+
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    o.tts, o.player = DelayedTTS(), OrderPlayer()
+    o.brain = ConcurrentConfirmBrain(o)
+
+    out = await o.handle_text("hello")
+
+    assert out == ["First.", "Second."]
+    assert o.player.played_texts == ["First.", "Run Bash: ls?", "Second."]
+
+
+async def test_play_exception_propagates_and_cleans_up():
+    class RaisingPlayer:
+        def __init__(self): self.calls = 0
+        async def play(self, s):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("play boom")
+        def stop(self): pass
+        def reset(self): pass
+
+    o, _ = build()
+    o.player = RaisingPlayer()
+
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(o.handle_text("hello"), 1)
+
+    assert o._speech_queue is None
