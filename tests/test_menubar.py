@@ -60,7 +60,13 @@ class FakeOrch:
         self.started = threading.Event()
 
     async def warmup(self):
-        pass
+        # mirrors the real Orchestrator.warmup(), which ends by emitting
+        # on_state("idle") once models are loaded — menubar now sets
+        # app._state = "warming" itself before build_orchestrator runs, so
+        # tests that assert the post-construction state need this to flip
+        # back to idle the way the real orchestrator would.
+        if self._on_state is not None:
+            self._on_state("idle")
 
     async def run_forever(self):
         self.started.set()
@@ -116,6 +122,27 @@ def _make_app(menubar, orch_holder):
 def _quit_and_join(app):
     app.quit(None)
     app._thread.join(timeout=2)
+
+
+def test_state_is_warming_during_build_orchestrator(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    seen = {}
+    original = menubar.build_orchestrator
+
+    def wrapped(s, on_state=None, *, audio=True):
+        # on_state is the VeronicaApp instance's bound _on_state method, so
+        # __self__ recovers the app without racing its constructor's
+        # `app = VeronicaApp()` assignment on the main thread.
+        app = on_state.__self__
+        seen["state"] = app._state
+        return original(s, on_state=on_state, audio=audio)
+
+    monkeypatch.setattr(menubar, "build_orchestrator", wrapped)
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert seen.get("state") == "warming"
+    finally:
+        _quit_and_join(app)
 
 
 def test_construct_starts_loop_and_initial_refresh(fake_env):

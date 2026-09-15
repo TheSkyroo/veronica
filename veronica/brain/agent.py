@@ -126,15 +126,17 @@ class Brain:
         client = await self._ensure_client()
         splitter = SentenceSplitter()
         try:
-            await client.query(text)
             # _in_flight means "the SDK turn started and hasn't yet been
             # observed to end" — independent of what happens to whoever is
-            # consuming this generator. It must stay True if the consuming
-            # task is cancelled (e.g. barged), so a later interrupt() still
-            # sends the control request and drains the stream; it's cleared
-            # only when the turn actually ends (a ResultMessage is seen, in
-            # close(), or after interrupt()'s drain completes).
+            # consuming this generator. Set it BEFORE query() so a barge
+            # landing while the write is still in flight still triggers an
+            # interrupt(). It must stay True if the consuming task is
+            # cancelled (e.g. barged), so a later interrupt() still sends the
+            # control request and drains the stream; it's cleared only when
+            # the turn actually ends (a ResultMessage is seen, in close(), or
+            # after interrupt()'s drain completes).
             self._in_flight = True
+            await client.query(text)
             it = client.receive_response().__aiter__()
             while True:
                 try:
@@ -198,7 +200,12 @@ class Brain:
         if self._client is None or not self._in_flight:
             return
         try:
-            await self._client.interrupt()
+            async with asyncio.timeout(self.s.interrupt_drain_s):
+                await self._client.interrupt()
+        except TimeoutError:
+            log.warning("interrupt() timed out after %ss; closing client", self.s.interrupt_drain_s)
+            await self.close()
+            return
         except Exception:
             log.exception("interrupt failed; closing client")
             await self.close()

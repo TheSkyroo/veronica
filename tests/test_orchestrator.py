@@ -763,6 +763,78 @@ async def test_barge_listener_task_not_left_pending():
     assert [t for t in asyncio.all_tasks() if t is not current] == []
 
 
+async def test_barge_while_confirm_waits_for_lock_skips_prompt():
+    """A barge landing while confirm() is blocked *acquiring* _speech_lock
+    (as opposed to while it's speaking the prompt, already covered by
+    test_barge_during_confirm_prompt_aborts_confirm, or while waiting for
+    the handle_text queue to drain, covered by the pre-lock _barged check)
+    must still be observed before the prompt is spoken.
+
+    _speech_queue is None here (no handle_text pipeline is running), so
+    confirm()'s only wait is the lock acquisition itself — this isolates
+    the "immediately after acquiring _speech_lock" check from the
+    pre-existing "after queue.join()" one."""
+    release_ev = asyncio.Event()
+
+    class SlowPlayer:
+        def __init__(self):
+            self.played = 0
+            self.stops = 0
+
+        async def play(self, s):
+            self.played += 1
+            await release_ev.wait()
+
+        def stop(self):
+            # mirrors the real player: barge-in releases whatever play()
+            # call currently holds the speech lock.
+            self.stops += 1
+            release_ev.set()
+
+        def reset(self):
+            pass
+
+    o, _ = build()
+    o.player = SlowPlayer()
+
+    # A concurrent say() (standing in for a running handle_text's own
+    # player.play under _speech_lock) holds _speech_lock via a slow
+    # player.play() that blocks until player.stop() releases it.
+    holder = asyncio.create_task(o.say("Holding."))
+    await asyncio.sleep(0.02)
+    assert o.player.played == 1        # holder is inside player.play(), lock held
+    assert o._speech_queue is None     # no handle_text pipeline: only the lock gates confirm()
+
+    confirm_task = asyncio.create_task(o.confirm("Bash: rm x"))
+    await asyncio.sleep(0.02)   # confirm() is now blocked acquiring _speech_lock
+
+    o._barged = True
+    o.player.stop()   # releases player.play() -> lock is freed -> confirm() acquires it
+
+    result = await asyncio.wait_for(confirm_task, 1)
+    await asyncio.wait_for(holder, 1)
+
+    assert result is False
+    assert not any(t.startswith("Run") for t in o.tts.said)
+
+
+async def test_barge_listener_failure_does_not_cancel_good_turn(caplog):
+    class RaisingWake:
+        def __init__(self): self.stops = 0
+        async def wait(self, threshold=None):
+            raise RuntimeError("mic hiccup")
+        def stop(self):
+            self.stops += 1
+
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o.wake = RaisingWake()
+    import logging
+    with caplog.at_level(logging.ERROR, logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert o.tts.said == ["Sure.", "Done."]
+    assert not any("Something went wrong" in r.message for r in caplog.records)
+
+
 async def test_play_exception_propagates_and_cleans_up():
     class RaisingPlayer:
         def __init__(self): self.calls = 0

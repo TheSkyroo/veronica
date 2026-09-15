@@ -1,4 +1,5 @@
 """Typed macOS actions exposed to Claude as in-process MCP tools."""
+import asyncio
 import subprocess
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -57,7 +58,7 @@ async def open_app(args: dict) -> dict:
     name = str(args["name"])
     if "/" in name or name.startswith(".") or name.startswith("-"):
         return _err("app name must be a bare application name")
-    return run(["open", "-a", name], ok_text="ok")
+    return await asyncio.to_thread(run, ["open", "-a", name], None, ok_text="ok")
 
 
 @tool("open_url", "Open an http(s) URL in the default browser", {"url": str})
@@ -66,32 +67,32 @@ async def open_url(args: dict) -> dict:
     url = str(args.get("url", ""))
     if not url.startswith(("http://", "https://")):
         return _err("only http(s) URLs are allowed")
-    return run(["open", url])
+    return await asyncio.to_thread(run, ["open", url], None)
 
 
 @tool("clipboard_read", "Read the current clipboard text", {})
 @_guard
 async def clipboard_read(args: dict) -> dict:
-    return run(["pbpaste"])
+    return await asyncio.to_thread(run, ["pbpaste"], None)
 
 
 @tool("clipboard_write", "Replace the clipboard with the given text", {"text": str})
 @_guard
 async def clipboard_write(args: dict) -> dict:
-    return run(["pbcopy"], stdin=str(args.get("text", "")))
+    return await asyncio.to_thread(run, ["pbcopy"], str(args.get("text", "")))
 
 
 @tool("notify", "Show a macOS notification banner", {"title": str, "message": str})
 @_guard
 async def notify(args: dict) -> dict:
     script = f'display notification "{_q(str(args.get("message", "")))}" with title "{_q(str(args.get("title", "")))}"'
-    return run(["osascript", "-e", script])
+    return await asyncio.to_thread(run, ["osascript", "-e", script], None)
 
 
 @tool("volume_get", "Get system output volume (0-100)", {})
 @_guard
 async def volume_get(args: dict) -> dict:
-    return run(["osascript", "-e", "output volume of (get volume settings)"])
+    return await asyncio.to_thread(run, ["osascript", "-e", "output volume of (get volume settings)"], None)
 
 
 @tool("volume_set", "Set system output volume (0-100)", {"level": int})
@@ -102,13 +103,13 @@ async def volume_set(args: dict) -> dict:
     except (TypeError, ValueError):
         return _err("level must be a number 0-100")
     level = max(0, min(100, level))
-    return run(["osascript", "-e", f"set volume output volume {level}"])
+    return await asyncio.to_thread(run, ["osascript", "-e", f"set volume output volume {level}"], None)
 
 
 @tool("applescript", "Run an AppleScript snippet (powerful; user must confirm)", {"script": str})
 @_guard
 async def applescript(args: dict) -> dict:
-    return run(["osascript", "-e", str(args.get("script", ""))])
+    return await asyncio.to_thread(run, ["osascript", "-e", str(args.get("script", ""))], None)
 
 
 TOOLS = [open_app, open_url, clipboard_read, clipboard_write, notify, volume_get, volume_set, applescript]

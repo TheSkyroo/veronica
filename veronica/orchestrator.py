@@ -204,6 +204,13 @@ class Orchestrator:
                 log.info("confirm aborted by barge")
                 return False
             async with self._speech_lock:
+                if self._barged:
+                    # a barge landed while we were waiting to acquire the
+                    # speech lock (e.g. a concurrent say()/chime() was still
+                    # holding it); don't speak the prompt for a turn that's
+                    # already being torn down.
+                    log.info("confirm aborted by barge")
+                    return False
                 self.player.reset()
                 await self._say_unlocked(f"Run {summary}?")
                 if self._barged:
@@ -218,6 +225,10 @@ class Orchestrator:
                 if pcm is None:
                     return False
                 heard = await self.stt.atranscribe(pcm)
+                if self._barged:
+                    # barged while we were transcribing the reply.
+                    log.info("confirm aborted by barge")
+                    return False
         finally:
             self._set(prev)
         ok = self.is_confirmation(heard)
@@ -231,6 +242,17 @@ class Orchestrator:
         listener = asyncio.create_task(self.wake.wait(threshold=self.s.barge_threshold))
         try:
             done, _ = await asyncio.wait({turn, listener}, return_when=asyncio.FIRST_COMPLETED)
+            if listener in done and listener.exception() is not None:
+                # mic hiccup or similar in the barge listener; the turn is
+                # still good, so don't cancel it — just log and let it finish
+                # normally, as if no barge listener were running at all.
+                try:
+                    listener.result()
+                except Exception:
+                    log.exception("barge listener failed")
+                if not turn.done():
+                    await turn
+                return False
             if listener in done and listener.result():
                 log.info("barge-in")
                 self.player.stop()

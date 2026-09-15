@@ -360,3 +360,24 @@ async def test_interrupt_drain_timeout_closes_client(brain, monkeypatch):
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+
+async def test_interrupt_call_itself_timing_out_closes_client(brain, monkeypatch):
+    """client.interrupt() (the control-request call, not the drain) can hang
+    too — the SDK awaits an ack for up to 60s. That must also be bounded by
+    interrupt_drain_s and close the client rather than hang."""
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+
+    async def slow_interrupt():
+        await asyncio.sleep(10)
+
+    client.interrupt = slow_interrupt
+    brain.s = Settings(interrupt_drain_s=0)
+
+    await asyncio.wait_for(brain.interrupt(), 1)
+
+    assert brain._client is None
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task

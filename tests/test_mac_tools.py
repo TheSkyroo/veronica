@@ -1,4 +1,7 @@
+import asyncio
+import contextlib
 import subprocess
+import time
 
 import pytest
 
@@ -123,6 +126,30 @@ async def test_timeout_is_error(monkeypatch):
     monkeypatch.setattr(mac.subprocess, "run", run)
     res = await mac.applescript.handler({"script": "delay 100"})
     assert res["is_error"]
+
+
+async def test_handlers_do_not_block_loop(monkeypatch):
+    def blocking_run(argv, **kw):
+        time.sleep(0.2)
+        return Done(out="OUT")
+
+    monkeypatch.setattr(mac.subprocess, "run", blocking_run)
+
+    ticks = []
+
+    async def ticker():
+        while True:
+            await asyncio.sleep(0.05)
+            ticks.append(time.monotonic())
+
+    ticker_task = asyncio.create_task(ticker())
+    try:
+        await mac.applescript.handler({"script": "delay 1"})
+    finally:
+        ticker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ticker_task
+    assert len(ticks) >= 2
 
 
 def test_server_and_names():
