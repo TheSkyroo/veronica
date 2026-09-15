@@ -43,6 +43,7 @@ class Orchestrator:
         self._speech_lock = asyncio.Lock()
         self._speech_queue: asyncio.Queue | None = None
         self._confirm_capturing = False
+        self._barged = False
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -81,6 +82,7 @@ class Orchestrator:
     async def handle_text(self, text: str) -> list[str]:
         """Ask the brain and speak each sentence; synth N+1 overlaps playback of N."""
         self._set("thinking")
+        self._barged = False   # fresh turn: any earlier barge no longer applies
         t0 = time.monotonic()
         spoken: list[str] = []
         first = True
@@ -189,9 +191,19 @@ class Orchestrator:
             # as a belt-and-braces guard against ever hanging here.
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(queue.join(), timeout=self.s.brain_timeout_s)
+        if self._barged:
+            # a barge landed while we were waiting for the queue to drain;
+            # the turn this confirmation belongs to is already being torn
+            # down, so don't speak the prompt or eat the follow-up capture.
+            log.info("confirm aborted by barge")
+            return False
         async with self._speech_lock:
             self.player.reset()
             await self._say_unlocked(f"Run {summary}?")
+            if self._barged:
+                # barged while the prompt was being spoken.
+                log.info("confirm aborted by barge")
+                return False
             self._confirm_capturing = True
             try:
                 pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
@@ -219,6 +231,7 @@ class Orchestrator:
                     # thread so it returns None promptly instead of being
                     # orphaned when we cancel the turn below.
                     self.recorder.stop()
+                self._barged = True
                 turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await turn

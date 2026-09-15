@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import datetime as dt
 
 import pytest
@@ -220,7 +221,7 @@ async def test_interrupt_without_client_is_noop(brain):
     await brain.interrupt()  # must not raise
 
 
-async def test_interrupt_calls_client(brain):
+async def test_interrupt_after_completed_ask_is_noop(brain):
     [s async for s in brain.ask("x")]
     client = FakeClient.instances[0]
     client.interrupts = 0
@@ -229,13 +230,58 @@ async def test_interrupt_calls_client(brain):
         client.interrupts += 1
 
     client.interrupt = interrupt
+
+    await asyncio.wait_for(brain.interrupt(), 0.5)
+
+    assert client.interrupts == 0     # no turn in flight: no control request, no drain
+    assert brain._client is not None
+
+
+async def _consume(agen):
+    return [s async for s in agen]
+
+
+async def _start_in_flight_ask(brain, monkeypatch, hang_after_first=True):
+    """Puts brain into _in_flight state by starting ask() against a client
+    whose stream yields one message then blocks forever, and running that
+    ask() as a background task. Returns (task, client)."""
+    class BlockingClient(FakeClient):
+        async def receive_response(self):
+            yield _Assistant("Hello there.")
+            if hang_after_first:
+                await asyncio.Event().wait()   # never set: simulates a stalled turn
+
+    monkeypatch.setattr(Brain, "_client_cls", BlockingClient)
+    task = asyncio.create_task(_consume(brain.ask("x")))
+    # let the task run past client.query() (sets _in_flight) and block on the
+    # second message.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    return task, FakeClient.instances[0]
+
+
+async def test_interrupt_calls_client(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        yield _Result("s")   # drain sees the turn end immediately
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
     await brain.interrupt()
     assert client.interrupts == 1
 
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
-async def test_interrupt_drains_leftover_stream(brain):
-    [s async for s in brain.ask("x")]
-    client = FakeClient.instances[0]
+
+async def test_interrupt_drains_leftover_stream(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
     client.interrupts = 0
     client.drained = []
 
@@ -256,10 +302,13 @@ async def test_interrupt_drains_leftover_stream(brain):
     assert len(client.drained) == 3   # both leftover assistant messages + the ResultMessage
     assert brain._client is not None
 
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
-async def test_interrupt_drain_timeout_closes_client(brain):
-    [s async for s in brain.ask("x")]
-    client = FakeClient.instances[0]
+
+async def test_interrupt_drain_timeout_closes_client(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
     client.interrupts = 0
 
     async def interrupt():
@@ -276,3 +325,7 @@ async def test_interrupt_drain_timeout_closes_client(brain):
     await brain.interrupt()
 
     assert brain._client is None
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task

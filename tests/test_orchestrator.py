@@ -619,7 +619,7 @@ class ConfirmDuringBargeBrain:
     async def ask(self, text):
         yield "First."
         self.results.append(await self.orch.confirm("Bash: rm x"))
-        yield "Second."   # pragma: no cover - unreachable once barged
+        yield "Second."
 
     async def interrupt(self):
         pass
@@ -635,6 +635,67 @@ async def test_barge_during_confirm_stops_capture():
     assert o.brain.results == [False]                 # confirm() returned False, not orphaned
     assert rec.stops == 1                              # in-flight confirm capture was stopped
     assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
+    assert o.tts.said == ["First.", "Run Bash: rm x?"]
+
+
+async def test_barge_during_confirm_prompt_aborts_confirm():
+    """A barge that lands while confirm() is still speaking (or waiting to
+    speak) its "Run X?" prompt must not fall through to capture() and eat
+    the user's follow-up — confirm() should observe the barge and bail."""
+    release_ev = asyncio.Event()
+
+    class PromptBlockingTTS:
+        """asynth for the confirm prompt blocks until player.stop() (called
+        by the barge branch) releases it — simulating the barge interrupting
+        the prompt while it's being spoken."""
+        def __init__(self):
+            self.said = []
+
+        async def asynth(self, text):
+            self.said.append(text)
+            if text.startswith("Run "):
+                await release_ev.wait()
+            return np.zeros(10, dtype=np.float32), 24000
+
+    class ReleasingPlayer:
+        def __init__(self):
+            self.played = 0
+            self.stops = 0
+
+        async def play(self, s):
+            self.played += 1
+
+        def stop(self):
+            self.stops += 1
+            release_ev.set()
+
+        def reset(self):
+            pass
+
+    class CountingRec:
+        def __init__(self, pcms):
+            self.pcms = list(pcms)
+            self.captures = 0
+
+        async def capture(self, max_s=None):
+            self.captures += 1
+            return self.pcms.pop(0) if self.pcms else None
+
+        def stop(self):
+            pass   # never reached: confirm() bails before it would capture
+
+    o, states = build(rec_pcms=[], stt_texts=["first"])
+    o.tts = PromptBlockingTTS()
+    o.player = ReleasingPlayer()
+    rec = CountingRec([np.zeros(1, np.int16), None])
+    o.recorder = rec
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = ConfirmDuringBargeBrain(o)
+    await o.one_turn()
+
+    assert o.brain.results == [False]                 # confirm() bailed, didn't hang or raise
+    assert rec.captures == 2                           # initial listen + post-barge re-listen only
+    assert "listening" in states[states.index("speaking") + 1:]
 
 
 async def test_no_barge_listener_stopped_when_turn_ends():

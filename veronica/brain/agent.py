@@ -54,6 +54,7 @@ class Brain:
         self.s = settings
         self._confirm = confirm
         self._client = None
+        self._in_flight = False
 
     # -- session persistence --------------------------------------------------
     def _load_session(self) -> str | None:
@@ -126,36 +127,44 @@ class Brain:
         splitter = SentenceSplitter()
         try:
             await client.query(text)
+            self._in_flight = True
             it = client.receive_response().__aiter__()
-            while True:
-                try:
-                    async with asyncio.timeout(self.s.brain_timeout_s):
-                        msg = await anext(it, None)
-                except TimeoutError:
-                    log.warning("brain timeout after %ss", self.s.brain_timeout_s)
-                    await self.close()
-                    yield "Taking too long, cancelled."
-                    return
-
-                if msg is None:
-                    break
-
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            for sent in splitter.feed(block.text):
-                                yield sent
-                elif isinstance(msg, ResultMessage):
-                    if getattr(msg, "is_error", False):
-                        log.error(
-                            "brain error result: %s %s",
-                            msg.result,
-                            getattr(msg, "errors", None),
-                        )
+            try:
+                while True:
+                    try:
+                        async with asyncio.timeout(self.s.brain_timeout_s):
+                            msg = await anext(it, None)
+                    except TimeoutError:
+                        log.warning("brain timeout after %ss", self.s.brain_timeout_s)
                         await self.close()
-                        yield "Claude returned an error, check the log."
+                        yield "Taking too long, cancelled."
                         return
-                    self._save_session(msg.session_id)
+
+                    if msg is None:
+                        break
+
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, TextBlock):
+                                for sent in splitter.feed(block.text):
+                                    yield sent
+                    elif isinstance(msg, ResultMessage):
+                        if getattr(msg, "is_error", False):
+                            log.error(
+                                "brain error result: %s %s",
+                                msg.result,
+                                getattr(msg, "errors", None),
+                            )
+                            await self.close()
+                            yield "Claude returned an error, check the log."
+                            return
+                        self._save_session(msg.session_id)
+                        self._in_flight = False
+            finally:
+                # Covers cancellation (e.g. the consuming task is cancelled
+                # at anext) as well as normal/early exits above that didn't
+                # already clear the flag.
+                self._in_flight = False
         except Exception:
             await self.close()
             raise
@@ -178,8 +187,13 @@ class Brain:
         doesn't read a stale tail or a stale ResultMessage. If the drain
         hangs or fails, the client is closed so the next ask() reconnects
         (resuming the saved session).
+
+        A no-op if no turn is currently in flight (e.g. barging in while
+        Veronica is only replaying already-generated speech): sending an SDK
+        control request and draining a stream that has nothing left to
+        interrupt would just stall for interrupt_drain_s for no reason.
         """
-        if self._client is None:
+        if self._client is None or not self._in_flight:
             return
         try:
             await self._client.interrupt()
