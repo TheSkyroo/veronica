@@ -32,7 +32,11 @@ class _Assistant:
     def __init__(self, *texts): self.content = [_Text(t) for t in texts]
 
 class _Result:
-    def __init__(self, sid): self.session_id = sid; self.result = None; self.terminal_reason = "success"
+    def __init__(self, sid):
+        self.session_id = sid
+        self.result = None
+        self.terminal_reason = "success"
+        self.is_error = False
 
 
 class FakeClient:
@@ -41,11 +45,15 @@ class FakeClient:
     def __init__(self, options=None):
         self.options = options
         self.queries = []
+        self.disconnect_calls = 0
         self.script = [_Assistant("Hello there. How "), _Assistant("are you?"), _Result("sess-1")]
         FakeClient.instances.append(self)
 
     async def connect(self): pass
-    async def disconnect(self): pass
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+
     async def query(self, prompt): self.queries.append(prompt)
 
     async def receive_response(self):
@@ -81,6 +89,7 @@ async def test_options_wired(brain):
     assert o.permission_mode == "default"
     assert "You are Veronica" in o.system_prompt
     assert o.can_use_tool is not None
+    assert o.setting_sources == []
 
 
 async def test_resume_from_saved_session(brain, tmp_home):
@@ -109,3 +118,61 @@ async def test_timeout_yields_message(brain, monkeypatch):
     brain.s = Settings(brain_timeout_s=0)
     out = [s async for s in brain.ask("x")]
     assert out == ["Taking too long, cancelled."]
+    assert brain._client is None
+    assert FakeClient.instances[0].disconnect_calls == 1
+
+
+async def test_connect_failure_resets_client(brain, monkeypatch):
+    class BadClient(FakeClient):
+        async def connect(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(Brain, "_client_cls", BadClient)
+    with pytest.raises(RuntimeError):
+        [s async for s in brain.ask("x")]
+    assert brain._client is None
+
+
+async def test_stale_session_cleared_and_retried(brain, tmp_home, monkeypatch):
+    (tmp_home / "session").write_text("old-sess")
+
+    class FlakyClient(FakeClient):
+        async def connect(self):
+            if self.options.resume == "old-sess":
+                raise RuntimeError("stale session rejected")
+
+    monkeypatch.setattr(Brain, "_client_cls", FlakyClient)
+    FakeClient.instances.clear()
+
+    out = [s async for s in brain.ask("x")]
+
+    assert out == ["Hello there.", "How are you?"]
+    assert "old-sess" not in (tmp_home / "session").read_text()
+    assert len(FlakyClient.instances) == 2
+
+
+async def test_error_result_speaks_error(brain, tmp_home, monkeypatch):
+    class ErrClient(FakeClient):
+        def __init__(self, options=None):
+            super().__init__(options)
+            r = _Result("sess-err")
+            r.is_error = True
+            r.result = "rate limited"
+            self.script = [r]
+
+    monkeypatch.setattr(Brain, "_client_cls", ErrClient)
+    out = [s async for s in brain.ask("x")]
+    assert out == ["Claude returned an error, check the log."]
+    assert brain._client is None
+    assert not (tmp_home / "session").exists()
+
+
+async def test_stream_exception_closes_client(brain, monkeypatch):
+    async def boom(self):
+        raise RuntimeError("stream broke")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(FakeClient, "receive_response", boom)
+    with pytest.raises(RuntimeError):
+        [s async for s in brain.ask("x")]
+    assert brain._client is None

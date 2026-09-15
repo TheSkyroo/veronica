@@ -49,6 +49,10 @@ class Brain:
         self.s.session_file.parent.mkdir(parents=True, exist_ok=True)
         self.s.session_file.write_text(sid)
 
+    def _clear_session(self) -> None:
+        if self.s.session_file.exists():
+            self.s.session_file.unlink()
+
     # -- permission gate ------------------------------------------------------
     async def _can_use_tool(self, tool_name: str, input: dict, context):
         summary = summarize_tool(tool_name, input)
@@ -57,20 +61,43 @@ class Brain:
             return PermissionResultAllow(updated_input=input)
         return PermissionResultDeny(message="user declined")
 
-    def _options(self) -> ClaudeAgentOptions:
+    def _options(self, resume: str | None) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
             system_prompt=system_prompt(dt.date.today()),
             effort=self.s.effort,
             max_turns=self.s.max_turns,
             permission_mode="default",
             can_use_tool=self._can_use_tool,
-            resume=self._load_session(),
+            resume=resume,
+            # Only our confirmation gate may allow tools; ignore any
+            # ~/.claude/settings.json (or project/local) permissions.allow
+            # rules that would otherwise bypass can_use_tool entirely.
+            setting_sources=[],
         )
 
     async def _ensure_client(self):
-        if self._client is None:
-            self._client = self._client_cls(options=self._options())
-            await self._client.connect()
+        if self._client is not None:
+            return self._client
+
+        resume = self._load_session()
+        client = self._client_cls(options=self._options(resume))
+        try:
+            await client.connect()
+        except Exception:
+            if resume is not None:
+                log.warning("stale session cleared")
+                self._clear_session()
+                client = self._client_cls(options=self._options(None))
+                try:
+                    await client.connect()
+                except Exception:
+                    self._client = None
+                    raise
+            else:
+                self._client = None
+                raise
+
+        self._client = client
         return self._client
 
     # -- public ---------------------------------------------------------------
@@ -78,21 +105,40 @@ class Brain:
         client = await self._ensure_client()
         splitter = SentenceSplitter()
         await client.query(text)
+        it = client.receive_response().__aiter__()
         try:
-            async with asyncio.timeout(self.s.brain_timeout_s):
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                for sent in splitter.feed(block.text):
-                                    yield sent
-                    elif isinstance(msg, ResultMessage):
-                        self._save_session(msg.session_id)
-        except TimeoutError:
-            log.warning("brain timeout after %ss", self.s.brain_timeout_s)
+            while True:
+                try:
+                    async with asyncio.timeout(self.s.brain_timeout_s):
+                        msg = await anext(it, None)
+                except TimeoutError:
+                    log.warning("brain timeout after %ss", self.s.brain_timeout_s)
+                    await self.close()
+                    yield "Taking too long, cancelled."
+                    return
+
+                if msg is None:
+                    break
+
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            for sent in splitter.feed(block.text):
+                                yield sent
+                elif isinstance(msg, ResultMessage):
+                    if getattr(msg, "is_error", False):
+                        log.error(
+                            "brain error result: %s %s",
+                            msg.result,
+                            getattr(msg, "errors", None),
+                        )
+                        await self.close()
+                        yield "Claude returned an error, check the log."
+                        return
+                    self._save_session(msg.session_id)
+        except Exception:
             await self.close()
-            yield "Taking too long, cancelled."
-            return
+            raise
         for sent in splitter.flush():
             yield sent
 
