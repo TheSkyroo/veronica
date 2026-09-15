@@ -14,8 +14,8 @@ class FakeKokoro:
         return np.zeros(240, dtype=np.float32), 24000
 
 
-def test_synth_returns_samples(tmp_path):
-    Synthesizer._kokoro_cls = FakeKokoro
+def test_synth_returns_samples(tmp_path, monkeypatch):
+    monkeypatch.setattr(Synthesizer, "_kokoro_cls", FakeKokoro)
     s = Synthesizer(voice="af_sarah", models_dir=tmp_path)
     samples, sr = s.synth("hello")
     assert sr == 24000
@@ -23,8 +23,8 @@ def test_synth_returns_samples(tmp_path):
     assert s._engine.calls == [("hello", "af_sarah")]
 
 
-async def test_asynth(tmp_path):
-    Synthesizer._kokoro_cls = FakeKokoro
+async def test_asynth(tmp_path, monkeypatch):
+    monkeypatch.setattr(Synthesizer, "_kokoro_cls", FakeKokoro)
     s = Synthesizer(voice="af_sarah", models_dir=tmp_path)
     samples, sr = await s.asynth("hi")
     assert len(samples) == 240

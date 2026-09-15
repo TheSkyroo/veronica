@@ -17,7 +17,13 @@ def main() -> None:
             print(f"ok      {dest}")
             continue
         print(f"fetch   {url}")
-        urllib.request.urlretrieve(url, dest)
+        part = dest.with_suffix(dest.suffix + ".part")
+        try:
+            urllib.request.urlretrieve(url, part)
+            part.rename(dest)
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
         print(f"saved   {dest}")
 
     import openwakeword
