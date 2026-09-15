@@ -11,7 +11,7 @@ def test_defaults(tmp_home):
     assert s.followup_window_s == 8
     assert s.confirm_listen_s == 5
     assert s.brain_timeout_s == 60
-    assert s.wake_model == "hey_jarvis"
+    assert s.wake_model == "hey_veronica"
     assert s.session_file == tmp_home / "session"
     assert s.log_file == tmp_home / "logs" / "veronica.log"
 

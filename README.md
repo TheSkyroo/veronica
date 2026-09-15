@@ -1,6 +1,6 @@
 # Veronica
 
-macOS voice assistant. Say "Hey Veronica" (Phase 1: "Hey Jarvis"), ask, listen.
+macOS voice assistant. Say "Hey Veronica" once you have trained the custom model (see scripts/train_wakeword.md); until then say "Hey Jarvis", ask, listen.
 Brain = Claude via your Claude Code login. Speech = local (faster-whisper + Kokoro).
 
 ## Setup

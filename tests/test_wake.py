@@ -45,3 +45,38 @@ async def test_threshold_respected(monkeypatch):
     w = WakeWord(Settings(wake_threshold=0.5), frames=f)
     await w.wait()
     assert seen == [".", ".", "w"]
+
+
+def test_custom_model_used_when_present(monkeypatch, tmp_home):
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    models_dir = tmp_home / "models"
+    models_dir.mkdir(parents=True)
+    custom_path = models_dir / "hey_veronica.onnx"
+    custom_path.write_bytes(b"fake")
+
+    w = WakeWord(Settings(wake_model="hey_veronica"), frames=lambda: frames(""))
+
+    assert w._model.name == str(custom_path)
+    assert w._key == "hey_veronica"
+
+
+def test_falls_back_to_hey_jarvis_when_custom_missing(monkeypatch, tmp_home, caplog):
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+
+    with caplog.at_level("WARNING", logger="veronica.audio"):
+        w = WakeWord(Settings(wake_model="hey_veronica"), frames=lambda: frames(""))
+
+    assert w._model.name == "hey_jarvis"
+    assert w._key == "hey_jarvis"
+    assert any("hey_veronica" in r.message and "hey_jarvis" in r.message for r in caplog.records)
+
+
+def test_pretrained_model_passes_through_unchanged(monkeypatch, tmp_home, caplog):
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+
+    with caplog.at_level("WARNING", logger="veronica.audio"):
+        w = WakeWord(Settings(wake_model="hey_jarvis"), frames=lambda: frames(""))
+
+    assert w._model.name == "hey_jarvis"
+    assert w._key == "hey_jarvis"
+    assert not any(r.levelname == "WARNING" for r in caplog.records)

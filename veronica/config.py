@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     confirm_listen_s: int = 5
 
     # wake word
-    wake_model: str = "hey_jarvis"
+    wake_model: str = "hey_veronica"
     wake_threshold: float = 0.5
 
     # speech
