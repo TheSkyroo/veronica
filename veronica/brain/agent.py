@@ -127,44 +127,45 @@ class Brain:
         splitter = SentenceSplitter()
         try:
             await client.query(text)
+            # _in_flight means "the SDK turn started and hasn't yet been
+            # observed to end" — independent of what happens to whoever is
+            # consuming this generator. It must stay True if the consuming
+            # task is cancelled (e.g. barged), so a later interrupt() still
+            # sends the control request and drains the stream; it's cleared
+            # only when the turn actually ends (a ResultMessage is seen, in
+            # close(), or after interrupt()'s drain completes).
             self._in_flight = True
             it = client.receive_response().__aiter__()
-            try:
-                while True:
-                    try:
-                        async with asyncio.timeout(self.s.brain_timeout_s):
-                            msg = await anext(it, None)
-                    except TimeoutError:
-                        log.warning("brain timeout after %ss", self.s.brain_timeout_s)
+            while True:
+                try:
+                    async with asyncio.timeout(self.s.brain_timeout_s):
+                        msg = await anext(it, None)
+                except TimeoutError:
+                    log.warning("brain timeout after %ss", self.s.brain_timeout_s)
+                    await self.close()
+                    yield "Taking too long, cancelled."
+                    return
+
+                if msg is None:
+                    break
+
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            for sent in splitter.feed(block.text):
+                                yield sent
+                elif isinstance(msg, ResultMessage):
+                    self._in_flight = False   # turn ended, error or not
+                    if getattr(msg, "is_error", False):
+                        log.error(
+                            "brain error result: %s %s",
+                            msg.result,
+                            getattr(msg, "errors", None),
+                        )
                         await self.close()
-                        yield "Taking too long, cancelled."
+                        yield "Claude returned an error, check the log."
                         return
-
-                    if msg is None:
-                        break
-
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                for sent in splitter.feed(block.text):
-                                    yield sent
-                    elif isinstance(msg, ResultMessage):
-                        if getattr(msg, "is_error", False):
-                            log.error(
-                                "brain error result: %s %s",
-                                msg.result,
-                                getattr(msg, "errors", None),
-                            )
-                            await self.close()
-                            yield "Claude returned an error, check the log."
-                            return
-                        self._save_session(msg.session_id)
-                        self._in_flight = False
-            finally:
-                # Covers cancellation (e.g. the consuming task is cancelled
-                # at anext) as well as normal/early exits above that didn't
-                # already clear the flag.
-                self._in_flight = False
+                    self._save_session(msg.session_id)
         except Exception:
             await self.close()
             raise
@@ -177,6 +178,7 @@ class Brain:
                 await self._client.disconnect()
             finally:
                 self._client = None
+        self._in_flight = False
 
     async def interrupt(self) -> None:
         """Stop the in-flight turn, if any. Safe to call when idle.
@@ -209,6 +211,7 @@ class Brain:
                     if isinstance(msg, ResultMessage):
                         break
             log.info("drained %d message(s) after interrupt", drained)
+            self._in_flight = False   # the drain saw the turn end (a ResultMessage or EOF)
         except Exception:
             log.exception("drain after interrupt failed; closing client")
             await self.close()

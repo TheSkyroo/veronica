@@ -241,22 +241,21 @@ async def _consume(agen):
     return [s async for s in agen]
 
 
-async def _start_in_flight_ask(brain, monkeypatch, hang_after_first=True):
+async def _start_in_flight_ask(brain, monkeypatch):
     """Puts brain into _in_flight state by starting ask() against a client
     whose stream yields one message then blocks forever, and running that
     ask() as a background task. Returns (task, client)."""
+    about_to_hang = asyncio.Event()
+
     class BlockingClient(FakeClient):
         async def receive_response(self):
             yield _Assistant("Hello there.")
-            if hang_after_first:
-                await asyncio.Event().wait()   # never set: simulates a stalled turn
+            about_to_hang.set()
+            await asyncio.Event().wait()   # never set: simulates a stalled turn
 
     monkeypatch.setattr(Brain, "_client_cls", BlockingClient)
     task = asyncio.create_task(_consume(brain.ask("x")))
-    # let the task run past client.query() (sets _in_flight) and block on the
-    # second message.
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await about_to_hang.wait()   # ask() is past client.query() (sets _in_flight) and hung
     return task, FakeClient.instances[0]
 
 
@@ -305,6 +304,38 @@ async def test_interrupt_drains_leftover_stream(brain, monkeypatch):
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+
+async def test_interrupt_after_consumer_cancelled_still_interrupts(brain, monkeypatch):
+    """Mirrors the real barge path: the orchestrator cancels the turn (the
+    task consuming ask()) BEFORE calling brain.interrupt(). Cancelling the
+    consumer must not clear _in_flight — the SDK turn is still running from
+    Claude's point of view until interrupt()+drain actually observes it end."""
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    client.interrupts = 0
+    client.drained = []
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        for m in [_Assistant("leftover"), _Result("s")]:
+            client.drained.append(m)
+            yield m
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+
+    await brain.interrupt()
+
+    assert client.interrupts == 1
+    assert len(client.drained) == 2
+    assert brain._in_flight is False
 
 
 async def test_interrupt_drain_timeout_closes_client(brain, monkeypatch):
