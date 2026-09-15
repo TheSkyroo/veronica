@@ -57,6 +57,20 @@ async def test_handle_text_speaks_each_sentence():
     assert states[:2] == ["thinking", "speaking"]
 
 
+async def test_chime_after_wake_and_on_followup():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    await o.one_turn()
+    # chime samples go through player.play like speech; count plays: wake chime + 2 sentences + followup chime
+    assert o.player.played == 4
+
+
+async def test_chime_skipped_when_muted():
+    o, _ = build()
+    o.muted = True
+    await o.chime(880, 120)
+    assert o.player.played == 0
+
+
 async def test_confirm_yes_and_no():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["Yes, do it", "nah"])
     assert await o.confirm("Bash: ls") is True

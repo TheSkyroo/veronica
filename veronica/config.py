@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     frame_ms: int = 30                 # webrtcvad frame size
     vad_aggressiveness: int = 2        # 0-3
-    vad_silence_ms: int = 700
+    vad_silence_ms: int = 800
     max_utterance_s: int = 15
     min_speech_ms: int = 300
     followup_window_s: int = 8
@@ -26,10 +26,15 @@ class Settings(BaseSettings):
     wake_model: str = "hey_veronica"
     wake_threshold: float = 0.5
     wake_retry_s: int = 10
+    barge_threshold: float = 0.8
 
     # speech
-    whisper_model: str = "base.en"
+    whisper_model: str = "small.en"
     kokoro_voice: str = "af_sarah"
+
+    # chimes (Hz)
+    chime_wake_hz: int = 880
+    chime_followup_hz: int = 660
 
     # brain
     brain_timeout_s: int = 60

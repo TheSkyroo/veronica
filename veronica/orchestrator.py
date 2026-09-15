@@ -4,6 +4,7 @@ import re
 import time
 from collections.abc import Callable
 
+from veronica.audio.chime import tone
 from veronica.config import Settings
 
 log = logging.getLogger("veronica.orchestrator")
@@ -53,6 +54,13 @@ class Orchestrator:
         async with self._speech_lock:
             await self._say_unlocked(text)
 
+    async def chime(self, freq_hz: float, ms: int) -> None:
+        if self.muted:
+            return
+        async with self._speech_lock:
+            self.player.reset()
+            await self.player.play(tone(freq_hz, ms))
+
     async def handle_text(self, text: str) -> list[str]:
         """Ask the brain and speak each sentence as it arrives. Returns sentences."""
         self._set("thinking")
@@ -86,6 +94,7 @@ class Orchestrator:
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
         self._set("listening")
+        await self.chime(self.s.chime_wake_hz, 120)
         pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
         if pcm is None:
             self._set("idle")
@@ -99,6 +108,7 @@ class Orchestrator:
             else:
                 await self.handle_text(text)
             self._set("followup")
+            await self.chime(self.s.chime_followup_hz, 100)
             pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s))
             if pcm is None:
                 break
