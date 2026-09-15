@@ -16,7 +16,7 @@ class Rec:
 
 class STT:
     def __init__(self, texts): self.texts = list(texts)
-    async def atranscribe(self, pcm): return self.texts.pop(0)
+    async def atranscribe(self, pcm): return self.texts.pop(0) if self.texts else None
 
 class Brain:
     def __init__(self): self.asked = []
@@ -163,24 +163,34 @@ class TrackingTTS:
         self.said = []
         self.in_progress = 0
         self.max_in_progress = 0
+        self._texts_by_index = []
 
     async def asynth(self, text):
         self.in_progress += 1
         self.max_in_progress = max(self.max_in_progress, self.in_progress)
         self.said.append(text)
+        idx = len(self._texts_by_index)
+        self._texts_by_index.append(text)
         await asyncio.sleep(0)
         self.in_progress -= 1
-        return np.zeros(10, dtype=np.float32), 24000
+        # encode the index into the sample array so the player can recover
+        # which text a given sample array corresponds to, since the pipeline
+        # may synthesize sentences out of play order.
+        return np.full(1, idx, dtype=np.float32), 24000
 
 
 class TrackingPlayer:
-    def __init__(self):
+    def __init__(self, tts):
+        self.tts = tts
         self.in_progress = 0
         self.max_in_progress = 0
+        self.played_texts = []
 
     async def play(self, s):
         self.in_progress += 1
         self.max_in_progress = max(self.max_in_progress, self.in_progress)
+        idx = int(s[0])
+        self.played_texts.append(self.tts._texts_by_index[idx])
         await asyncio.sleep(0)
         self.in_progress -= 1
 
@@ -203,7 +213,7 @@ class ConfirmingBrain:
 
 async def test_confirm_does_not_race_handle_text_speech():
     tts = TrackingTTS()
-    player = TrackingPlayer()
+    player = TrackingPlayer(tts)
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
         wake=Wake(), recorder=Rec([np.zeros(1, np.int16)]), stt=STT(["yes"]),
@@ -214,8 +224,12 @@ async def test_confirm_does_not_race_handle_text_speech():
     out = await o.handle_text("hello")
 
     assert out == ["First.", "Second."]
-    assert tts.said == ["First.", "Run Bash: ls?", "Second."]
-    assert tts.max_in_progress == 1
+    # With the pipeline, the producer may synthesize "Second." ahead of the
+    # confirm prompt's synth, so synth order is not guaranteed. What must be
+    # guaranteed is *play* order (nothing is heard out of sequence) and that
+    # playback never overlaps (confirm's speech + handle_text's speech share
+    # _speech_lock).
+    assert player.played_texts == ["First.", "Run Bash: ls?", "Second."]
     assert player.max_in_progress == 1
 
 
@@ -252,7 +266,10 @@ async def test_muted_handle_text_speaks_nothing():
     o.muted = True
     out = await o.handle_text("hello")
     assert out == ["Sure.", "Done."]
-    assert o.tts.said == []
+    # The pipeline synthesizes ahead of playback regardless of mute (the
+    # producer doesn't know the mute state is meant to silence output), but
+    # nothing actually reaches the speaker: the consumer skips player.play().
+    assert o.player.played == 0
 
 
 # -- finding 7: wake failures are retried, not fatal; login errors speak ------
@@ -314,3 +331,51 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
         await o.run_forever()
 
     assert "Claude Code isn't logged in." in o.tts.said
+
+
+# -- task 5: warm-up + pipelined TTS ------------------------------------------
+
+async def test_warmup_touches_tts_and_stt():
+    o, _ = build()
+    await o.warmup()
+    assert o.tts.said == ["ok"] and o.ready is True
+
+
+async def test_warmup_without_stt():
+    o, _ = build()
+    o.stt = None
+    await o.warmup()
+    assert o.ready is True
+
+
+async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
+    import asyncio
+
+    order = []
+
+    class SlowTTS:
+        async def asynth(self, text):
+            order.append(("synth", text))
+            await asyncio.sleep(0.01)
+            return np.zeros(10, dtype=np.float32), 24000
+
+    class SlowPlayer:
+        def __init__(self): self.played = []; self.resets = 0
+        async def play(self, s):
+            order.append(("play", len(self.played))); self.played.append(s); await asyncio.sleep(0.02)
+        def stop(self): pass
+        def reset(self): self.resets += 1
+
+    class Brain3:
+        async def ask(self, text):
+            for s in ["A.", "B.", "C."]:
+                yield s
+
+    o, _ = build()
+    o.tts, o.player, o.brain = SlowTTS(), SlowPlayer(), Brain3()
+    out = await o.handle_text("x")
+    assert out == ["A.", "B.", "C."]
+    assert [t for k, t in order if k == "synth"] == ["A.", "B.", "C."]
+    assert len(o.player.played) == 3
+    # synth of B must start before play of A finishes: synth B appears before play 1
+    assert order.index(("synth", "B.")) < order.index(("play", 1))

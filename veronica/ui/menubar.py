@@ -7,7 +7,7 @@ import rumps
 from veronica.__main__ import build_orchestrator
 from veronica.config import settings
 
-ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕"}
+ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…"}
 
 
 class VeronicaApp(rumps.App):
@@ -28,6 +28,7 @@ class VeronicaApp(rumps.App):
         asyncio.set_event_loop(self._loop)
         try:
             self._orch = build_orchestrator(settings, on_state=self._on_state)
+            self._loop.run_until_complete(self._orch.warmup())
             self._loop.run_until_complete(self._orch.run_forever())
         except Exception as e:  # surface startup failures (no mic, not logged in)
             if self._quitting:

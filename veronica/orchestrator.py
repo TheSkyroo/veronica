@@ -1,8 +1,11 @@
 import asyncio
+import contextlib
 import logging
 import re
 import time
 from collections.abc import Callable
+
+import numpy as np
 
 from veronica.audio.chime import tone
 from veronica.config import Settings
@@ -36,7 +39,20 @@ class Orchestrator:
         self._on_state = on_state or (lambda _: None)
         self.state = "idle"
         self.muted = False
+        self.ready = False
         self._speech_lock = asyncio.Lock()
+        self._speech_queue: asyncio.Queue | None = None
+
+    async def warmup(self) -> None:
+        """Load models before the first turn so the first answer isn't slow."""
+        self._set("warming")
+        t0 = time.monotonic()
+        await self.tts.asynth("ok")
+        if self.stt is not None:
+            await self.stt.atranscribe(np.zeros(16000, dtype=np.int16))
+        log.info("warmup done in %.1fs", time.monotonic() - t0)
+        self.ready = True
+        self._set("idle")
 
     def _set(self, state: str) -> None:
         self.state = state
@@ -62,23 +78,60 @@ class Orchestrator:
             await self.player.play(tone(freq_hz, ms))
 
     async def handle_text(self, text: str) -> list[str]:
-        """Ask the brain and speak each sentence as it arrives. Returns sentences."""
+        """Ask the brain and speak each sentence; synth N+1 overlaps playback of N."""
         self._set("thinking")
         t0 = time.monotonic()
         spoken: list[str] = []
         self.player.reset()
-        async for sent in self.brain.ask(text):
-            if not spoken:
-                self._set("speaking")
-                log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
-            spoken.append(sent)
-            await self.say(sent)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+
+        async def producer():
+            try:
+                async for sent in self.brain.ask(text):
+                    spoken.append(sent)
+                    samples, _ = await self.tts.asynth(sent)
+                    await queue.put((sent, samples))
+            finally:
+                await queue.put(None)
+
+        # Exposed so confirm() (which the brain may await mid-stream, e.g. as
+        # a tool-use confirmation gate) can wait for already-queued sentences
+        # to finish playing before it speaks its own prompt — otherwise it
+        # could win the _speech_lock race against the consumer below and
+        # jump the queue.
+        self._speech_queue = queue
+        prod = asyncio.create_task(producer())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                sent, samples = item
+                if len(spoken) and sent == spoken[0]:
+                    self._set("speaking")
+                    log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
+                if not self.muted:
+                    async with self._speech_lock:
+                        await self.player.play(samples)
+                queue.task_done()
+            await prod
+        except BaseException:
+            prod.cancel()
+            with contextlib.suppress(BaseException):
+                await prod
+            raise
+        finally:
+            self._speech_queue = None
         if not spoken:
             await self.say("I have nothing to say to that.")
         return spoken
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str) -> bool:
+        if self._speech_queue is not None:
+            # don't jump ahead of sentences already queued for playback by
+            # an in-flight handle_text pipeline.
+            await self._speech_queue.join()
         async with self._speech_lock:
             self.player.reset()
             await self._say_unlocked(f"Run {summary}?")
