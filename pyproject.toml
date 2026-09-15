@@ -28,5 +28,8 @@ addopts = "-m 'not live'"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+environments = ["sys_platform == 'darwin'"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["veronica"]

@@ -7,3 +7,4 @@ __pycache__/
 *.onnx
 credentials.json
 token.json
+uv.lock
