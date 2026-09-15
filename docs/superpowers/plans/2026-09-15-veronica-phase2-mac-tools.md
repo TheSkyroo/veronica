@@ -1027,19 +1027,14 @@ Run: `uv run pytest tests/test_orchestrator.py -q` → new tests FAIL (`BargeWak
                 return True
             self.wake.stop()
             await listener
-            return bool(turn.result() is None and False) if False else (turn.result(), False)[1]
+            turn.result()  # re-raise turn errors
+            return False
         finally:
             if not listener.done():
                 self.wake.stop()
                 with contextlib.suppress(BaseException):
                     await listener
 ```
-Simplify the return: replace the odd last line with:
-```python
-            turn.result()  # re-raise turn errors
-            return False
-```
-
 `one_turn` becomes:
 ```python
     async def one_turn(self) -> None:
@@ -1233,5 +1228,5 @@ git add -A && git commit -m "feat: confirming state, muted confirm, wake-retry i
 ## Self-review
 
 - **Spec coverage:** §1 classifier → T1, gate wiring → T2. §2 mac tools + registration + summaries → T3 (+T2 summaries). §3 barge-in → T6 (stop/threshold, dual-input check) + T7; spec's follow-up-window barge dropped by plan ruling (stated in Global Constraints); self-trigger guard implemented as constant 0.8 (ruling stated in T7). §4 small.en/VAD/chime → T4; pre-warm + pipelined TTS → T5. §5 backlog → T8 (wake-retry idle, muted confirm, y/N, confirming state, README). §6 tests → each task; live checks: T3 (Finder, Safari), T4 (small.en), T6 (dual input), T7 (manual barge), T8 (clipboard).
-- **Placeholders:** none. T7 Step 3 contains one deliberately-flagged garbled line that is immediately replaced by the simplified two-line return — implementers must use the simplified version.
+- **Placeholders:** none.
 - **Type consistency:** `WakeWord.wait(threshold) -> bool` used identically in T6/T7 fakes; `Brain.interrupt()` T2 ↔ T7; `classify` T1 ↔ T2 ↔ T8 (text mode relies on Brain auto-allow, doesn't call classify directly); `Orchestrator.chime(freq_hz, ms)` T4 ↔ T7; `player.played/stops/resets` counters as in Phase 1 test fakes.
