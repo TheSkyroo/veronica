@@ -27,7 +27,9 @@ def frames(pattern):
 
 def make(pattern, monkeypatch, **over):
     monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
-    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, **over)
+    defaults = {"vad_silence_ms": 90, "min_speech_ms": 60, "max_utterance_s": 1}
+    defaults.update(over)
+    s = Settings(**defaults)
     return Recorder(s, frames=lambda: frames(pattern))
 
 
@@ -53,3 +55,11 @@ async def test_max_utterance_cap(monkeypatch):
     r = make("s" * 200, monkeypatch)  # 6 s of speech, cap 1 s
     pcm = await r.capture()
     assert len(pcm) <= 16000 + FRAME
+
+
+async def test_max_s_does_not_cap_utterance(monkeypatch):
+    # 1 s wait budget, speech starts at frame 20 (600 ms) and runs 50 frames (1.5 s)
+    r = make("." * 20 + "s" * 50 + "....", monkeypatch, max_utterance_s=3)
+    pcm = await r.capture(max_s=1)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 53   # 50 speech + 3 silence frames

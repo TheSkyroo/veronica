@@ -26,13 +26,22 @@ class Recorder:
                 yield bytes(data)
 
     async def capture(self, max_s: int | None = None) -> np.ndarray | None:
+        """Capture one utterance, waiting for speech onset and endpointed by silence.
+
+        Args:
+            max_s: seconds to wait for speech to begin; None = wait forever.
+                   Utterance length is always capped by settings.max_utterance_s.
+
+        Returns:
+            int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
+        """
         return await asyncio.to_thread(self._capture, max_s)
 
     def _capture(self, max_s: int | None) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
         min_speech_frames = self.s.min_speech_ms // fm
-        max_frames = (max_s or self.s.max_utterance_s) * 1000 // fm
+        max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
 
         buf: list[bytes] = []
