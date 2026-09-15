@@ -39,7 +39,20 @@ def _q(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _guard(fn):
+    """Wrap a handler so malformed args (missing keys, bad types) return
+    `_err(...)` instead of raising — argument extraction happens before
+    `run()`'s own error handling, so it needs its own net."""
+    async def wrapper(args: dict) -> dict:
+        try:
+            return await fn(args)
+        except Exception as exc:
+            return _err(str(exc))
+    return wrapper
+
+
 @tool("open_app", "Open a macOS application by name, e.g. Safari", {"name": str})
+@_guard
 async def open_app(args: dict) -> dict:
     name = str(args["name"])
     if "/" in name or name.startswith(".") or name.startswith("-"):
@@ -48,6 +61,7 @@ async def open_app(args: dict) -> dict:
 
 
 @tool("open_url", "Open an http(s) URL in the default browser", {"url": str})
+@_guard
 async def open_url(args: dict) -> dict:
     url = str(args.get("url", ""))
     if not url.startswith(("http://", "https://")):
@@ -56,33 +70,43 @@ async def open_url(args: dict) -> dict:
 
 
 @tool("clipboard_read", "Read the current clipboard text", {})
+@_guard
 async def clipboard_read(args: dict) -> dict:
     return run(["pbpaste"])
 
 
 @tool("clipboard_write", "Replace the clipboard with the given text", {"text": str})
+@_guard
 async def clipboard_write(args: dict) -> dict:
     return run(["pbcopy"], stdin=str(args.get("text", "")))
 
 
 @tool("notify", "Show a macOS notification banner", {"title": str, "message": str})
+@_guard
 async def notify(args: dict) -> dict:
     script = f'display notification "{_q(str(args.get("message", "")))}" with title "{_q(str(args.get("title", "")))}"'
     return run(["osascript", "-e", script])
 
 
 @tool("volume_get", "Get system output volume (0-100)", {})
+@_guard
 async def volume_get(args: dict) -> dict:
     return run(["osascript", "-e", "output volume of (get volume settings)"])
 
 
 @tool("volume_set", "Set system output volume (0-100)", {"level": int})
+@_guard
 async def volume_set(args: dict) -> dict:
-    level = max(0, min(100, int(args.get("level", 0))))
+    try:
+        level = int(float(args.get("level", 0)))
+    except (TypeError, ValueError):
+        return _err("level must be a number 0-100")
+    level = max(0, min(100, level))
     return run(["osascript", "-e", f"set volume output volume {level}"])
 
 
 @tool("applescript", "Run an AppleScript snippet (powerful; user must confirm)", {"script": str})
+@_guard
 async def applescript(args: dict) -> dict:
     return run(["osascript", "-e", str(args.get("script", ""))])
 

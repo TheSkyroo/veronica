@@ -38,6 +38,21 @@ async def test_open_app_rejects_paths(fake_run):
     assert res["is_error"] and fake_run == []
 
 
+async def test_open_app_rejects_hidden(fake_run):
+    res = await mac.open_app.handler({"name": ".hidden"})
+    assert res["is_error"] and fake_run == []
+
+
+async def test_open_app_rejects_flag(fake_run):
+    res = await mac.open_app.handler({"name": "-e"})
+    assert res["is_error"] and fake_run == []
+
+
+async def test_open_app_missing_name_is_error(fake_run):
+    res = await mac.open_app.handler({})
+    assert res["is_error"] and fake_run == []
+
+
 async def test_open_url_rejects_non_http(fake_run):
     res = await mac.open_url.handler({"url": "file:///etc/passwd"})
     assert res["is_error"] and fake_run == []
@@ -74,6 +89,15 @@ async def test_volume_set_clamps(fake_run):
     assert fake_run[0][0] == ["osascript", "-e", "set volume output volume 100"]
     await mac.volume_set.handler({"level": -5})
     assert fake_run[1][0] == ["osascript", "-e", "set volume output volume 0"]
+
+
+async def test_volume_set_bad_level_is_error(fake_run):
+    res = await mac.volume_set.handler({"level": None})
+    assert res["is_error"] and fake_run == []
+    res = await mac.volume_set.handler({"level": "abc"})
+    assert res["is_error"] and fake_run == []
+    await mac.volume_set.handler({"level": "30"})
+    assert fake_run[0][0] == ["osascript", "-e", "set volume output volume 30"]
 
 
 async def test_volume_get(fake_run):
