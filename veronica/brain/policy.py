@@ -40,18 +40,22 @@ def _bash_is_safe(command: str) -> bool:
     head = argv[0]
     if head == "open":
         if len(argv) == 3 and argv[1] == "-a":
-            return True
+            app_name = argv[2]
+            # only allow bare app names: no "/" and doesn't start with "." or "-"
+            if "/" not in app_name and not app_name.startswith((".", "-")):
+                return True
+            return False
         if len(argv) == 2 and argv[1].startswith(("http://", "https://")):
             return True
         return False
     return head in SAFE_BASH
 
 
-def classify(tool_name: str, input: dict) -> Decision:
+def classify(tool_name: str, tool_input: dict) -> Decision:
     if tool_name in ALLOW_TOOLS:
         return "allow"
     if tool_name == "Bash":
-        return "allow" if _bash_is_safe(str(input.get("command", ""))) else "confirm"
+        return "allow" if _bash_is_safe(str(tool_input.get("command", ""))) else "confirm"
     if tool_name.startswith(MAC_PREFIX):
         return MAC_TOOL_RISK.get(tool_name[len(MAC_PREFIX):], "confirm")
     return "confirm"

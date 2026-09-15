@@ -24,6 +24,10 @@ CASES = [
     ("Bash", {"command": "open -a 'Google Chrome'"}, ALLOW),
     ("Bash", {"command": "open https://example.com"}, ALLOW),
     ("Bash", {"command": "cat /etc/hosts"}, ALLOW),
+    ("Bash", {"command": "open -a /tmp/evil.app"}, CONFIRM),
+    ("Bash", {"command": "open -a ../x"}, CONFIRM),
+    ("Bash", {"command": "open -a -x"}, CONFIRM),
+    ("Bash", {"command": "open -a 'Visual Studio Code'"}, ALLOW),
     # bash confirm
     ("Bash", {"command": "rm -rf ~/x"}, CONFIRM),
     ("Bash", {"command": "sudo ls"}, CONFIRM),
