@@ -96,9 +96,36 @@ class Orchestrator:
                     # joining the queue sees this sentence as pending *before*
                     # it's been spoken, closing the production ordering race.
                     fut = asyncio.ensure_future(self.tts.asynth(sent))
-                    await queue.put((sent, fut))
+                    try:
+                        await queue.put((sent, fut))
+                    except BaseException:
+                        # if put() itself is cancelled (e.g. the queue was
+                        # full when handle_text was cancelled), fut was never
+                        # handed to anything that would cancel it — it'd
+                        # otherwise run to completion orphaned.
+                        fut.cancel()
+                        raise
             finally:
                 await queue.put(None)
+
+        def _cancel_or_reap(fut: asyncio.Future) -> None:
+            # Cancel a not-yet-done synth future; for one that already
+            # completed (possibly with an exception) before we got to it,
+            # retrieve the result instead so asyncio doesn't complain about
+            # an exception that was never retrieved.
+            if not fut.cancel():
+                with contextlib.suppress(BaseException):
+                    fut.exception()
+
+        def _drain(q: asyncio.Queue) -> None:
+            while True:
+                try:
+                    item = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is not None:
+                    _cancel_or_reap(item[1])
+                q.task_done()
 
         # Exposed so confirm() (which the brain may await mid-stream, e.g. as
         # a tool-use confirmation gate) can wait for already-queued sentences
@@ -110,19 +137,23 @@ class Orchestrator:
         try:
             while True:
                 item = await queue.get()
-                if item is None:
+                try:
+                    if item is None:
+                        break
+                    sent, fut = item
+                    samples, _ = await fut
+                    if first:
+                        first = False
+                        self._set("speaking")
+                        log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
+                    if not self.muted:
+                        async with self._speech_lock:
+                            await self.player.play(samples)
+                finally:
+                    # Accounted for whether this item played cleanly, raised,
+                    # or we were cancelled mid-item — unfinished_tasks must
+                    # always balance to zero so nothing can join() forever.
                     queue.task_done()
-                    break
-                sent, fut = item
-                samples, _ = await fut
-                if first:
-                    first = False
-                    self._set("speaking")
-                    log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
-                if not self.muted:
-                    async with self._speech_lock:
-                        await self.player.play(samples)
-                queue.task_done()
             await prod
         finally:
             # Cancellation-safe teardown: whether we exit normally, via an
@@ -136,27 +167,13 @@ class Orchestrator:
             # producer's own `finally: await queue.put(None)` would block
             # forever with nobody left to consume it. Freeing space here
             # lets that put() (and thus `await prod` below) complete.
-            while True:
-                try:
-                    item = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if item is not None:
-                    item[1].cancel()
-                queue.task_done()
+            _drain(queue)
             with contextlib.suppress(BaseException):
                 await prod
             # The producer's finally may have just put its None sentinel
             # (normal exit already consumed it above, so this is a no-op
             # then); drain it too so unfinished_tasks balances to zero.
-            while True:
-                try:
-                    item = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if item is not None:
-                    item[1].cancel()
-                queue.task_done()
+            _drain(queue)
             self._speech_queue = None
         if not spoken:
             await self.say("I have nothing to say to that.")
@@ -164,14 +181,6 @@ class Orchestrator:
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str) -> bool:
-        # Yield once before consulting self._speech_queue: a brain may call
-        # confirm() from a task it creates and then hands off to (rather than
-        # awaiting inline), in which case this task can start running before
-        # the producer's own already-scheduled continuation has had a chance
-        # to enqueue the sentence that "caused" this confirm(). One tick lets
-        # that continuation run first, so the queue reflects reality before
-        # we decide whether there's anything to wait for.
-        await asyncio.sleep(0)
         queue = self._speech_queue
         if queue is not None:
             # don't jump ahead of sentences already queued for playback by

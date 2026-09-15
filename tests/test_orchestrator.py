@@ -388,13 +388,21 @@ async def test_handle_text_cancel_with_full_queue_does_not_hang():
         async def asynth(self, text):
             return np.zeros(10, dtype=np.float32), 24000
 
-    class SlowPlayer:
-        def __init__(self): self.played = 0
-        async def play(self, s):
-            self.played += 1
-            await asyncio.sleep(10)
-        def stop(self): pass
-        def reset(self): pass
+    class SlowTTS:
+        """Synth that stays pending for a full second — long enough that,
+        with maxsize=2 and a brain producing faster than synth completes,
+        the producer will be blocked mid-`queue.put()` with an
+        already-created-but-not-yet-queued synth future at cancel time
+        (exercising the orphaned-future fix), and other futures will still
+        be genuinely in-flight (not just already-done) when drained."""
+        def __init__(self): self.started = 0; self.finished = 0
+        async def asynth(self, text):
+            self.started += 1
+            try:
+                await asyncio.sleep(1)
+            finally:
+                self.finished += 1
+            return np.zeros(10, dtype=np.float32), 24000
 
     class FastPlayer:
         def __init__(self): self.played = 0
@@ -409,19 +417,31 @@ async def test_handle_text_cancel_with_full_queue_does_not_hang():
                 yield s
 
     o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
-    o.tts, o.brain = FastTTS(), Brain5()
-    o.player = SlowPlayer()
+    slow_tts = SlowTTS()
+    o.tts, o.brain, o.player = slow_tts, Brain5(), FastPlayer()
 
     turn = asyncio.create_task(o.handle_text("x"))
     await asyncio.sleep(0.05)
+    q = o._speech_queue
+    assert q is not None
     turn.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(turn, 1)
 
     assert o._speech_queue is None
+    # unfinished_tasks balanced back to zero: nothing left that would hang
+    # a confirm() blocked in queue.join().
+    await asyncio.wait_for(q.join(), 0.1)
 
-    o.player = FastPlayer()
-    o.brain = Brain5()
+    # give cancelled synth futures (and the producer task) one tick to
+    # actually unwind, then confirm none are still pending — the orphaned-
+    # future bug left one of these running to completion, untracked.
+    await asyncio.sleep(0.05)
+    current = asyncio.current_task()
+    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+    assert pending == []
+
+    o.tts, o.brain, o.player = FastTTS(), Brain5(), FastPlayer()
     out = await asyncio.wait_for(o.handle_text("y"), 1)
     assert out == ["A.", "B.", "C.", "D.", "E."]
 
@@ -448,11 +468,13 @@ async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
     holder = {}
 
     class ConcurrentConfirmBrain:
+        """Mirrors real SDK ordering: the assistant message ("First.") is
+        yielded before the control request (confirm) that follows it is
+        spawned as a separate task the brain then awaits."""
         def __init__(self, orch): self.orch = orch
         async def ask(self, text):
-            holder["task"] = asyncio.create_task(self.orch.confirm("Bash: ls"))
-            await asyncio.sleep(0)
             yield "First."
+            holder["task"] = asyncio.create_task(self.orch.confirm("Bash: ls"))
             assert await holder["task"] is True
             yield "Second."
 
