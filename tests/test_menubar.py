@@ -1,9 +1,11 @@
 import asyncio
 import importlib
+import logging
 import sys
 import threading
 
 import pytest
+import rumps as real_rumps
 
 
 class FakeMenuItem:
@@ -63,7 +65,7 @@ class FakeOrch:
 
 
 @pytest.fixture
-def fake_env(monkeypatch, tmp_home):
+def fake_env(monkeypatch, tmp_home, request):
     # `class VeronicaApp(rumps.App)` binds its base class at class-definition
     # time (i.e. first import), so a plain setattr on the already-imported
     # module wouldn't swap the base class rumps.App is derived from. Patch
@@ -77,6 +79,18 @@ def fake_env(monkeypatch, tmp_home):
     else:
         import veronica.ui.menubar as menubar
     assert menubar.rumps is fake_rumps
+
+    def _restore_real_rumps():
+        # fixture finalizers run before the fixtures they depend on (here,
+        # monkeypatch) are torn down, so do this ourselves rather than rely
+        # on monkeypatch's own sys.modules undo: reinstate the real module
+        # and reload menubar so it binds back to it, leaving no fake behind
+        # for tests/imports that run after this fixture is torn down.
+        sys.modules["rumps"] = real_rumps
+        importlib.reload(menubar)
+        assert menubar.rumps is real_rumps
+
+    request.addfinalizer(_restore_real_rumps)
 
     orch_holder = {}
 
@@ -147,3 +161,24 @@ def test_quit_calls_rumps_quit_application(fake_env):
     app, orch = _make_app(menubar, orch_holder)
     _quit_and_join(app)
     assert fake_rumps.quit_called is True
+
+
+def test_quit_does_not_log_error(fake_env, caplog):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    with caplog.at_level(logging.ERROR, logger="veronica.ui"):
+        _quit_and_join(app)
+    error_records = [r for r in caplog.records if r.name == "veronica.ui" and r.levelno >= logging.ERROR]
+    assert error_records == []
+    assert app._state != "error"
+
+
+def test_real_rumps_restored_after_fixture_teardown():
+    # Must run after the fake_env-using tests above (default pytest order is
+    # file/definition order). Confirms the fixture's finalizer put the real
+    # rumps module back on veronica.ui.menubar so nothing downstream (other
+    # test modules, the actual app) sees the fake.
+    import veronica.ui.menubar as menubar
+
+    assert menubar.rumps.__name__ == "rumps"
+    assert menubar.rumps is real_rumps

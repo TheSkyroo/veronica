@@ -15,6 +15,7 @@ class VeronicaApp(rumps.App):
         super().__init__("V ◯", quit_button=None)
         self._state = "idle"
         self._muted = False
+        self._quitting = False
         self.menu = [rumps.MenuItem("Mute", callback=self.toggle_mute), None, rumps.MenuItem("Quit", callback=self.quit)]
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -29,6 +30,11 @@ class VeronicaApp(rumps.App):
             self._orch = build_orchestrator(settings, on_state=self._on_state)
             self._loop.run_until_complete(self._orch.run_forever())
         except Exception as e:  # surface startup failures (no mic, not logged in)
+            if self._quitting:
+                # loop.stop() makes run_until_complete raise "Event loop stopped
+                # before Future completed" — an expected part of a clean quit,
+                # not a real failure.
+                return
             self._state = "error"
             self._error = str(e)
             logging.getLogger("veronica.ui").exception("menu bar background loop failed")
@@ -54,6 +60,7 @@ class VeronicaApp(rumps.App):
             orch.player.stop()
 
     def quit(self, _item) -> None:
+        self._quitting = True
         self._loop.call_soon_threadsafe(self._loop.stop)
         rumps.quit_application()
 
