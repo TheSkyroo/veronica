@@ -101,7 +101,7 @@ async def test_resume_from_saved_session(brain, tmp_home):
 async def test_can_use_tool_gate(brain):
     [s async for s in brain.ask("x")]
     gate = FakeClient.instances[0].options.can_use_tool
-    allow = await gate("Bash", {"command": "ls"}, None)
+    allow = await gate("Bash", {"command": "rm x"}, None)
     deny = await gate("Write", {"file_path": "a"}, None)
     assert allow.behavior == "allow"
     assert deny.behavior == "deny" and deny.message == "user declined"
@@ -187,3 +187,44 @@ async def test_stream_exception_closes_client(brain, monkeypatch):
     with pytest.raises(RuntimeError):
         [s async for s in brain.ask("x")]
     assert brain._client is None
+
+
+def test_summarize_mac_tools():
+    assert summarize_tool("mcp__mac__open_app", {"name": "Safari"}) == "Open Safari"
+    assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
+    assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
+    assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'Run AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
+
+
+async def test_gate_auto_allows_safe_tools_without_confirm(brain):
+    calls = []
+
+    async def confirm(summary):
+        calls.append(summary)
+        return False
+
+    brain._confirm = confirm
+    res = await brain._can_use_tool("Read", {"file_path": "/x"}, None)
+    assert res.behavior == "allow" and calls == []
+    res = await brain._can_use_tool("Bash", {"command": "ls"}, None)
+    assert res.behavior == "allow" and calls == []
+    res = await brain._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "deny" and calls == ["Bash: rm x"]
+
+
+async def test_interrupt_without_client_is_noop(brain):
+    await brain.interrupt()  # must not raise
+
+
+async def test_interrupt_calls_client(brain):
+    [s async for s in brain.ask("x")]
+    client = FakeClient.instances[0]
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    client.interrupt = interrupt
+    await brain.interrupt()
+    assert client.interrupts == 1

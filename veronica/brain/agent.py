@@ -12,6 +12,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+from veronica.brain.policy import classify
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
@@ -20,8 +21,21 @@ log = logging.getLogger("veronica.brain")
 
 Confirm = Callable[[str], Awaitable[bool]]
 
+MAC_PREFIX = "mcp__mac__"
+
 
 def summarize_tool(tool_name: str, input: dict) -> str:
+    if tool_name.startswith(MAC_PREFIX):
+        short = tool_name[len(MAC_PREFIX):]
+        if short == "open_app":
+            return f"Open {input.get('name', '')}"
+        if short == "open_url":
+            return f"Open {input.get('url', '')}"
+        if short == "clipboard_write":
+            return "Copy to clipboard: " + str(input.get("text", ""))[:60]
+        if short == "applescript":
+            return "Run AppleScript: " + str(input.get("script", ""))[:60]
+        return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
     for key in ("command", "query", "url", "pattern", "file_path"):
@@ -56,6 +70,9 @@ class Brain:
     # -- permission gate ------------------------------------------------------
     async def _can_use_tool(self, tool_name: str, input: dict, context):
         summary = summarize_tool(tool_name, input)
+        if classify(tool_name, input) == "allow":
+            log.info("auto-allow: %s", summary)
+            return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
         if await self._confirm(summary):
             return PermissionResultAllow(updated_input=input)
@@ -148,3 +165,13 @@ class Brain:
                 await self._client.disconnect()
             finally:
                 self._client = None
+
+    async def interrupt(self) -> None:
+        """Stop the in-flight turn, if any. Safe to call when idle."""
+        if self._client is None:
+            return
+        try:
+            await self._client.interrupt()
+        except Exception:
+            log.exception("interrupt failed; closing client")
+            await self.close()
