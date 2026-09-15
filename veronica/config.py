@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # brain
     brain_timeout_s: int = 60
+    interrupt_drain_s: int = 3
     effort: str = "low"
     max_turns: int = 8
 

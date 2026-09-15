@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 
 import pytest
@@ -230,3 +231,48 @@ async def test_interrupt_calls_client(brain):
     client.interrupt = interrupt
     await brain.interrupt()
     assert client.interrupts == 1
+
+
+async def test_interrupt_drains_leftover_stream(brain):
+    [s async for s in brain.ask("x")]
+    client = FakeClient.instances[0]
+    client.interrupts = 0
+    client.drained = []
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        for m in [_Assistant("leftover 1"), _Assistant("leftover 2"), _Result("s")]:
+            client.drained.append(m)
+            yield m
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+
+    await brain.interrupt()
+
+    assert client.interrupts == 1
+    assert len(client.drained) == 3   # both leftover assistant messages + the ResultMessage
+    assert brain._client is not None
+
+
+async def test_interrupt_drain_timeout_closes_client(brain):
+    [s async for s in brain.ask("x")]
+    client = FakeClient.instances[0]
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        await asyncio.sleep(10)
+        yield _Result("s")   # pragma: no cover - unreachable, drain times out first
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+    brain.s = Settings(interrupt_drain_s=0)
+
+    await brain.interrupt()
+
+    assert brain._client is None

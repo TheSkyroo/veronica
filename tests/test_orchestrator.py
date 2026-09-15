@@ -150,6 +150,7 @@ async def test_run_forever_survives_reporting_failure():
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError()
+            return True
 
         def stop(self):
             self._barge_ev.set()
@@ -312,6 +313,7 @@ async def test_wake_failure_retries_and_continues_into_a_turn(monkeypatch):
                 raise RuntimeError("no audio device")
             if self.calls > 2:
                 raise asyncio.CancelledError()
+            return True
 
         def stop(self):
             self._barge_ev.set()
@@ -352,6 +354,7 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError()
+            return True
 
         def stop(self):
             self._barge_ev.set()
@@ -549,15 +552,89 @@ class SlowBrain:
 
 
 async def test_barge_in_stops_speech_and_relistens():
+    events = []
+
+    class LoggingRec(Rec):
+        """Skips logging the initial pre-turn capture; logs only the
+        re-listen capture that follows a barge, for ordering assertions."""
+        def __init__(self, pcms):
+            super().__init__(pcms)
+            self.n = 0
+
+        async def capture(self, max_s=None):
+            self.n += 1
+            if self.n > 1:
+                events.append("capture")
+            return await super().capture(max_s=max_s)
+
+    class LoggingSlowBrain(SlowBrain):
+        async def interrupt(self):
+            events.append("interrupt")
+            await super().interrupt()
+
     # call 1 = main wake (we call one_turn directly, so calls start at the barge listener)
-    o, states = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None], stt_texts=["first", "second"])
+    o, states = build(rec_pcms=[], stt_texts=["first"])
+    o.recorder = LoggingRec([np.zeros(1, np.int16), None])
     o.wake = BargeWake(barge_on_call=1)
-    o.brain = SlowBrain()
+    o.brain = LoggingSlowBrain()
     await o.one_turn()
     assert o.brain.interrupts == 1
     assert o.player.stops >= 1
     assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
-    assert o.brain.interrupts == 1
+    assert o.tts.said == ["One."]     # "Two." is never reached: barged before its 50 ms sleep
+    assert events == ["interrupt", "capture"]     # interrupt happens before the re-listen capture
+
+
+class StoppableRec:
+    """capture() returns queued pcms normally, except a BLOCK sentinel, which
+    blocks until stop() is called and then returns None (mirroring the real
+    Recorder's consume-on-use stop())."""
+    BLOCK = object()
+
+    def __init__(self, pcms):
+        self.pcms = list(pcms)
+        self.stops = 0
+        self._ev = asyncio.Event()
+
+    def stop(self):
+        self.stops += 1
+        self._ev.set()
+
+    async def capture(self, max_s=None):
+        item = self.pcms.pop(0) if self.pcms else None
+        if item is self.BLOCK:
+            await self._ev.wait()
+            self._ev.clear()
+            return None
+        return item
+
+
+class ConfirmDuringBargeBrain:
+    """Yields a sentence, then awaits orch.confirm() mid-stream, as the SDK's
+    can_use_tool callback would during a tool call."""
+    def __init__(self, orch):
+        self.orch = orch
+        self.results = []
+
+    async def ask(self, text):
+        yield "First."
+        self.results.append(await self.orch.confirm("Bash: rm x"))
+        yield "Second."   # pragma: no cover - unreachable once barged
+
+    async def interrupt(self):
+        pass
+
+
+async def test_barge_during_confirm_stops_capture():
+    o, states = build(rec_pcms=[], stt_texts=["first"])
+    rec = StoppableRec([np.zeros(1, np.int16), StoppableRec.BLOCK, None])
+    o.recorder = rec
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = ConfirmDuringBargeBrain(o)
+    await o.one_turn()
+    assert o.brain.results == [False]                 # confirm() returned False, not orphaned
+    assert rec.stops == 1                              # in-flight confirm capture was stopped
+    assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
 
 
 async def test_no_barge_listener_stopped_when_turn_ends():

@@ -170,11 +170,31 @@ class Brain:
                 self._client = None
 
     async def interrupt(self) -> None:
-        """Stop the in-flight turn, if any. Safe to call when idle."""
+        """Stop the in-flight turn, if any. Safe to call when idle.
+
+        After interrupting, drains any leftover messages still in flight on
+        the stream (the SDK may have buffered assistant text and a final
+        ResultMessage before it noticed the interrupt) so the next ask()
+        doesn't read a stale tail or a stale ResultMessage. If the drain
+        hangs or fails, the client is closed so the next ask() reconnects
+        (resuming the saved session).
+        """
         if self._client is None:
             return
         try:
             await self._client.interrupt()
         except Exception:
             log.exception("interrupt failed; closing client")
+            await self.close()
+            return
+        try:
+            drained = 0
+            async with asyncio.timeout(self.s.interrupt_drain_s):
+                async for msg in self._client.receive_response():
+                    drained += 1
+                    if isinstance(msg, ResultMessage):
+                        break
+            log.info("drained %d message(s) after interrupt", drained)
+        except Exception:
+            log.exception("drain after interrupt failed; closing client")
             await self.close()

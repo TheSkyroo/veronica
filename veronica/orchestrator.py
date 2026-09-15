@@ -42,6 +42,7 @@ class Orchestrator:
         self.ready = False
         self._speech_lock = asyncio.Lock()
         self._speech_queue: asyncio.Queue | None = None
+        self._confirm_capturing = False
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -191,7 +192,11 @@ class Orchestrator:
         async with self._speech_lock:
             self.player.reset()
             await self._say_unlocked(f"Run {summary}?")
-            pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
+            self._confirm_capturing = True
+            try:
+                pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
+            finally:
+                self._confirm_capturing = False
             if pcm is None:
                 return False
             heard = await self.stt.atranscribe(pcm)
@@ -209,6 +214,11 @@ class Orchestrator:
             if listener in done and listener.result():
                 log.info("barge-in")
                 self.player.stop()
+                if self._confirm_capturing:
+                    # confirm() is blocked in recorder.capture(); wake its
+                    # thread so it returns None promptly instead of being
+                    # orphaned when we cancel the turn below.
+                    self.recorder.stop()
                 turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await turn
@@ -276,11 +286,15 @@ class Orchestrator:
         self._set("idle")
         while True:
             try:
-                await self.wake.wait()
+                detected = await self.wake.wait()
             except Exception:
                 log.exception("wake listener failed; retrying in %s s", self.s.wake_retry_s)
                 self._set("error")
                 await asyncio.sleep(self.s.wake_retry_s)
+                continue
+            if not detected:
+                # a stale one-shot stop() (e.g. consumed in the same frame a
+                # prior barge listener ended) must not start a spurious turn.
                 continue
             if self.muted:
                 log.info("muted; skipping turn")

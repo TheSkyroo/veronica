@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Callable, Iterator
 
 import numpy as np
@@ -17,6 +18,7 @@ class Recorder:
         self.s = settings
         self._frames = frames or self._mic_frames
         self._vad = self._vad_cls(settings.vad_aggressiveness)
+        self._stop = threading.Event()
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
@@ -24,6 +26,12 @@ class Recorder:
             while True:
                 data, _ = stream.read(n)
                 yield bytes(data)
+
+    def stop(self) -> None:
+        """Request that the in-flight (or next) capture() stop early, returning
+        None. Thread-safe, one-shot: a pending stop is consumed by the next
+        capture() even if issued before it starts."""
+        self._stop.set()
 
     async def capture(self, max_s: int | None = None) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
@@ -51,6 +59,9 @@ class Recorder:
         waited = 0
 
         for frame in self._frames():
+            if self._stop.is_set():
+                self._stop.clear()
+                return None
             is_speech = self._vad.is_speech(frame, self.s.sample_rate)
             if not started:
                 waited += 1

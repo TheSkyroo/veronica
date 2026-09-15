@@ -1,3 +1,5 @@
+import asyncio
+
 import numpy as np
 
 from veronica.audio.record import Recorder
@@ -63,3 +65,21 @@ async def test_max_s_does_not_cap_utterance(monkeypatch):
     pcm = await r.capture(max_s=1)
     assert pcm is not None
     assert len(pcm) == FRAME * 53   # 50 speech + 3 silence frames
+
+
+async def test_stop_returns_none_and_is_consumed(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1)
+    state = {"pattern": ""}  # infinite silence via frames()'s trailing `while True: yield zeros`
+    r = Recorder(s, frames=lambda: frames(state["pattern"]))
+
+    task = asyncio.create_task(r.capture(max_s=None))
+    await asyncio.sleep(0)   # let the capture thread start
+    r.stop()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is None
+
+    # stop() is one-shot: a subsequent capture on the same recorder is unaffected.
+    state["pattern"] = "....ssssss........."
+    pcm2 = await r.capture()
+    assert pcm2 is not None
