@@ -8,7 +8,8 @@ from veronica.orchestrator import Orchestrator
 
 
 class Wake:
-    async def wait(self): pass
+    async def wait(self, threshold=None): pass
+    def stop(self): pass
 
 class Rec:
     def __init__(self, pcms): self.pcms = list(pcms)
@@ -134,13 +135,24 @@ async def test_run_forever_survives_reporting_failure():
             raise RuntimeError("tts boom")
 
     class WakeOnceThenCancel:
+        """calls counts only the outer main-loop wait()s (threshold=None); a
+        barge-listener wait() (threshold set) never barges and just blocks
+        until stop()."""
         def __init__(self):
             self.calls = 0
+            self._barge_ev = asyncio.Event()
 
-        async def wait(self):
+        async def wait(self, threshold=None):
+            if threshold is not None:
+                await self._barge_ev.wait()
+                self._barge_ev.clear()
+                return False
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError()
+
+        def stop(self):
+            self._barge_ev.set()
 
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -283,15 +295,26 @@ async def test_wake_failure_retries_and_continues_into_a_turn(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     class FlakyWake:
+        """calls counts only the outer main-loop wait()s (threshold=None); a
+        barge-listener wait() (threshold set) never barges and just blocks
+        until stop()."""
         def __init__(self):
             self.calls = 0
+            self._barge_ev = asyncio.Event()
 
-        async def wait(self):
+        async def wait(self, threshold=None):
+            if threshold is not None:
+                await self._barge_ev.wait()
+                self._barge_ev.clear()
+                return False
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("no audio device")
             if self.calls > 2:
                 raise asyncio.CancelledError()
+
+        def stop(self):
+            self._barge_ev.set()
 
     states = []
     o = Orchestrator(
@@ -314,13 +337,24 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
             yield  # pragma: no cover - makes this an async generator function
 
     class WakeOnceThenCancel:
+        """calls counts only the outer main-loop wait()s (threshold=None); a
+        barge-listener wait() (threshold set) never barges and just blocks
+        until stop()."""
         def __init__(self):
             self.calls = 0
+            self._barge_ev = asyncio.Event()
 
-        async def wait(self):
+        async def wait(self, threshold=None):
+            if threshold is not None:
+                await self._barge_ev.wait()
+                self._barge_ev.clear()
+                return False
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError()
+
+        def stop(self):
+            self._barge_ev.set()
 
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -486,6 +520,70 @@ async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
 
     assert out == ["First.", "Second."]
     assert o.player.played_texts == ["First.", "Run Bash: ls?", "Second."]
+
+
+# -- task 7: barge-in ----------------------------------------------------------
+
+class BargeWake:
+    """wait() returns True after `after` calls when barge=True, else blocks until stop()."""
+    def __init__(self, barge_on_call=None):
+        self.calls = 0; self.stops = 0; self.barge_on_call = barge_on_call
+        self._ev = __import__("asyncio").Event()
+    async def wait(self, threshold=None):
+        self.calls += 1
+        if self.barge_on_call == self.calls:
+            await __import__("asyncio").sleep(0.005)
+            return True
+        await self._ev.wait(); self._ev.clear(); return False
+    def stop(self):
+        self.stops += 1; self._ev.set()
+
+
+class SlowBrain:
+    def __init__(self): self.interrupts = 0
+    async def ask(self, text):
+        yield "One."
+        await __import__("asyncio").sleep(0.05)
+        yield "Two."
+    async def interrupt(self): self.interrupts += 1
+
+
+async def test_barge_in_stops_speech_and_relistens():
+    # call 1 = main wake (we call one_turn directly, so calls start at the barge listener)
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None], stt_texts=["first", "second"])
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = SlowBrain()
+    await o.one_turn()
+    assert o.brain.interrupts == 1
+    assert o.player.stops >= 1
+    assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
+    assert o.brain.interrupts == 1
+
+
+async def test_no_barge_listener_stopped_when_turn_ends():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o.wake = BargeWake()  # never barges
+    await o.one_turn()
+    assert o.wake.stops == 1  # listener stopped once when handle_text finished
+
+
+async def test_barge_uses_barge_threshold():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    seen = []
+    class W(BargeWake):
+        async def wait(self, threshold=None):
+            seen.append(threshold); return await super().wait(threshold)
+    o.wake = W()
+    await o.one_turn()
+    assert seen == [0.8]
+
+
+async def test_barge_listener_task_not_left_pending():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o.wake = BargeWake()  # never barges
+    await o.one_turn()
+    current = asyncio.current_task()
+    assert [t for t in asyncio.all_tasks() if t is not current] == []
 
 
 async def test_play_exception_propagates_and_cleans_up():

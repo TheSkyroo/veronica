@@ -199,6 +199,48 @@ class Orchestrator:
         log.info("confirm heard=%r -> %s", heard, ok)
         return ok
 
+    # -- barge-in ---------------------------------------------------------------
+    async def _run_with_barge(self, coro) -> bool:
+        """Run a turn coroutine; return True if the wake word interrupted it."""
+        turn = asyncio.ensure_future(coro)
+        listener = asyncio.create_task(self.wake.wait(threshold=self.s.barge_threshold))
+        try:
+            done, _ = await asyncio.wait({turn, listener}, return_when=asyncio.FIRST_COMPLETED)
+            if listener in done and listener.result():
+                log.info("barge-in")
+                self.player.stop()
+                turn.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await turn
+                await self.brain.interrupt()
+                return True
+            if listener not in done:
+                # turn finished first; the listener is still running, ask its
+                # thread to exit.
+                self.wake.stop()
+                await listener
+            if not turn.done():
+                # listener resolved (without a barge) before the turn did;
+                # just wait the rest of the way for the turn to finish.
+                await turn
+            turn.result()  # re-raise turn errors
+            return False
+        finally:
+            # Never leave either task pending, however we got here (normal
+            # return, a re-raised turn error, or an exception out of the
+            # listener itself, e.g. listener.result() raising because wait()
+            # raised). Only stop() a listener that's still running here (one
+            # already resolved True above and stopping it again would poison
+            # the next wait() with a spurious immediate False).
+            if not listener.done():
+                self.wake.stop()
+                with contextlib.suppress(BaseException):
+                    await listener
+            if not turn.done():
+                turn.cancel()
+                with contextlib.suppress(BaseException):
+                    await turn
+
     # -- one interaction ------------------------------------------------------
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
@@ -215,7 +257,14 @@ class Orchestrator:
                 self.player.reset()
                 await self.say("Sorry, didn't catch that.")
             else:
-                await self.handle_text(text)
+                barged = await self._run_with_barge(self.handle_text(text))
+                if barged:
+                    self._set("listening")
+                    await self.chime(self.s.chime_wake_hz, 120)
+                    pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+                    if pcm is None:
+                        break
+                    continue
             self._set("followup")
             await self.chime(self.s.chime_followup_hz, 100)
             pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s))
