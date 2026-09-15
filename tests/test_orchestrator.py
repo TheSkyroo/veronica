@@ -88,10 +88,13 @@ async def test_full_turn():
     [
         ("yes", True),
         ("Yes, do it", True),
+        ("yes please", True),
         ("go ahead please", True),
         ("sure", True),
+        ("sure thing", True),
         ("not sure", False),
         ("go away", False),
+        ("go", False),
         ("yesterday", False),
         ("no", False),
         ("yes no wait", False),

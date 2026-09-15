@@ -9,7 +9,7 @@ log = logging.getLogger("veronica.orchestrator")
 
 
 class Orchestrator:
-    CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go", "go ahead", "confirm", "sure"})
+    CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure"})
     DENY_WORDS = frozenset({"no", "nope", "not", "don't", "dont", "cancel", "stop", "never"})
 
     @staticmethod
@@ -19,14 +19,10 @@ class Orchestrator:
             return False
         for phrase in Orchestrator.CONFIRM_WORDS:
             phrase_words = phrase.split()
-            if len(phrase_words) == 1:
-                if words == phrase_words:
+            n = len(phrase_words)
+            for i in range(len(words) - n + 1):
+                if words[i:i + n] == phrase_words:
                     return True
-            else:
-                n = len(phrase_words)
-                for i in range(len(words) - n + 1):
-                    if words[i:i + n] == phrase_words:
-                        return True
         return False
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
