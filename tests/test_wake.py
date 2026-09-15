@@ -58,7 +58,6 @@ async def test_stop_returns_false(monkeypatch):
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
     w = WakeWord(Settings(), frames=lambda: frames("." * 100000))
     task = asyncio.create_task(w.wait())
-    await asyncio.sleep(0.01)
     w.stop()
     assert await asyncio.wait_for(task, 2) is False
 
@@ -68,9 +67,21 @@ async def test_threshold_override(monkeypatch):
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)  # scores 0.9 on 'w'
     w = WakeWord(Settings(), frames=lambda: frames("w....."))
     task = asyncio.create_task(w.wait(threshold=0.95))
-    await asyncio.sleep(0.01)
     w.stop()
     assert await asyncio.wait_for(task, 2) is False   # 0.9 < 0.95 → never detected
+
+
+async def test_stop_is_consumed(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    w = WakeWord(Settings(), frames=lambda: frames("." * 100000))
+    task = asyncio.create_task(w.wait())
+    w.stop()
+    assert await asyncio.wait_for(task, 2) is False
+
+    # a stale stop flag must not poison the next wait()
+    w._frames = lambda: frames("..w")
+    assert await w.wait() is True
 
 
 def test_custom_model_used_when_present(monkeypatch, tmp_home):

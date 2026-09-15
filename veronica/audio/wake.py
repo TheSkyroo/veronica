@@ -56,22 +56,28 @@ class WakeWord:
         self._stop = threading.Event()
 
     def _mic_frames(self) -> Iterator[bytes]:
+        # Relies on CPython refcounting to close the stream (via __exit__) as soon as
+        # this generator is garbage-collected when _wait returns/breaks out of the loop.
         with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK) as stream:
             while True:
                 data, _ = stream.read(CHUNK)
                 yield bytes(data)
 
     def stop(self) -> None:
+        """Request that the in-flight (or next) wait() stop. Thread-safe, one-shot: a
+        pending stop is consumed by the next wait() even if issued before it starts."""
         self._stop.set()
 
     async def wait(self, threshold: float | None = None) -> bool:
+        """Block until the wake word is detected (True) or stop() is called (False).
+        Only one wait() should be in flight per WakeWord instance at a time."""
         return await asyncio.to_thread(self._wait, threshold if threshold is not None else self.s.wake_threshold)
 
     def _wait(self, threshold: float) -> bool:
-        self._stop.clear()
         self._model.reset()
         for frame in self._frames():
             if self._stop.is_set():
+                self._stop.clear()
                 return False
             chunk = np.frombuffer(frame, dtype=np.int16)
             scores = self._model.predict(chunk)
