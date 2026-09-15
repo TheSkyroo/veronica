@@ -56,8 +56,10 @@ class VeronicaApp(rumps.App):
         item.state = self._muted
         # stop any speech; the wake loop keeps running but muting is honoured in _refresh only.
         orch = getattr(self, "_orch", None)
-        if self._muted and orch is not None:
-            orch.player.stop()
+        if orch is not None:
+            orch.muted = self._muted
+            if self._muted:
+                orch.player.stop()
 
     def quit(self, _item) -> None:
         self._quitting = True

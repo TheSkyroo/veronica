@@ -20,10 +20,12 @@ class Settings(BaseSettings):
     min_speech_ms: int = 300
     followup_window_s: int = 8
     confirm_listen_s: int = 5
+    listen_wait_s: int = 6
 
     # wake word
     wake_model: str = "hey_veronica"
     wake_threshold: float = 0.5
+    wake_retry_s: int = 10
 
     # speech
     whisper_model: str = "base.en"

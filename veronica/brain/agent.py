@@ -104,9 +104,9 @@ class Brain:
     async def ask(self, text: str) -> AsyncIterator[str]:
         client = await self._ensure_client()
         splitter = SentenceSplitter()
-        await client.query(text)
-        it = client.receive_response().__aiter__()
         try:
+            await client.query(text)
+            it = client.receive_response().__aiter__()
             while True:
                 try:
                     async with asyncio.timeout(self.s.brain_timeout_s):

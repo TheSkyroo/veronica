@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import time
@@ -14,7 +15,8 @@ class Orchestrator:
 
     @staticmethod
     def is_confirmation(heard: str) -> bool:
-        words = re.sub(r"[^a-z ]", " ", heard.lower()).split()
+        no_apostrophes = heard.lower().replace("'", "").replace("’", "")
+        words = re.sub(r"[^a-z ]", " ", no_apostrophes).split()
         if any(w in Orchestrator.DENY_WORDS for w in words):
             return False
         for phrase in Orchestrator.CONFIRM_WORDS:
@@ -32,6 +34,8 @@ class Orchestrator:
         self.brain, self.tts, self.player = brain, tts, player
         self._on_state = on_state or (lambda _: None)
         self.state = "idle"
+        self.muted = False
+        self._speech_lock = asyncio.Lock()
 
     def _set(self, state: str) -> None:
         self.state = state
@@ -39,9 +43,15 @@ class Orchestrator:
         self._on_state(state)
 
     # -- speaking -------------------------------------------------------------
-    async def say(self, text: str) -> None:
+    async def _say_unlocked(self, text: str) -> None:
         samples, _ = await self.tts.asynth(text)
         await self.player.play(samples)
+
+    async def say(self, text: str) -> None:
+        if self.muted:
+            return
+        async with self._speech_lock:
+            await self._say_unlocked(text)
 
     async def handle_text(self, text: str) -> list[str]:
         """Ask the brain and speak each sentence as it arrives. Returns sentences."""
@@ -61,13 +71,13 @@ class Orchestrator:
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str) -> bool:
-        self.player.stop()
-        self.player.reset()
-        await self.say(f"Run {summary}?")
-        pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
-        if pcm is None:
-            return False
-        heard = await self.stt.atranscribe(pcm)
+        async with self._speech_lock:
+            self.player.reset()
+            await self._say_unlocked(f"Run {summary}?")
+            pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
+            if pcm is None:
+                return False
+            heard = await self.stt.atranscribe(pcm)
         ok = self.is_confirmation(heard)
         log.info("confirm heard=%r -> %s", heard, ok)
         return ok
@@ -76,10 +86,11 @@ class Orchestrator:
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
         self._set("listening")
-        pcm = await self.recorder.capture()
+        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+        if pcm is None:
+            self._set("idle")
+            return
         while True:
-            if pcm is None:
-                break
             text = await self.stt.atranscribe(pcm)
             log.info("heard=%r", text)
             if not text:
@@ -89,19 +100,35 @@ class Orchestrator:
                 await self.handle_text(text)
             self._set("followup")
             pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s))
+            if pcm is None:
+                break
         self._set("idle")
 
     async def run_forever(self) -> None:
         self._set("idle")
         while True:
-            await self.wake.wait()
+            try:
+                await self.wake.wait()
+            except Exception:
+                log.exception("wake listener failed; retrying in %s s", self.s.wake_retry_s)
+                self._set("error")
+                await asyncio.sleep(self.s.wake_retry_s)
+                continue
+            if self.muted:
+                log.info("muted; skipping turn")
+                continue
             try:
                 await self.one_turn()
-            except Exception:
+            except Exception as exc:
                 log.exception("turn failed")
                 try:
                     self.player.reset()
-                    await self.say("Something went wrong, check the log.")
+                    detail = f"{type(exc).__name__} {exc}".lower()
+                    if any(k in detail for k in ("login", "logged in", "authenticat")):
+                        message = "Claude Code isn't logged in."
+                    else:
+                        message = "Something went wrong, check the log."
+                    await self.say(message)
                 except Exception:
                     log.exception("failed to report error")
                 finally:

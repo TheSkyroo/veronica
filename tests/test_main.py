@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -53,6 +54,22 @@ def test_main_text_mode_parses(monkeypatch):
     main_mod.main(["--text", "hi"])
 
     assert calls == ["hi"]
+
+
+def test_main_scrubs_anthropic_api_key(monkeypatch, caplog):
+    async def fake_text_mode(text):
+        pass
+
+    monkeypatch.setattr(main_mod, "_text_mode", fake_text_mode)
+    monkeypatch.setattr(main_mod, "setup_logging", lambda: None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+
+    with caplog.at_level(logging.WARNING, logger="veronica"):
+        main_mod.main(["--text", "hi"])
+
+    assert "ANTHROPIC_API_KEY" not in main_mod.os.environ
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("ANTHROPIC_API_KEY" in r.message and "ignored" in r.message for r in warnings)
 
 
 class _StubBrain:

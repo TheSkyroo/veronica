@@ -145,11 +145,13 @@ def test_toggle_mute(fake_env):
         app.toggle_mute(mute_item)
         assert app._muted is True
         assert orch.player.stopped is True
+        assert orch.muted is True
         app._refresh(None)
         assert app.title == "V zz"
 
         app.toggle_mute(mute_item)
         assert app._muted is False
+        assert orch.muted is False
         app._refresh(None)
         assert app.title == "V ◯"
     finally:

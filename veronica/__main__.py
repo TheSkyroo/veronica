@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import logging
+import os
 import sys
 
 from veronica.audio.play import Player
@@ -52,6 +54,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--text", help="ask once via text, no audio input (speaks the reply)")
     args = p.parse_args(argv)
     setup_logging()
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ.pop("ANTHROPIC_API_KEY")
+        logging.getLogger("veronica").warning(
+            "ANTHROPIC_API_KEY ignored — Veronica uses your Claude Code login"
+        )
     if args.text:
         asyncio.run(_text_mode(args.text))
         return

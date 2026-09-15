@@ -167,6 +167,17 @@ async def test_error_result_speaks_error(brain, tmp_home, monkeypatch):
     assert not (tmp_home / "session").exists()
 
 
+async def test_query_failure_closes_client_and_propagates(brain, monkeypatch):
+    class QueryFailsClient(FakeClient):
+        async def query(self, prompt):
+            raise RuntimeError("dead")
+
+    monkeypatch.setattr(Brain, "_client_cls", QueryFailsClient)
+    with pytest.raises(RuntimeError):
+        [s async for s in brain.ask("x")]
+    assert brain._client is None
+
+
 async def test_stream_exception_closes_client(brain, monkeypatch):
     async def boom(self):
         raise RuntimeError("stream broke")

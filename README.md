@@ -9,6 +9,8 @@ Brain = Claude via your Claude Code login. Speech = local (faster-whisper + Koko
     uv run python scripts/download_models.py
     claude auth login        # if not already
 
+Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is ignored if set).
+
 ## Run
     uv run python -m veronica                 # menu bar app
     uv run python -m veronica --text "hello"  # no audio, debug
