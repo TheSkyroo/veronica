@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Iterator
 
 import numpy as np
@@ -52,6 +53,7 @@ class WakeWord:
             self._key = "hey_jarvis"
 
         self._model = self._model_cls(wakeword_models=[model_ref], inference_framework="onnx")
+        self._stop = threading.Event()
 
     def _mic_frames(self) -> Iterator[bytes]:
         with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK) as stream:
@@ -59,13 +61,20 @@ class WakeWord:
                 data, _ = stream.read(CHUNK)
                 yield bytes(data)
 
-    async def wait(self) -> None:
-        await asyncio.to_thread(self._wait)
+    def stop(self) -> None:
+        self._stop.set()
 
-    def _wait(self) -> None:
+    async def wait(self, threshold: float | None = None) -> bool:
+        return await asyncio.to_thread(self._wait, threshold if threshold is not None else self.s.wake_threshold)
+
+    def _wait(self, threshold: float) -> bool:
+        self._stop.clear()
         self._model.reset()
         for frame in self._frames():
+            if self._stop.is_set():
+                return False
             chunk = np.frombuffer(frame, dtype=np.int16)
             scores = self._model.predict(chunk)
-            if scores[self._key] >= self.s.wake_threshold:
-                return
+            if scores[self._key] >= threshold:
+                return True
+        return False
