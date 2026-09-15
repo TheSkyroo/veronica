@@ -39,9 +39,12 @@ async def _text_mode(text: str) -> None:
         print(f"[tool] {summary} -> allowed")
         return True
     orch.brain._confirm = confirm
-    for sent in await orch.handle_text(text):
-        print(sent)
-    await orch.brain.close()
+    try:
+        print("[text mode] all tool calls are auto-approved — no voice confirmation")
+        for sent in await orch.handle_text(text):
+            print(sent)
+    finally:
+        await orch.brain.close()
 
 
 def main(argv: list[str] | None = None) -> None:

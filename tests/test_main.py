@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 import veronica.__main__ as main_mod
 from veronica.config import Settings
 
@@ -49,3 +53,53 @@ def test_main_text_mode_parses(monkeypatch):
     main_mod.main(["--text", "hi"])
 
     assert calls == ["hi"]
+
+
+class _StubBrain:
+    def __init__(self):
+        self._confirm = None
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+class _StubOrchestrator:
+    def __init__(self, handle_text):
+        self.brain = _StubBrain()
+        self._handle_text = handle_text
+
+    async def handle_text(self, text):
+        return await self._handle_text(self, text)
+
+
+def test_text_mode_closes_brain_on_error(monkeypatch, tmp_home, capsys):
+    async def raising_handle_text(orch, text):
+        raise RuntimeError("boom")
+
+    stub = _StubOrchestrator(raising_handle_text)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(main_mod._text_mode("x"))
+
+    assert stub.brain.closed is True
+    out = capsys.readouterr().out
+    assert "[text mode] all tool calls are auto-approved — no voice confirmation" in out
+
+
+def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
+    async def handle_text(orch, text):
+        await orch.brain._confirm("Bash: ls")
+        return ["Hi."]
+
+    stub = _StubOrchestrator(handle_text)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+
+    asyncio.run(main_mod._text_mode("x"))
+
+    assert stub.brain.closed is True
+    out = capsys.readouterr().out
+    assert "[text mode] all tool calls are auto-approved — no voice confirmation" in out
+    assert "[tool] Bash: ls -> allowed" in out
+    assert "Hi." in out
