@@ -1,3 +1,5 @@
+import asyncio
+
 import numpy as np
 import pytest
 
@@ -79,3 +81,55 @@ async def test_full_turn():
     await o.one_turn()
     assert o.brain.asked == ["what time is it"]
     assert states == ["listening", "thinking", "speaking", "followup", "idle"]
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("yes", True),
+        ("Yes, do it", True),
+        ("go ahead please", True),
+        ("sure", True),
+        ("not sure", False),
+        ("go away", False),
+        ("yesterday", False),
+        ("no", False),
+        ("yes no wait", False),
+        ("", False),
+    ],
+)
+def test_is_confirmation(heard, expected):
+    assert Orchestrator.is_confirmation(heard) is expected
+
+
+async def test_run_forever_survives_reporting_failure():
+    class RaisingBrain:
+        async def ask(self, text):
+            raise RuntimeError("brain boom")
+            yield  # pragma: no cover - makes this an async generator function
+
+    class RaisingTTS:
+        async def asynth(self, text):
+            raise RuntimeError("tts boom")
+
+    class WakeOnceThenCancel:
+        def __init__(self):
+            self.calls = 0
+
+        async def wait(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError()
+
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=WakeOnceThenCancel(),
+        recorder=Rec([np.zeros(1, np.int16)]),
+        stt=STT(["do something"]),
+        brain=RaisingBrain(),
+        tts=RaisingTTS(),
+        player=Player(),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert o.state == "idle"

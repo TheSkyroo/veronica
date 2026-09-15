@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import re
 import time
@@ -11,6 +10,24 @@ log = logging.getLogger("veronica.orchestrator")
 
 class Orchestrator:
     CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go", "go ahead", "confirm", "sure"})
+    DENY_WORDS = frozenset({"no", "nope", "not", "don't", "dont", "cancel", "stop", "never"})
+
+    @staticmethod
+    def is_confirmation(heard: str) -> bool:
+        words = re.sub(r"[^a-z ]", " ", heard.lower()).split()
+        if any(w in Orchestrator.DENY_WORDS for w in words):
+            return False
+        for phrase in Orchestrator.CONFIRM_WORDS:
+            phrase_words = phrase.split()
+            if len(phrase_words) == 1:
+                if words == phrase_words:
+                    return True
+            else:
+                n = len(phrase_words)
+                for i in range(len(words) - n + 1):
+                    if words[i:i + n] == phrase_words:
+                        return True
+        return False
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  on_state: Callable[[str], None] | None = None) -> None:
@@ -54,10 +71,8 @@ class Orchestrator:
         pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
         if pcm is None:
             return False
-        heard = (await self.stt.atranscribe(pcm)).lower()
-        words = re.sub(r"[^a-z ]", " ", heard).split()
-        text = " ".join(words)
-        ok = any(text.startswith(w) or f" {w}" in f" {text}" for w in self.CONFIRM_WORDS)
+        heard = await self.stt.atranscribe(pcm)
+        ok = self.is_confirmation(heard)
         log.info("confirm heard=%r -> %s", heard, ok)
         return ok
 
@@ -88,6 +103,10 @@ class Orchestrator:
                 await self.one_turn()
             except Exception:
                 log.exception("turn failed")
-                self.player.reset()
-                await self.say("Something went wrong, check the log.")
-                self._set("idle")
+                try:
+                    self.player.reset()
+                    await self.say("Something went wrong, check the log.")
+                except Exception:
+                    log.exception("failed to report error")
+                finally:
+                    self._set("idle")
