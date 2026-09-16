@@ -5,6 +5,8 @@ import pytest
 
 import veronica.__main__ as main_mod
 from veronica.config import Settings
+from veronica.memory.store import MemoryStore
+from veronica.tools import memory_tools
 
 
 class _FakeSynthesizer:
@@ -14,10 +16,11 @@ class _FakeSynthesizer:
 
 
 class _FakeBrain:
-    def __init__(self, settings, confirm, on_tool=None):
+    def __init__(self, settings, confirm, on_tool=None, memory=None):
         self.s = settings
         self._confirm = confirm
         self.on_tool = on_tool
+        self.memory = memory
 
 
 async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
@@ -29,6 +32,11 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
     assert orch.wake is None
     assert orch.recorder is None
     assert orch.stt is None
+    assert isinstance(orch.store, MemoryStore)
+    assert orch.brain.memory is orch.store
+    assert memory_tools.store is orch.store
+    orch.store.close()
+    memory_tools.bind(None)
 
     calls = []
 
@@ -41,6 +49,17 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
     result = await orch.brain._confirm("Bash: ls")
     assert result is True
     assert calls == ["Bash: ls"]
+
+
+async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.store is None
+    assert orch.brain.memory is None
+    assert memory_tools.store is None
 
 
 class _FakeWakeWord:
@@ -64,10 +83,11 @@ class _FakeRecorder:
 
 
 class _FakeBrainWithOnTool:
-    def __init__(self, settings, confirm, on_tool=None):
+    def __init__(self, settings, confirm, on_tool=None, memory=None):
         self.s = settings
         self._confirm = confirm
         self.on_tool = on_tool
+        self.memory = memory
 
 
 async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
@@ -86,6 +106,8 @@ async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_hom
     orch.brain.on_tool("Read: /x", "auto")
 
     assert seen == [("mic", 0.5), ("tool", {"summary": "Read: /x", "decision": "auto"})]
+    orch.store.close()
+    memory_tools.bind(None)
 
 
 def test_main_text_mode_parses(monkeypatch):

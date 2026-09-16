@@ -82,6 +82,30 @@ Requirements:
 - Reading (calendar events, unread mail, mail search, reminders due, timers) runs automatically; creating an event
   or reminder, sending mail, and any raw AppleScript still ask "Run …?" first, same as other risky actions.
 
+## Memory
+
+Veronica keeps a small local memory across sessions, in a SQLite database at `~/.veronica/memory.db` (FTS5 full-text
+search when the local Python's sqlite3 build has it, otherwise a plain substring search — either way the same
+`recall`/`fact_add`/`fact_delete` behavior).
+
+- Every completed turn (what you said, what she replied) is logged, so she can look it up later or carry a little
+  recent context into a fresh Claude session.
+- **Remember a fact** — "remember that I take my coffee black" / "remember I'm allergic to peanuts": stored as a
+  fact and said back as "Got it." This is a local intent (matched before the brain runs), so it works even offline
+  and doesn't cost a Claude turn.
+- **Forget a fact** — "forget that I take my coffee black" / "forget the peanut thing": removes any matching fact
+  and says "Forgotten." (or "I didn't have that." if nothing matched).
+- Claude can also manage memory itself mid-conversation via MCP tools: `recall` (search past turns) and `facts_list`
+  run automatically; `fact_add` runs automatically; `fact_delete` asks "Run …?" first, like other tools that change
+  state.
+- On every new Claude session, Veronica injects a short "Facts about the user" list and the last few turns
+  ("Recent conversation") into the system prompt, capped small (2 KB / 1 KB) so it stays cheap — an existing session
+  already carries its own context, so this only matters right after a fresh one starts.
+
+Disable memory entirely (no DB, no injection, no remember/forget intents) with:
+
+    VERONICA_MEMORY_ENABLED=false
+
 ## Run
     uv run python -m veronica                 # menu bar app
     uv run python -m veronica --text "hello"  # no audio, debug

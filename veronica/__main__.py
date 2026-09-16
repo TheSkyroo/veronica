@@ -9,10 +9,11 @@ from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
 from veronica.brain.agent import Brain
 from veronica.config import Settings, settings, setup_logging
+from veronica.memory.store import MemoryStore
 from veronica.orchestrator import Orchestrator
 from veronica.speech.stt import Transcriber
 from veronica.speech.tts import Synthesizer
-from veronica.tools import pim
+from veronica.tools import memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
@@ -24,20 +25,26 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
 
     on_level = (lambda v: on_event("mic", v)) if (on_event and audio) else None
     on_tool = (lambda su, d: on_event("tool", {"summary": su, "decision": d})) if on_event else None
+    # Memory is built for both voice and text mode: text mode still runs
+    # local remember/forget intents and logs turns, and the brain still
+    # wants facts/recent injected into its system prompt.
+    store = MemoryStore(s.memory_path) if s.memory_enabled else None
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=Transcriber(s.whisper_model) if audio else None,
         partial_stt=Transcriber(s.partial_stt_model) if (audio and s.partial_stt) else None,
-        brain=Brain(s, confirm=confirm, on_tool=on_tool),
+        brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
         tts=Synthesizer(s.kokoro_voice, s.models_dir),
         player=Player(),
+        store=store,
         on_state=on_state,
         on_event=on_event,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))
+    memory_tools.bind(store)
     return orch
 
 
