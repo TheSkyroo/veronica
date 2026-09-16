@@ -76,7 +76,8 @@ class VeronicaApp(rumps.App):
             # it rather than only once warmup() starts.
             self._state = "warming"
             self._orch = build_orchestrator(
-                settings, on_state=self._on_state, on_event=lambda k, p: self._events.put((k, p))
+                settings, on_state=self._on_state, on_event=lambda k, p: self._events.put((k, p)),
+                on_quit=self._schedule_quit,
             )
             self._loop.run_until_complete(self._orch.warmup())
             self._loop.run_until_complete(self._orch.run_forever())
@@ -92,6 +93,13 @@ class VeronicaApp(rumps.App):
 
     def _on_state(self, state: str) -> None:
         self._state = state
+
+    def _schedule_quit(self) -> None:
+        # Called from the orchestrator's background asyncio thread (the
+        # "quit" voice intent) after confirmation; quit() tears down AppKit
+        # state and must run on the main thread.
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(lambda: self.quit(None))
 
     # AppKit side (main thread)
     def _refresh(self, _timer) -> None:

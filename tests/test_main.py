@@ -172,7 +172,7 @@ def test_text_mode_closes_brain_on_error(monkeypatch, tmp_home, capsys):
         raise RuntimeError("boom")
 
     stub = _StubOrchestrator(raising_handle_text)
-    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False, on_quit=None: stub)
 
     with pytest.raises(RuntimeError):
         asyncio.run(main_mod._text_mode("x"))
@@ -191,7 +191,7 @@ def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
         return ["Hi."]
 
     stub = _StubOrchestrator(handle_text)
-    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False, on_quit=None: stub)
 
     asyncio.run(main_mod._text_mode("x"))
 
@@ -211,7 +211,7 @@ def test_text_mode_prompts_for_confirm_class(monkeypatch, tmp_home, capsys):
         return ["Hi."]
 
     stub = _StubOrchestrator(handle_text)
-    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False, on_quit=None: stub)
 
     asyncio.run(main_mod._text_mode("x"))
 
@@ -236,7 +236,7 @@ def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):
         return ["Hi."]
 
     stub = _StubOrchestrator(handle_text)
-    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False: stub)
+    monkeypatch.setattr(main_mod, "build_orchestrator", lambda s, audio=False, on_quit=None: stub)
 
     asyncio.run(main_mod._text_mode("x"))
 

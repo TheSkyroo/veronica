@@ -145,8 +145,9 @@ def fake_env(monkeypatch, tmp_home, request):
     # build_orchestrator actually ran) is awaited.
     orch_holder = {"ready": threading.Event()}
 
-    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True):
+    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
         orch = FakeOrch(on_state=on_state)
+        orch.on_quit = on_quit
         orch_holder["orch"] = orch
         # VeronicaApp() (on the main thread) can return before the
         # background thread it starts has run build_orchestrator and
@@ -182,13 +183,13 @@ def test_state_is_warming_during_build_orchestrator(fake_env, monkeypatch):
     seen = {}
     original = menubar.build_orchestrator
 
-    def wrapped(s, on_state=None, on_event=None, *, audio=True):
+    def wrapped(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
         # on_state is the VeronicaApp instance's bound _on_state method, so
         # __self__ recovers the app without racing its constructor's
         # `app = VeronicaApp()` assignment on the main thread.
         app = on_state.__self__
         seen["state"] = app._state
-        return original(s, on_state=on_state, on_event=on_event, audio=audio)
+        return original(s, on_state=on_state, on_event=on_event, audio=audio, on_quit=on_quit)
 
     monkeypatch.setattr(menubar, "build_orchestrator", wrapped)
     app, orch = _make_app(menubar, orch_holder)
@@ -445,6 +446,30 @@ def test_toggle_login_item_enables_and_disables(fake_env, monkeypatch, tmp_path)
         assert item.state is False
     finally:
         _quit_and_join(app)
+
+
+# -- commit: voice "quit" intent -> menu bar quit ------------------------------
+
+def test_build_orchestrator_receives_on_quit_callback(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert orch.on_quit == app._schedule_quit
+    finally:
+        _quit_and_join(app)
+
+
+def test_schedule_quit_calls_quit_via_apphelper(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    from PyObjCTools import AppHelper
+    calls = []
+    monkeypatch.setattr(AppHelper, "callAfter", lambda fn: calls.append(fn))
+    app._schedule_quit()
+    assert len(calls) == 1
+    calls[0]()
+    app._thread.join(timeout=2)
+    assert fake_rumps.quit_called is True
 
 
 def test_real_rumps_restored_after_fixture_teardown():

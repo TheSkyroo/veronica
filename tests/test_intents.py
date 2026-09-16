@@ -54,6 +54,26 @@ from veronica.brain.intents import match_intent, match_memory_intent, normalize
         ("hide the hud", "hud_hide"),
         ("hide the panel", "hud_hide"),
         ("veronica hide", "hud_hide"),
+        # mute
+        ("mute", "mute"),
+        ("mute yourself", "mute"),
+        ("be quiet", "mute"),
+        ("silence", "mute"),
+        ("Veronica, mute yourself", "mute"),
+        ("mute please", "mute"),
+        # unmute
+        ("unmute", "unmute"),
+        ("unmute yourself", "unmute"),
+        ("you can talk", "unmute"),
+        ("speak again", "unmute"),
+        # quit
+        ("quit", "quit"),
+        ("quit veronica", "quit"),
+        ("shut down", "quit"),
+        ("shut yourself down", "quit"),
+        ("exit", "quit"),
+        ("turn off completely", "quit"),
+        ("hey veronica, quit", "quit"),
         # no match
         ("what time is it", None),
         ("", None),

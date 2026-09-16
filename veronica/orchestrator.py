@@ -38,7 +38,8 @@ class Orchestrator:
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  partial_stt=None, store=None,
                  on_state: Callable[[str], None] | None = None,
-                 on_event: Callable[[str, Any], None] | None = None) -> None:
+                 on_event: Callable[[str, Any], None] | None = None,
+                 on_quit: Callable[[], None] | None = None) -> None:
         self.s = settings
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
@@ -46,6 +47,7 @@ class Orchestrator:
         self.store = store
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
+        self._on_quit = on_quit or (lambda: None)
         self.state = "idle"
         self._muted = False
         self._unmute_event = asyncio.Event()
@@ -487,11 +489,25 @@ class Orchestrator:
                 self._emit("hud", {"mode": "hide"})
                 self._set("idle")
                 return
+            if intent == "mute":
+                self.player.reset()
+                await self.say("Muted.")
+                self.muted = True
+                self._emit("hud", {"mode": "hide"})
+                self._set("idle")
+                return
             mem = None if intent is not None else match_memory_intent(text)
             if intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
                 await self.say("Okay.")
+            elif intent == "quit":
+                self.player.reset()
+                if await self.confirm("Quit Veronica"):
+                    await self.say("Goodbye.")
+                    self._on_quit()
+                    self._set("idle")
+                    return
             elif mem is not None:
                 kind, arg = mem
                 self.player.reset()
@@ -531,6 +547,21 @@ class Orchestrator:
             if pcm is None:
                 break
         self._set("idle")
+
+    async def _muted_capture(self) -> None:
+        """Called after a wake word fires while muted: capture exactly one
+        utterance (no chime, no HUD show — state/HUD stay untouched) and
+        check only whether it's the unmute phrase. Anything else (including
+        silence) is ignored silently; run_forever goes straight back to
+        idle either way."""
+        self._loop = asyncio.get_running_loop()
+        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+        if pcm is None:
+            return
+        text = await self.stt.atranscribe(pcm)
+        if match_intent(text) == "unmute":
+            self.muted = False
+            await self.say("I'm back.")
 
     # -- announcements ----------------------------------------------------------
     async def announce(self, text: str) -> None:
@@ -611,7 +642,8 @@ class Orchestrator:
                 # prior barge listener ended) must not start a spurious turn.
                 continue
             if self.muted:
-                log.info("muted; skipping turn")
+                log.info("muted; capturing one utterance to check for unmute")
+                await self._muted_capture()
                 continue
             try:
                 await self.one_turn()

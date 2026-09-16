@@ -65,6 +65,20 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
 switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
 
+### Mute, unmute, quit
+
+A few more phrases are also handled locally:
+
+- **Mute** — "mute", "mute yourself", "be quiet", "silence": she says "Muted.", stops listening for commands, and
+  hides the HUD. While muted she still wakes on the wake word, but only to check for the unmute phrase below — she
+  won't chime, show the HUD, or respond to anything else (including calendar/timer announcements, which are held
+  until you unmute her).
+- **Unmute** — "unmute", "unmute yourself", "you can talk", "speak again": say this after the wake word while muted
+  and she says "I'm back." and resumes normal listening. Anything else said after the wake word while muted is
+  ignored silently.
+- **Quit** — "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely": asks for
+  confirmation; say "yes" and she says "Goodbye." and quits the app.
+
 ## Calendar, mail, reminders, timers
 
 Veronica can read your Calendar events, unread Mail, and Reminders, and create events/reminders or send mail (all

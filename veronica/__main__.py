@@ -17,7 +17,7 @@ from veronica.tools import memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
-def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True) -> Orchestrator:
+def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None) -> Orchestrator:
     holder: dict = {}
 
     async def confirm(summary: str, detail: str = "") -> bool:
@@ -41,6 +41,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         store=store,
         on_state=on_state,
         on_event=on_event,
+        on_quit=on_quit,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))
@@ -55,8 +56,13 @@ def _ask_stdin(prompt: str) -> str:
         return "n"
 
 
+def _quit_noop() -> None:
+    # --text mode has no running app/menu bar to tear down; just acknowledge.
+    print("[quit] Veronica isn't running as a background app in --text mode.")
+
+
 async def _text_mode(text: str) -> None:
-    orch = build_orchestrator(settings, audio=False)
+    orch = build_orchestrator(settings, audio=False, on_quit=_quit_noop)
     # no mic in text mode: risky (confirm-class) tools ask y/N on stdin.
     async def confirm(summary: str, detail: str = "") -> bool:
         answer = await asyncio.to_thread(_ask_stdin, f"Run {summary}? [{detail}] [y/N] ")
