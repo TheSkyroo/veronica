@@ -19,6 +19,7 @@ from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.mac import mac_server
+from veronica.tools.memory_tools import memory_server
 from veronica.tools.pim import pim_server
 
 log = logging.getLogger("veronica.brain")
@@ -27,6 +28,7 @@ Confirm = Callable[[str, str], Awaitable[bool]]
 
 MAC_PREFIX = "mcp__mac__"
 PIM_PREFIX = "mcp__pim__"
+MEMORY_PREFIX = "mcp__memory__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -81,6 +83,17 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "timer_cancel":
             return f"Cancel timer {input.get('label', '')}"
         return short
+    if tool_name.startswith(MEMORY_PREFIX):
+        short = tool_name[len(MEMORY_PREFIX):]
+        if short == "recall":
+            return f"Recall {input.get('query', '')}"
+        if short == "facts_list":
+            return "List remembered facts"
+        if short == "fact_add":
+            return f"Remember {input.get('text', '')}"
+        if short == "fact_delete":
+            return f"Forget {input.get('text', '')}"
+        return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
     for key in ("command", "query", "url", "pattern", "file_path"):
@@ -99,10 +112,12 @@ class Brain:
         settings: Settings,
         confirm: Confirm,
         on_tool: Callable[[str, str], None] | None = None,
+        memory=None,
     ) -> None:
         self.s = settings
         self._confirm = confirm
         self._on_tool = on_tool
+        self._memory = memory
         self._client = None
         self._in_flight = False
 
@@ -133,16 +148,28 @@ class Brain:
         return PermissionResultDeny(message="user declined")
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
+        # Re-read facts/recent turns here (not cached) so a NEW client/session
+        # picks up anything remembered since the last one was created; the
+        # SDK session itself already carries context turn-to-turn within one
+        # client, so this only matters right after a fresh session starts.
+        facts: list[str] = []
+        recent: list[tuple[str, str]] = []
+        if self._memory is not None and self.s.memory_enabled:
+            facts = [text for _id, _ts, text in self._memory.facts()]
+            recent = [
+                (heard, reply)
+                for _ts, heard, reply in self._memory.recent(self.s.memory_recent_turns)
+            ]
         kwargs = {}
         if self.s.max_turns is not None:
             kwargs["max_turns"] = self.s.max_turns
         return ClaudeAgentOptions(
-            system_prompt=system_prompt(dt.date.today()),
+            system_prompt=system_prompt(dt.date.today(), facts, recent),
             effort=self.s.effort,
             permission_mode="default",
             can_use_tool=self._can_use_tool,
             resume=resume,
-            mcp_servers={"mac": mac_server, "pim": pim_server},
+            mcp_servers={"mac": mac_server, "pim": pim_server, "memory": memory_server},
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool
             # Only our confirmation gate may allow tools; ignore any

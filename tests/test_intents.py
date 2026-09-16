@@ -1,6 +1,6 @@
 import pytest
 
-from veronica.brain.intents import match_intent, normalize
+from veronica.brain.intents import match_intent, match_memory_intent, normalize
 
 
 @pytest.mark.parametrize(
@@ -77,3 +77,32 @@ def test_normalize_strips_punctuation_and_case():
     assert normalize("Stop.") == "stop"
     assert normalize("That's all!") == "thats all"
     assert normalize(None) == ""
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("remember that I like tea", ("remember", "I like tea")),
+        ("remember I like tea", ("remember", "I like tea")),
+        ("Remember that my birthday is in June.", ("remember", "my birthday is in June")),
+        ("forget that I like tea", ("forget", "I like tea")),
+        ("forget I like tea", ("forget", "I like tea")),
+        ("Veronica, remember I work at Acme", ("remember", "I work at Acme")),
+        ("hey veronica remember that I'm allergic to peanuts", ("remember", "I'm allergic to peanuts")),
+        ("remember that", None),
+        ("remember", None),
+        ("forget", None),
+        ("remembering things is hard", None),
+        ("remember when we went to Paris", None),
+        ("remember what I told you", None),
+        ("remember how to make pasta", None),
+        ("remember if I locked the door", None),
+        ("remember why I called", None),
+        ("forget when we went to Paris", ("forget", "when we went to Paris")),
+        ("what time is it", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_match_memory_intent(heard, expected):
+    assert match_memory_intent(heard) == expected

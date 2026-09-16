@@ -40,6 +40,9 @@ def test_defaults(tmp_home):
     assert s.vad_silence_ms == 600
     assert s.barge_threshold == 0.8
     assert s.chime_wake_hz == 880 and s.chime_followup_hz == 660
+    assert s.memory_enabled is True
+    assert s.memory_recent_turns == 6
+    assert s.memory_path == tmp_home / "memory.db"
 
 
 def test_dirs_created(tmp_home):

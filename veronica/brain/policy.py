@@ -50,6 +50,16 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "timer_list": "allow",
         "timer_cancel": "allow",
     },
+    "memory": {
+        "recall": "allow",
+        "facts_list": "allow",
+        # A fact persists across every future session (it's injected into
+        # the system prompt of every new client), unlike a normal reply, so
+        # it gets the same confirm gate as anything else that changes
+        # standing state rather than just answering the current turn.
+        "fact_add": "confirm",
+        "fact_delete": "confirm",
+    },
 }
 
 MCP_PREFIX_FMT = "mcp__{server}__"

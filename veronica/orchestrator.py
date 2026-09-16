@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from veronica.audio.chime import tone
-from veronica.brain.intents import match_intent, normalize
+from veronica.brain.intents import match_intent, match_memory_intent, normalize
 from veronica.config import Settings
 from veronica.ui.events import envelope
 
@@ -36,13 +36,14 @@ class Orchestrator:
         return False
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
-                 partial_stt=None,
+                 partial_stt=None, store=None,
                  on_state: Callable[[str], None] | None = None,
                  on_event: Callable[[str, Any], None] | None = None) -> None:
         self.s = settings
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
         self.partial_stt = partial_stt
+        self.store = store
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
         self.state = "idle"
@@ -320,6 +321,8 @@ class Orchestrator:
             self._speech_queue = None
         if not spoken:
             await self.say("I have nothing to say to that.")
+        elif self.store is not None and self.s.memory_enabled:
+            self.store.add_turn(text, " ".join(spoken))
         return spoken
 
     # -- confirmation gate ----------------------------------------------------
@@ -484,10 +487,21 @@ class Orchestrator:
                 self._emit("hud", {"mode": "hide"})
                 self._set("idle")
                 return
+            mem = None if intent is not None else match_memory_intent(text)
             if intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
                 await self.say("Okay.")
+            elif mem is not None:
+                kind, arg = mem
+                self.player.reset()
+                if kind == "remember":
+                    if self.store is not None:
+                        self.store.add_fact(arg)
+                    await self.say("Got it.")
+                else:
+                    n = self.store.delete_fact_matching(arg) if self.store is not None else 0
+                    await self.say("Forgotten." if n else "I didn't have that.")
             elif not text:
                 if is_followup:
                     # A follow-up capture (not the first listen after wake,
