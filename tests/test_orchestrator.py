@@ -1776,3 +1776,40 @@ async def test_handle_text_without_images_omits_kwarg():
     o, _ = build()
     await o.handle_text("hi")
     assert o.brain.asked == ["hi"]
+
+
+# -- batch A: music fast path --------------------------------------------------
+
+from veronica.tools import music as music_tools_mod
+
+
+async def test_music_pause_intent_speaks_result(monkeypatch):
+    async def fake_pause(args):
+        return {"content": [{"type": "text", "text": "Paused."}]}
+
+    monkeypatch.setattr(music_tools_mod.music_pause, "handler", fake_pause)
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["pause"])
+    await o.one_turn()
+    assert "Paused." in o.tts.said
+    assert ("tool", {"summary": "Pause music", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+
+async def test_music_now_playing_intent_speaks_result(monkeypatch):
+    async def fake_now_playing(args):
+        return {"content": [{"type": "text", "text": "Now playing Foo by Bar."}]}
+
+    monkeypatch.setattr(music_tools_mod.music_now_playing, "handler", fake_now_playing)
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's playing"])
+    await o.one_turn()
+    assert "Now playing Foo by Bar." in o.tts.said
+
+
+async def test_music_intent_error_speaks_fallback(monkeypatch):
+    async def fake_next(args):
+        return {"content": [{"type": "text", "text": "error: no player"}], "is_error": True}
+
+    monkeypatch.setattr(music_tools_mod.music_next, "handler", fake_next)
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["skip"])
+    await o.one_turn()
+    assert "Sorry, I couldn't do that." in o.tts.said

@@ -9,8 +9,15 @@ from typing import Any
 import numpy as np
 
 from veronica.audio.chime import tone
-from veronica.brain.intents import match_intent, match_memory_intent, match_screen_intent, normalize
+from veronica.brain.intents import (
+    match_intent,
+    match_memory_intent,
+    match_music_intent,
+    match_screen_intent,
+    normalize,
+)
 from veronica.config import Settings
+from veronica.tools import music as music_tools
 from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
 
@@ -347,6 +354,28 @@ class Orchestrator:
         data, _path = result
         return await self.handle_text(text, images=[data])
 
+    # -- music -----------------------------------------------------------------
+    _MUSIC_SUMMARIES = {
+        "play": "Play music", "pause": "Pause music", "next": "Next track",
+        "prev": "Previous track", "now_playing": "What's playing",
+    }
+
+    async def _music_turn(self, action: str) -> None:
+        """Local fast path for "pause"/"resume"/"next song"/"previous"/
+        "what's playing": call the music tool directly (no brain round
+        trip) and speak its one-line result text."""
+        handlers = {
+            "play": music_tools.music_play, "pause": music_tools.music_pause,
+            "next": music_tools.music_next, "prev": music_tools.music_prev,
+            "now_playing": music_tools.music_now_playing,
+        }
+        self._emit("tool", {"summary": self._MUSIC_SUMMARIES[action], "decision": "auto"})
+        res = await handlers[action].handler({})
+        text = res["content"][0]["text"]
+        if res.get("is_error"):
+            text = "Sorry, I couldn't do that."
+        await self.say(text)
+
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
         if self.muted:
@@ -519,6 +548,10 @@ class Orchestrator:
                 return
             mem = None if intent is not None else match_memory_intent(text)
             screen_intent = intent is None and mem is None and match_screen_intent(text)
+            music_action = (
+                None if (intent is not None or mem is not None or screen_intent)
+                else match_music_intent(text)
+            )
             if intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
@@ -551,6 +584,9 @@ class Orchestrator:
                     return
                 self.player.reset()
                 await self.say("Sorry, didn't catch that.")
+            elif music_action:
+                self.player.reset()
+                await self._music_turn(music_action)
             elif screen_intent:
                 barged = await self._run_with_barge(self._screen_turn(text))
                 if barged:

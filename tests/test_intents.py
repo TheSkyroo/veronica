@@ -1,6 +1,12 @@
 import pytest
 
-from veronica.brain.intents import match_intent, match_memory_intent, match_screen_intent, normalize
+from veronica.brain.intents import (
+    match_intent,
+    match_memory_intent,
+    match_music_intent,
+    match_screen_intent,
+    normalize,
+)
 
 
 @pytest.mark.parametrize(
@@ -149,3 +155,32 @@ def test_match_memory_intent(heard, expected):
 )
 def test_match_screen_intent(heard, expected):
     assert match_screen_intent(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("pause", "pause"),
+        ("pause music", "pause"),
+        ("stop the music", "pause"),
+        ("resume", "play"),
+        ("resume music", "play"),
+        ("play music", "play"),
+        ("unpause", "play"),
+        ("next song", "next"),
+        ("skip", "next"),
+        ("skip song", "next"),
+        ("previous", "prev"),
+        ("previous song", "prev"),
+        ("go back", "prev"),
+        ("what's playing", "now_playing"),
+        ("whats playing", "now_playing"),
+        ("what song is this", "now_playing"),
+        ("Veronica, pause please", "pause"),
+        ("what time is it", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_match_music_intent(heard, expected):
+    assert match_music_intent(heard) == expected

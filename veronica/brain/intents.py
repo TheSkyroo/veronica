@@ -157,6 +157,56 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
     return None
 
 
+# Music playback fast path: matched exactly like the other local intents.
+# Kept as its own function (rather than folded into Intent) since it carries
+# no payload beyond which action to take, and never touches the brain.
+MusicAction = Literal["play", "pause", "next", "prev", "now_playing"]
+
+_MUSIC_PLAY_PHRASES = frozenset({"resume", "resume music", "play music", "unpause", "unpause music"})
+_MUSIC_PAUSE_PHRASES = frozenset({"pause", "pause music", "stop the music", "stop music"})
+_MUSIC_NEXT_PHRASES = frozenset({"next song", "next track", "skip", "skip song", "skip track"})
+_MUSIC_PREV_PHRASES = frozenset({"previous song", "previous track", "previous", "go back", "last song"})
+_MUSIC_NOW_PLAYING_PHRASES = frozenset({
+    "whats playing", "what is playing", "what's playing",
+    "what song is this", "what song is playing", "whats this song",
+})
+
+
+def _match_music_candidate(candidate: str) -> MusicAction | None:
+    if candidate in _MUSIC_PLAY_PHRASES:
+        return "play"
+    if candidate in _MUSIC_PAUSE_PHRASES:
+        return "pause"
+    if candidate in _MUSIC_NEXT_PHRASES:
+        return "next"
+    if candidate in _MUSIC_PREV_PHRASES:
+        return "prev"
+    if candidate in _MUSIC_NOW_PLAYING_PHRASES:
+        return "now_playing"
+    return None
+
+
+def match_music_intent(text: str) -> MusicAction | None:
+    """Match a heard utterance against the music-control phrase sets (see
+    A3): "pause"/"pause music", "resume"/"play music", "next song"/"skip",
+    "previous"/"previous song", "what's playing". Matched the same way as
+    match_intent (whole utterance, then each clause)."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        result = _match_music_candidate(candidate)
+        if result is not None:
+            return result
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            result = _match_music_candidate(candidate)
+            if result is not None:
+                return result
+    return None
+
+
 def match_screen_intent(text: str) -> bool:
     """True if `text` (as-spoken) asks Veronica to look at the screen —
     matched the same way as match_intent (whole utterance, then each
