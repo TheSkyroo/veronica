@@ -16,7 +16,10 @@ from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
 from veronica.ui.relaunch import relaunch
 from veronica.ui.settings import SettingsWindow, _main_thread
-from veronica.ui.settings.bridge import STARTING_UP, UPDATE_FAILED, SettingsBridge
+from veronica.ui.settings.bridge import UPDATE_FAILED, SettingsBridge
+from veronica.updater import UpdateInProgress
+
+log = logging.getLogger("veronica.ui")
 
 ACCESSIBILITY_PANE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
@@ -30,6 +33,9 @@ UPDATE_AVAILABLE_TITLE = "Update available — Restart to update"
 UPDATE_UPDATING_TITLE = "Updating…"
 UPDATE_FAILED_TITLE = "Update failed — check the log"
 UPDATE_CHECK_FAILED_TITLE = "Couldn't check for updates"
+UPDATE_READY_SPOKEN = "An update is ready. Say update yourself, or use the Settings window."
+UPDATE_LATEST_SPOKEN = "You're already on the latest."
+UPDATE_CHECK_FAILED_SPOKEN = "Couldn't check for updates, check the log."
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
 
@@ -122,35 +128,6 @@ class _NoopHud:
         pass
 
 
-class _LateStore:
-    """The settings bridge takes its history store at construction, but the
-    orchestrator (which owns the MemoryStore) is only built later, on the
-    background thread. Forward each call to whatever store the orchestrator
-    has *now*; before it exists, or with memory off, raise — the bridge's
-    dispatcher turns that into a friendly failure reply for the window."""
-
-    def __init__(self, get_orch) -> None:
-        self._get_orch = get_orch
-
-    def _store(self):
-        orch = self._get_orch()
-        if orch is None:
-            raise RuntimeError(STARTING_UP)
-        store = getattr(orch, "store", None)
-        if store is None:
-            raise RuntimeError("Memory is off.")
-        return store
-
-    def turns(self, **kw):
-        return self._store().turns(**kw)
-
-    def delete_turn(self, id: int) -> bool:
-        return self._store().delete_turn(id)
-
-    def clear_turns(self) -> int:
-        return self._store().clear_turns()
-
-
 class VeronicaApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("V ◯", quit_button=None)
@@ -160,13 +137,14 @@ class VeronicaApp(rumps.App):
         self._orch = None
         # -- settings window + self-update (Batch D) --------------------------
         # The bridge is pure Python and needs the orchestrator only at call
-        # time (get_orch / _LateStore), so both it and the window can be
-        # built now, before the background thread has built the orchestrator.
+        # time (get_orch, and the store callable), so both it and the window
+        # can be built now, before the background thread has built the
+        # orchestrator (and with it the MemoryStore).
         self._bundle_path = login_item.bundle_app_path()
         self._repo = version.REPO
         self._build_info = version.build_info()
         self._bridge = SettingsBridge(
-            settings=settings, get_orch=lambda: self._orch, store=_LateStore(lambda: self._orch),
+            settings=settings, get_orch=lambda: self._orch, store=lambda: getattr(self._orch, "store", None),
             run_on_loop=self._schedule, relaunch=self._relaunch, bundle_path=self._bundle_path,
             repo=self._repo, marshal=_main_thread,
         )
@@ -257,7 +235,7 @@ class VeronicaApp(rumps.App):
                 settings, on_state=self._on_state, on_event=lambda k, p: self._events.put((k, p)),
                 on_quit=self._schedule_quit,
                 updater_check=lambda: updater.check(self._repo, info=self._build_info),
-                updater_update=lambda st: updater.update(self._repo, st),
+                updater_update=self._voice_update,
                 relaunch=self._relaunch,
             )
             self._loop.run_until_complete(self._orch.warmup())
@@ -369,6 +347,35 @@ class VeronicaApp(rumps.App):
         called from any thread: quitting is marshalled to the main thread."""
         return relaunch(self._bundle_path, self._schedule_quit)
 
+    def _voice_update(self, status) -> str:
+        """The orchestrator's `updater_update` hook ("update yourself"): the
+        bridge owns the single update slot, so claim it first — a second
+        spoken update, or one while the window/menu is already updating,
+        raises UpdateInProgress instead of running two builds on dist/."""
+        if not self._bridge.begin_update():
+            raise UpdateInProgress("Updating already.")
+        try:
+            out = updater.update(self._repo, status)
+        except Exception:
+            self._bridge.end_update(UPDATE_FAILED)
+            raise
+        self._bridge.end_update()
+        return out
+
+    def _notify(self, subtitle: str, text: str, *, spoken: str | None = None) -> None:
+        """Post a notification; when the notification center isn't
+        available (rumps raises RuntimeError without a CFBundleIdentifier —
+        the launcher execs the venv python, so NSBundle.mainBundle() is
+        .venv/bin), log it and have Veronica say it when she's next idle."""
+        try:
+            rumps.notification("Veronica", subtitle, text)
+            return
+        except RuntimeError as e:
+            log.info("notification unavailable (%s): %s — %s", e, subtitle, text)
+        orch = getattr(self, "_orch", None)
+        if orch is not None:
+            self._schedule(orch.announce(spoken or text))
+
     def _set_update_item(self, title: str, installable: bool = False) -> None:
         self._update_item.title = title
         self._update_item.set_callback(self.update_now if installable else None)
@@ -392,13 +399,14 @@ class VeronicaApp(rumps.App):
                 if not res.get("ok"):
                     self._set_update_item(UPDATE_CHECK_FAILED_TITLE)
                     if notify:
-                        rumps.notification("Veronica", "Couldn't check for updates", res.get("message") or "")
+                        self._notify("Couldn't check for updates", res.get("message") or "",
+                                     spoken=UPDATE_CHECK_FAILED_SPOKEN)
                     return
                 available = bool(res.get("available"))
                 self._set_update_item(UPDATE_AVAILABLE_TITLE if available else UPDATE_LATEST_TITLE, available)
                 if notify:
-                    rumps.notification("Veronica", "Update available" if available else "Up to date",
-                                       res.get("detail") or "")
+                    self._notify("Update available" if available else "Up to date", res.get("detail") or "",
+                                 spoken=UPDATE_READY_SPOKEN if available else UPDATE_LATEST_SPOKEN)
 
             _main_thread(apply)
 
@@ -416,7 +424,7 @@ class VeronicaApp(rumps.App):
         failure through the state push handled in _on_bridge_state)."""
         res = self._bridge.update_now()
         if not res.get("ok"):
-            rumps.notification("Veronica", "", res.get("message") or "")
+            self._notify("", res.get("message") or "")
             return
         self._set_update_item(UPDATE_UPDATING_TITLE)
 
@@ -425,8 +433,12 @@ class VeronicaApp(rumps.App):
         keep the update item in step with checks/updates started anywhere —
         the menu, the hourly timer, or the settings window's About tab —
         then hand the state to the window."""
-        update = state.get("update") if isinstance(state, dict) else None
-        if isinstance(update, dict) and (update.get("detail") or update.get("available")):
+        about = state.get("about") if isinstance(state, dict) else None
+        about = about if isinstance(about, dict) else {}
+        update = about.get("update")
+        if about.get("updating"):
+            self._set_update_item(UPDATE_UPDATING_TITLE)
+        elif isinstance(update, dict) and (update.get("detail") or update.get("available")):
             if update.get("detail") == UPDATE_FAILED:
                 self._set_update_item(UPDATE_FAILED_TITLE)
             elif update.get("available"):

@@ -39,6 +39,7 @@ from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
 from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
+from veronica.updater import UpdateInProgress
 
 log = logging.getLogger("veronica.orchestrator")
 
@@ -872,8 +873,11 @@ class Orchestrator:
         """Local fast path for "update yourself" / "check for updates":
         check on a thread, and if something newer exists, pull/build (also
         on a thread) and relaunch — this IS the in-progress turn, so the
-        settings bridge's idle rule doesn't apply; a barge cancels it like
-        any other turn. Nothing is injected in --text mode/tests."""
+        settings bridge's idle rule doesn't apply. It runs outside the
+        barge race so the build can't be orphaned mid-way; the app's
+        `updater_update` hook holds the bridge's single update slot and
+        raises UpdateInProgress when one is already running. Nothing is
+        injected in --text mode/tests."""
         if self.updater_check is None or self.updater_update is None:
             await self.say("Updates aren't available in this mode.")
             return
@@ -887,17 +891,29 @@ class Orchestrator:
         if not status.available:
             await self.say("You're already on the latest.")
             return
+        # Start the work first: the hook claims the bridge's update slot
+        # (or refuses at once), so give it a beat before announcing.
+        work = asyncio.ensure_future(asyncio.to_thread(self.updater_update, status))
+        await asyncio.wait({work}, timeout=0.05)
+        if work.done() and isinstance(work.exception(), UpdateInProgress):
+            await self.say("An update is already running.")
+            return
         await self.say("Updating, back in a moment.")
         self._emit("tool", {"summary": "Update Veronica", "decision": "auto"})
         self._set("thinking")
         try:
-            log.info("update: %s", await asyncio.to_thread(self.updater_update, status))
+            log.info("update: %s", await work)
+        except UpdateInProgress:
+            await self.say("An update is already running.")
+            return
         except Exception:
             log.exception("update failed")
             await self.say("The update failed, check the log.")
             return
-        if self.relaunch is not None:
-            self.relaunch()
+        if self.relaunch is None or not self.relaunch():
+            # relaunch() quits when it could schedule the reopen (or has no
+            # bundle to reopen); still here means neither happened.
+            await self.say("Update installed. Restart me from the terminal.")
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -1281,14 +1297,10 @@ class Orchestrator:
                 self.player.reset()
                 await self.say(version.describe())
             elif update_intent:
+                # Deliberately NOT under _run_with_barge: a barge would
+                # cancel the turn and orphan a half-done pull/build.
                 self.player.reset()
-                barged = await self._run_with_barge(self._update_turn())
-                if barged:
-                    pcm = await self._relisten(barged)
-                    is_followup = False
-                    if pcm is None:
-                        break
-                    continue
+                await self._update_turn()
             elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
                 self.player.reset()
                 barged = await self._run_with_barge(self._brief_now_turn())

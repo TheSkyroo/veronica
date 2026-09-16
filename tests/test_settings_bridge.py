@@ -608,11 +608,11 @@ def test_state_push_goes_through_marshal():
     h.bridge.on_state_changed = lambda st: (delivered.append(st), threads.append(threading.current_thread().name))
     h.bridge.check_update()          # pushes (from this thread) and caches the status
     assert len(marshalled) == 1
-    h.bridge.update_now()
-    assert len(marshalled) == 2 and len(delivered) == 2
+    h.bridge.update_now()            # pushes "updating" (this thread) and the failure (worker)
+    assert len(marshalled) == 3 and len(delivered) == 3
     assert threads[-1] != threading.main_thread().name  # the fake marshal ran it inline, on the worker
     h.bridge.set("listening", "followup_window_s", 5)
-    assert len(marshalled) == 3
+    assert len(marshalled) == 4
 
 
 def test_marshal_is_a_constructor_kwarg(h):
@@ -698,3 +698,42 @@ def test_check_update_passes_cached_build_info(h):
     h.bridge.get_state()   # primes the cache
     h.bridge.check_update()
     assert seen == [FAKE_VERSION.build_info()]
+
+
+# -- fix round 1: single-writer update guard + callable store ---------------------
+def test_begin_end_update_guard():
+    h = Harness()
+    assert h.bridge.begin_update() is True
+    assert h.bridge.begin_update() is False          # already updating
+    assert h.bridge.get_state()["about"]["updating"] is True
+    assert h.states[-1]["about"]["updating"] is True  # pushed so the window/menu show it
+    h.bridge.end_update("The update failed, check the log.")
+    assert h.bridge.get_state()["about"]["updating"] is False
+    upd = h.bridge.get_state()["about"]["update"]
+    assert upd["available"] is True and "failed" in upd["detail"]
+    assert h.bridge.begin_update() is True           # a fresh attempt clears the error
+    assert h.bridge.get_state()["about"]["update"]["detail"] != "The update failed, check the log."
+    h.bridge.end_update()
+    assert h.bridge.get_state()["about"]["updating"] is False
+
+
+def test_update_now_refused_while_voice_update_runs():
+    h = Harness(updater=FakeUpdater(status=_available()))
+    assert h.bridge.begin_update() is True
+    assert h.bridge.update_now() == {"ok": False, "message": "Busy, try again in a moment."}
+    assert h.updater.updates == []
+    h.bridge.end_update()
+    assert h.bridge.update_now()["ok"] is True
+    assert h.relaunches == 1
+    assert h.bridge.get_state()["about"]["updating"] is False
+
+
+def test_callable_store_is_resolved_per_call():
+    h = Harness()
+    holder = {"store": None}
+    h.bridge._store = lambda: holder["store"]
+    assert h.bridge.history() == {"ok": False, "message": "Memory is off.", "items": []}
+    holder["store"] = h.store
+    assert h.bridge.history(query="wea", limit=10, offset=5)["ok"] is True
+    assert h.bridge.forget_turn(1)["ok"] is True
+    assert h.bridge.clear_history()["ok"] is True

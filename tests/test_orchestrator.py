@@ -3414,8 +3414,61 @@ async def test_update_intent_check_failure_speaks(caplog):
     assert o.tts.said == ["Couldn't check for updates, check the log."]
 
 
-async def test_update_and_version_intents_ignored_during_dictation_guard():
+async def test_update_phrase_inside_longer_request_goes_to_brain():
     # "update my calendar" is not the update intent: it goes to the brain
     o, _, _ = build_d(["update my calendar"])
     await o.one_turn()
     assert o.brain.asked == ["update my calendar"]
+
+
+async def test_update_intent_already_running_speaks():
+    from veronica.updater import UpdateInProgress
+
+    def busy(_st):
+        raise UpdateInProgress("Updating already.")
+
+    calls = []
+    o, _, ev = build_d(["update yourself"], updater_check=lambda: _status("remote"), updater_update=busy,
+                       relaunch=lambda: calls.append("relaunch") or True)
+    await o.one_turn()
+    assert o.tts.said == ["An update is already running."]
+    assert calls == []
+    assert not any(k == "tool" for k, _ in ev)
+
+
+async def test_update_intent_is_not_cancelled_by_barge():
+    """The pull/build must never be orphaned by a wake-word barge: the update
+    turn runs outside the barge race, so a wake during it changes nothing
+    and the relaunch still happens."""
+    class BargingWake(Wake):
+        def __init__(self): self.waits = 0
+        async def wait(self, threshold=None, suppress=None):
+            self.waits += 1
+            return True                          # would barge immediately
+
+    class Brain2(Brain):
+        def __init__(self): super().__init__(); self.interrupts = 0
+        async def interrupt(self): self.interrupts += 1
+
+    calls = []
+
+    def slow_update(st):
+        import time
+        time.sleep(0.05)
+        calls.append(("update", st))
+        return "log"
+
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("remote"), updater_update=slow_update,
+                      relaunch=lambda: calls.append(("relaunch",)) or True)
+    o.wake = BargingWake(); o.brain = Brain2()
+    await o.one_turn()
+    assert [c[0] for c in calls] == ["update", "relaunch"]
+    assert o.brain.interrupts == 0
+    assert o.wake.waits == 0                     # no barge listener ran during the update
+
+
+async def test_update_intent_relaunch_not_scheduled_speaks_restart_hint():
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=lambda: False)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "Update installed. Restart me from the terminal."]

@@ -32,6 +32,11 @@ class UpdateError(RuntimeError):
     pass
 
 
+class UpdateInProgress(UpdateError):
+    """Raised by the app's update hook when another update (spoken, menu or
+    settings window) already holds the update slot."""
+
+
 @dataclass
 class UpdateStatus:
     available: bool

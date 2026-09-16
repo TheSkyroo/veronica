@@ -99,6 +99,9 @@ class SettingsBridge:
     ) -> None:
         self._settings = settings
         self._get_orch = get_orch
+        #: A store, None, or a zero-arg callable returning either (the menu
+        #: bar passes a callable: its orchestrator — and so the MemoryStore
+        #: — only exists once the background thread has built it).
         self._store = store
         self._run_on_loop = run_on_loop
         self._prefs = prefs
@@ -123,6 +126,7 @@ class SettingsBridge:
         self._update_status = None          # last UpdateStatus from check_update
         self._update_error: str | None = None
         self._updating = False
+        self._update_lock = threading.Lock()   # begin_update/end_update from any thread
         self._build_info: dict | None = None   # what's running never changes; computed once
 
     # -- dispatch ----------------------------------------------------------------
@@ -415,23 +419,30 @@ class SettingsBridge:
         return _ok()
 
     # -- history ----------------------------------------------------------------------
+    def _history_store(self):
+        store = self._store
+        return store() if callable(store) else store
+
     def history(self, query: str = "", limit: int = 200, offset: int = 0) -> dict:
-        if self._store is None:
+        store = self._history_store()
+        if store is None:
             return _fail("Memory is off.", items=[])
-        items = self._store.turns(limit=int(limit), offset=int(offset), query=str(query or ""))
+        items = store.turns(limit=int(limit), offset=int(offset), query=str(query or ""))
         return _ok(items=list(items))
 
     def forget_turn(self, id: int) -> dict:
-        if self._store is None:
+        store = self._history_store()
+        if store is None:
             return _fail("Memory is off.")
-        if not self._store.delete_turn(int(id)):
+        if not store.delete_turn(int(id)):
             return _fail("That one's already gone.")
         return _ok()
 
     def clear_history(self) -> dict:
-        if self._store is None:
+        store = self._history_store()
+        if store is None:
             return _fail("Memory is off.", count=0)
-        return _ok(count=int(self._store.clear_turns()))
+        return _ok(count=int(store.clear_turns()))
 
     # -- updates ------------------------------------------------------------------------
     def check_update(self) -> dict:
@@ -445,6 +456,28 @@ class SettingsBridge:
         self._push()
         return _ok(available=bool(status.available), kind=status.kind, detail=status.detail)
 
+    # The bridge is the single owner of "an update is running": both its
+    # own update_now and the orchestrator's spoken "update yourself" go
+    # through begin_update/end_update, so two pulls/builds can never run on
+    # dist/ at once, whichever way they were started.
+    def begin_update(self) -> bool:
+        """Claim the update slot. False if an update is already running."""
+        with self._update_lock:
+            if self._updating:
+                return False
+            self._updating = True
+            self._update_error = None
+        self._push()
+        return True
+
+    def end_update(self, error: str | None = None) -> None:
+        """Release the slot; `error` (e.g. UPDATE_FAILED) is what the window
+        and menu show for a failed one."""
+        with self._update_lock:
+            self._updating = False
+            self._update_error = error
+        self._push()
+
     def update_now(self) -> dict:
         orch = self._orch_or_none()
         if orch is None or getattr(orch, "state", None) != "idle" or self._updating:
@@ -457,19 +490,17 @@ class SettingsBridge:
             status = self._update_status
         if not status.available:
             return _fail(LATEST)
-        self._updating = True
-        self._update_error = None
+        if not self.begin_update():
+            return _fail(BUSY)
 
         def work() -> None:
             try:
                 log.info("update: %s", self._updater.update(self._repo, status))
             except Exception:  # surfaced in state instead of raised
                 log.exception("update failed")
-                self._update_error = UPDATE_FAILED
-                self._updating = False
-                self._push()
+                self.end_update(UPDATE_FAILED)
                 return
-            self._updating = False
+            self.end_update()
             self._relaunch()
 
         self._run_thread(work)

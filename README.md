@@ -273,11 +273,16 @@ box. Each row has a Forget button; "Clear history" removes them all. Facts you a
   the app, else live from git). The same line sits at the top of the menu bar menu ("About Veronica — …") and on
   the About tab.
 - **"Update yourself"** / "update now" / "check for updates" / "apna update karo" — checks the repo: if
-  `origin` has newer commits it says "Updating, back in a moment.", runs `git pull --ff-only`, `uv sync --frozen`
+  `origin` has newer commits it says "Updating, back in a moment.", runs `git pull --ff-only`, `uv sync`
   and rebuilds `dist/Veronica.app`, then relaunches. If there's no remote (or nothing new upstream) but the running
   build is behind the checked-out code, "update" just rebuilds and restarts you onto the latest local code. Already
-  current: "You're already on the latest." Anything failing: "The update failed, check the log."
-- **Menu bar** — "Check for Updates…" runs the same check and posts a notification; when something newer exists
+  current: "You're already on the latest." Couldn't reach the remote: "Couldn't check for updates, check the log."
+  Anything failing mid-update: "The update failed, check the log." Only one update runs at a time — a second
+  "update yourself" (or the window/menu) while one is running gets "An update is already running." / "Busy, try
+  again in a moment.". From a terminal run (no app bundle to reopen) it finishes with "Update installed. Restart me
+  from the terminal."
+- **Menu bar** — "Check for Updates…" runs the same check and posts a notification (when running from a terminal
+  there's no notification center, so she says the result instead, next time she's idle); when something newer exists
   the item below it becomes "Update available — Restart to update" (click to install). Veronica also checks quietly
   once an hour and only flips that item, no notification. The About tab has "Check now", "Update & restart",
   "Restart" and "Open log".
