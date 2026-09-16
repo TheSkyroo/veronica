@@ -255,16 +255,17 @@ used to need an environment variable or a voice command.
   utterance limits, briefing/nudge schedule, start at login, push-to-talk.
 - **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
   brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
-  Restart button (from the built `.app` it relaunches itself; from a terminal it quits and says "Restart me from
-  the terminal.").
+  Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a
+  terminal it quits and says "Restart me from the terminal.").
 
 Values you set here override the environment/`.env` defaults (they're stored in `~/.veronica/prefs.json`).
 
 ## History
 
 The History tab lists past turns (what you said, what she replied) from the local memory database, with a search
-box. Each row has a Forget button; "Clear history" removes them all. Facts you asked her to remember are separate
-(see Memory) and aren't touched by clearing history. With memory disabled the tab just says so.
+box. Each row has a Forget button; "Clear all" (with a confirm step) removes them all. Facts you asked her to
+remember are separate (see Memory) and aren't touched by clearing history. With memory disabled the tab just says
+so.
 
 ## Version & updates
 

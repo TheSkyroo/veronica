@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 LABEL = "io.manik.veronica"
@@ -29,14 +30,41 @@ def is_enabled() -> bool:
     return plist_path().exists()
 
 
-def bundle_app_path(argv0: str | None = None) -> Path | None:
+def bundle_app_path(
+    argv0: str | None = None,
+    env: Mapping[str, str] | None = None,
+    exists: Callable[[Path], bool] = Path.exists,
+) -> Path | None:
     """The .app bundle's path (…/Veronica.app) when running from one (i.e.
     launched via the built .app's launcher, as opposed to
     `uv run python -m veronica` / a bare interpreter), else None. This is
     also the "are we running from a bundle" check "Start at Login" needs,
-    since it must point the LaunchAgent at a real .app path. `argv0`
-    defaults to sys.argv[0]."""
+    since it must point the LaunchAgent at a real .app path.
+
+    The launcher script runs `python -m veronica`, so sys.argv[0] is
+    `…/veronica/__main__.py` rather than the bundle executable; the launcher
+    therefore exports `VERONICA_APP_BUNDLE` (checked first; must end in .app
+    and exist), and as a fallback the bundle is derived from
+    `VERONICA_BUNDLE_BUILD` (…/Veronica.app/Contents/Resources/build.json).
+    The argv[0]-ends-with-Contents/MacOS/Veronica heuristic is kept last.
+    `env`/`exists` are injectable for tests."""
     import sys
+
+    env = os.environ if env is None else env
+
+    explicit = (env.get("VERONICA_APP_BUNDLE") or "").strip()
+    if explicit:
+        p = Path(explicit)
+        if p.suffix == ".app" and exists(p):
+            return p
+
+    build_json = (env.get("VERONICA_BUNDLE_BUILD") or "").strip()
+    if build_json:
+        parents = Path(build_json).parents
+        if len(parents) >= 3:
+            p = parents[2]
+            if p.suffix == ".app" and exists(p):
+                return p
 
     candidate = argv0 if argv0 is not None else sys.argv[0]
     if not candidate.endswith(APP_EXEC_SUFFIX):

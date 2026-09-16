@@ -12,7 +12,9 @@ Phase 6):
         Resources/Veronica.icns copied from assets/Veronica.icns (built by scripts/make_icon.py)
         Resources/build.json    {sha, built_at, dirty, source} from git at build time; the launcher
                                  exports VERONICA_BUNDLE_BUILD pointing here so veronica.version reports
-                                 the built commit rather than whatever the repo has moved on to
+                                 the built commit rather than whatever the repo has moved on to;
+                                 it also exports VERONICA_APP_BUNDLE (the .app path) so relaunch /
+                                 Start at Login know where the bundle is (argv[0] is __main__.py)
         PkgInfo                 "APPL????"
 
 The build resolves `claude` via `shutil.which("claude")` in the build shell and fails with a clear error
@@ -44,7 +46,7 @@ REPO = Path(__file__).resolve().parent.parent
 BUNDLE_ID = "io.manik.veronica"
 APP_NAME = "Veronica"
 
-def _launcher_script(repo: Path, python: Path, claude_dir: str, build_json: Path) -> str:
+def _launcher_script(repo: Path, python: Path, claude_dir: str, build_json: Path, app: Path) -> str:
     # Plain (non-f) strings for the lines containing shell variable
     # expansions ($PATH, ${LANG:-...}) so Python's str.format/f-string
     # brace parsing never sees them.
@@ -53,6 +55,7 @@ def _launcher_script(repo: Path, python: Path, claude_dir: str, build_json: Path
         f'export PATH="{claude_dir}:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"\n'
         'export LANG="${LANG:-en_US.UTF-8}"\n'
         f'export VERONICA_BUNDLE_BUILD="{build_json}"\n'
+        f'export VERONICA_APP_BUNDLE="{app}"\n'
         f'cd "{repo}"\n'
         f'exec "{python}" -m veronica "$@"\n'
     )
@@ -131,7 +134,7 @@ def build_app(
 
     # launcher
     launcher = macos_dir / APP_NAME
-    launcher.write_text(_launcher_script(repo, venv_python, claude_dir, build_json))
+    launcher.write_text(_launcher_script(repo, venv_python, claude_dir, build_json, app.resolve()))
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     # Info.plist

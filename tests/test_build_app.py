@@ -143,3 +143,7 @@ def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
     text = (app / "Contents" / "MacOS" / "Veronica").read_text()
     assert f'export VERONICA_BUNDLE_BUILD="{build_json}"' in text
     assert text.index("export VERONICA_BUNDLE_BUILD=") < text.index("exec ")
+    # the launcher runs `python -m veronica` (argv0 = __main__.py), so it must
+    # tell the process where the .app is for relaunch / Start at Login
+    assert f'export VERONICA_APP_BUNDLE="{app}"' in text
+    assert text.index("export VERONICA_APP_BUNDLE=") < text.index("exec ")
