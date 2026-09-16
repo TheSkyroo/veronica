@@ -65,6 +65,23 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
 switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
 
+## Calendar, mail, reminders, timers
+
+Veronica can read your Calendar events, unread Mail, and Reminders, and create events/reminders or send mail (all
+via AppleScript/Apple Events — no OAuth, no cloud account of Veronica's own). She can also set simple in-process
+timers ("set a timer for 5 minutes") that speak and show a notification when they fire, even while she's idle.
+
+Requirements:
+
+- The relevant account(s) (iCloud, Gmail, Exchange, …) need to be added in System Settings → Internet Accounts (or
+  already configured in Calendar.app / Mail.app / Reminders.app) — Veronica reads/writes through those apps, not a
+  separate login.
+- The first time she touches Calendar, Mail, or Reminders, macOS shows an automation permission prompt ("Terminal"
+  or the app running Veronica wants to control "Calendar"/"Mail"/"Reminders") — approve it once per app. You can
+  review/reset these under System Settings → Privacy & Security → Automation.
+- Reading (calendar events, unread mail, mail search, reminders due, timers) runs automatically; creating an event
+  or reminder, sending mail, and any raw AppleScript still ask "Run …?" first, same as other risky actions.
+
 ## Run
     uv run python -m veronica                 # menu bar app
     uv run python -m veronica --text "hello"  # no audio, debug
