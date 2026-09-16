@@ -168,6 +168,109 @@ def test_add_turn_normalizes_whitespace(store):
     assert [(h, r) for _, h, r in rows] == [("hello there", "hi there")]
 
 
+def test_turns_newest_first_with_limit_and_offset(store):
+    for i in range(5):
+        store.add_turn(f"h{i}", f"r{i}")
+    rows = store.turns(limit=2, offset=1)
+    assert [(r["heard"], r["reply"]) for r in rows] == [("h3", "r3"), ("h2", "r2")]
+
+
+def test_turns_default_newest_first(store):
+    store.add_turn("hi", "hello")
+    store.add_turn("bye", "later")
+    rows = store.turns()
+    assert [r["heard"] for r in rows] == ["bye", "hi"]
+
+
+def test_turns_row_shape(store):
+    turn_id = store.add_turn("hi", "hello")
+    rows = store.turns()
+    assert rows[0]["id"] == turn_id
+    assert set(rows[0].keys()) == {"id", "ts", "heard", "reply"}
+    assert isinstance(rows[0]["ts"], str)
+
+
+def test_turns_empty(store):
+    assert store.turns() == []
+
+
+def test_turns_query_hits_heard_and_reply(store):
+    store.add_turn("what's the weather in paris", "sunny")
+    store.add_turn("remind me to buy milk", "the weather looks fine too")
+    store.add_turn("call mom", "ok")
+    rows = store.turns(query="weather")
+    heards = [r["heard"] for r in rows]
+    assert "what's the weather in paris" in heards
+    assert "remind me to buy milk" in heards
+    assert "call mom" not in heards
+
+
+def test_turns_query_no_match(store):
+    store.add_turn("hello", "hi")
+    assert store.turns(query="nonexistentword") == []
+
+
+def test_turns_query_empty_returns_all(store):
+    store.add_turn("hi", "hello")
+    store.add_turn("bye", "later")
+    rows = store.turns(query="")
+    assert len(rows) == 2
+
+
+def test_turns_query_without_fts(store):
+    store.fts_enabled = False
+    store.add_turn("what's the weather in paris", "sunny")
+    store.add_turn("remind me to buy milk", "ok")
+    rows = store.turns(query="weather")
+    assert [r["heard"] for r in rows] == ["what's the weather in paris"]
+
+
+def test_turns_without_fts_still_lists(store):
+    store.fts_enabled = False
+    store.add_turn("hi", "hello")
+    store.add_turn("bye", "later")
+    rows = store.turns()
+    assert [r["heard"] for r in rows] == ["bye", "hi"]
+
+
+def test_delete_turn_returns_true_and_removes(store):
+    id1 = store.add_turn("hi", "hello")
+    id2 = store.add_turn("bye", "later")
+    assert store.delete_turn(id1) is True
+    remaining = [r["id"] for r in store.turns()]
+    assert remaining == [id2]
+
+
+def test_delete_turn_returns_false_when_missing(store):
+    store.add_turn("hi", "hello")
+    assert store.delete_turn(9999) is False
+
+
+def test_delete_turn_also_removes_from_fts(store):
+    turn_id = store.add_turn("weather in paris", "sunny")
+    store.delete_turn(turn_id)
+    assert store.search("weather") == []
+
+
+def test_clear_turns_returns_count_and_empties(store):
+    store.add_turn("hi", "hello")
+    store.add_turn("bye", "later")
+    n = store.clear_turns()
+    assert n == 2
+    assert store.recent(10) == []
+    assert store.turns() == []
+
+
+def test_clear_turns_empty_store(store):
+    assert store.clear_turns() == 0
+
+
+def test_clear_turns_clears_fts_too(store):
+    store.add_turn("weather in paris", "sunny")
+    store.clear_turns()
+    assert store.search("weather") == []
+
+
 def test_close_then_reopen(tmp_path):
     s1 = MemoryStore(tmp_path / "memory.db")
     s1.add_fact("persisted")

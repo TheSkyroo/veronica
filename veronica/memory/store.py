@@ -134,6 +134,59 @@ class MemoryStore:
             ).fetchall()
             return rows
 
+    def turns(self, limit: int = 200, offset: int = 0, query: str = "") -> list[dict]:
+        limit = max(0, limit)
+        offset = max(0, offset)
+        with self._lock:
+            query = query or ""
+            if not query:
+                rows = self._conn.execute(
+                    "SELECT id, ts, heard, reply FROM turns ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
+            elif self.fts_enabled:
+                expr = _fts_match_expr(query)
+                if not expr:
+                    return []
+                rows = self._conn.execute(
+                    "SELECT t.id, t.ts, t.heard, t.reply FROM turns_fts f "
+                    "JOIN turns t ON t.id = f.rowid "
+                    "WHERE turns_fts MATCH ? ORDER BY rank LIMIT ? OFFSET ?",
+                    (expr, limit, offset),
+                ).fetchall()
+            else:
+                tokens = re.findall(r"\w+", query)
+                if not tokens:
+                    return []
+                clauses = " OR ".join(["heard LIKE ? OR reply LIKE ?"] * len(tokens))
+                params: list = []
+                for t in tokens:
+                    like = f"%{t}%"
+                    params.extend([like, like])
+                rows = self._conn.execute(
+                    f"SELECT id, ts, heard, reply FROM turns WHERE {clauses} "
+                    "ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                ).fetchall()
+        return [
+            {"id": rid, "ts": ts, "heard": heard, "reply": reply}
+            for rid, ts, heard, reply in rows
+        ]
+
+    def delete_turn(self, turn_id: int) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM turns WHERE id = ?", (turn_id,))
+            if self.fts_enabled:
+                self._conn.execute("DELETE FROM turns_fts WHERE rowid = ?", (turn_id,))
+            return cur.rowcount > 0
+
+    def clear_turns(self) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM turns")
+            if self.fts_enabled:
+                self._conn.execute("DELETE FROM turns_fts")
+            return cur.rowcount
+
     # -- facts --------------------------------------------------------------
     def add_fact(self, text: str) -> int:
         text = _normalize_ws(text)
