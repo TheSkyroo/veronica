@@ -29,6 +29,16 @@ from veronica.ui.events import envelope
 
 log = logging.getLogger("veronica.orchestrator")
 
+# Sentinel returned by the PTT-aware capture helpers in place of a PCM array
+# when the push-to-talk key went down while the capture was waiting: the
+# caller should switch to a hold-mode (push-to-talk) capture instead.
+PTT = object()
+
+# Trailing "stop dictation" (etc.) spoken in the same breath as the last
+# dictated sentence: stripped from what gets typed, and ends the dictation.
+_TRAILING_STOP_DICTATION_RE = re.compile(
+    r"[\s,.;!?]*\b(?:stop|end)\s+dictat(?:ion|ing)\b[\s.!?]*$", re.IGNORECASE
+)
 
 class Orchestrator:
     CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure"})
@@ -68,13 +78,28 @@ class Orchestrator:
         self.ready = False
         self._speech_lock = asyncio.Lock()
         self._speech_queue: asyncio.Queue | None = None
-        self._confirm_capturing = False
+        # True while ANY recorder.capture() is in flight (every capture goes
+        # through self._capture()), so a barge/PTT teardown knows it must
+        # recorder.stop() to unblock the capture thread before cancelling
+        # the turn — whether that capture belongs to confirm(), dictation,
+        # the follow-up window, or anything else.
+        self._capture_in_flight = False
         self._barged = False
         self._now_speaking = ""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
-        self._ptt_active = False
-        self._ptt_task: asyncio.Task | None = None
+        # Push-to-talk is a *signal* into run_forever / the in-flight turn,
+        # never a concurrent turn of its own: ptt_start() (key down) sets
+        # _ptt_event, which run_forever races alongside the wake listener
+        # while idle and _run_with_barge races alongside the barge listener
+        # during a turn; every other capture races it too. _ptt_held tracks
+        # the physical key (down..up); _ptt_capturing is True only while the
+        # hold-mode capture itself is in flight, so a release before the
+        # capture started is seen (via _ptt_held) rather than lost, and a
+        # second press during Veronica's answer can barge it (spec A2).
+        self._ptt_event = asyncio.Event()
+        self._ptt_held = False
+        self._ptt_capturing = False
         # Bumped every time a partial-eligible capture() returns, before STT
         # runs on it: any partial transcription still in flight (or one that
         # races in from the recorder thread right at that boundary) belongs
@@ -385,53 +410,118 @@ class Orchestrator:
         await self.say(text)
 
     # -- push-to-talk (A2) --------------------------------------------------------
-    async def ptt_start(self) -> None:
-        """Called when the push-to-talk key goes down. If idle: stop the
-        wake listener and jump straight to a hold-mode capture (no wake
-        word needed). If Veronica is speaking/thinking: barge in first
-        (same cancel path as a wake-word barge-in) then start the
-        hold-mode capture. A no-op if a push-to-talk capture is already in
-        flight (key-repeat flags-changed events, or a stray double dispatch)."""
-        if self._ptt_active:
+    def ptt_start(self) -> None:
+        """Called (on the event-loop thread, via the hotkey monitor's
+        call_soon_threadsafe) when the push-to-talk key goes down. Only
+        records the key state and raises the PTT signal; the actual work
+        happens inside run_forever (idle) or the in-flight turn's
+        _run_with_barge / PTT-aware capture, which race on _ptt_event —
+        so there is never a second turn or a second capture running
+        beside the main loop. Ignored until warmup is done, while muted,
+        and while the key is already down (key-repeat flags-changed
+        events, or a stray double dispatch)."""
+        if not self.ready:
+            log.info("ptt ignored: not ready")
             return
-        self._ptt_active = True
-        self._loop = asyncio.get_running_loop()
-        if self.state in ("speaking", "thinking"):
-            self.player.stop()
-            if self._confirm_capturing:
-                self.recorder.stop()
-            self._barged = True
-            await self.brain.interrupt()
-        self.wake.stop()
-        self._set("listening")
-        await self.chime(self.s.chime_wake_hz, 120)
-        self._ptt_task = asyncio.ensure_future(self._ptt_turn())
+        if self.muted:
+            log.info("ptt ignored: muted")
+            return
+        if self._ptt_held:
+            return
+        self._ptt_held = True
+        self._ptt_event.set()
 
-    async def _ptt_turn(self) -> None:
-        try:
-            pcm = await self.recorder.capture(max_s=None, hold=True, partial=True)
-            self._end_partial_window()
-            if pcm is None:
-                self._set("idle")
-                return
-            text = await self.stt.atranscribe(pcm)
-            self._emit("heard", text)
-            log.info("ptt heard=%r", text)
-            if not text:
-                self._set("idle")
-                return
-            await self.handle_text(text)
-            self._set("idle")
-        finally:
-            self._ptt_active = False
-
-    async def ptt_end(self) -> None:
-        """Called when the push-to-talk key is released: end the in-flight
-        hold-mode capture gracefully — Recorder.finish() returns whatever
-        was recorded so far, unlike stop() which discards it. A no-op if no
-        push-to-talk capture is in flight."""
-        if self._ptt_active:
+    def ptt_end(self) -> None:
+        """Called when the push-to-talk key is released. If the hold-mode
+        capture is in flight, end it gracefully — Recorder.finish()
+        returns whatever was recorded so far, unlike stop() which
+        discards it. If the capture hasn't started yet (quick tap: the
+        key came back up while the chime was still playing or before the
+        turn got to it), just drop the held flag so _listen_after_ptt
+        sees the key is already up and doesn't open the mic at all."""
+        if not self._ptt_held:
+            return
+        self._ptt_held = False
+        if self._ptt_capturing:
             self.recorder.finish()
+
+    async def _listen_after_ptt(self) -> np.ndarray | None:
+        """The push-to-talk capture: consume the PTT signal, then (unless
+        the key is already back up) chime *concurrently* with a hold-mode
+        capture that ends on key release (Recorder.finish()) or after
+        ptt_max_s at most. The capture is started before the chime is
+        awaited so a release during the chime lands on a real in-flight
+        capture instead of leaking."""
+        self._ptt_event.clear()
+        self._set("listening")
+        if not self._ptt_held:
+            log.info("ptt: key released before capture started; ignoring tap")
+            return None
+        chime_task = asyncio.ensure_future(self.chime(self.s.chime_wake_hz, 120))
+        self._ptt_capturing = True
+        try:
+            pcm = await self._capture(max_s=self.s.ptt_max_s, hold=True, partial=True)
+        finally:
+            self._ptt_capturing = False
+            self._end_partial_window()
+            with contextlib.suppress(BaseException):
+                await chime_task
+        return pcm
+
+    # -- captures ------------------------------------------------------------------
+    async def _capture(self, **kw) -> np.ndarray | None:
+        """Every recorder.capture() in the orchestrator goes through here so
+        _capture_in_flight is accurate for the barge/PTT teardown, and so
+        that cancelling the task that's capturing (a barged turn) never
+        abandons the recorder's worker thread mid-capture: the recorder
+        call is shielded, and on cancellation we ask it to stop and wait
+        for it to actually return before re-raising. Without this, the
+        next capture could start while the previous thread was still
+        draining the mic — and a stop() meant for the old capture could
+        be consumed by the new one."""
+        self._capture_in_flight = True
+        fut = asyncio.ensure_future(self.recorder.capture(**kw))
+        try:
+            return await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            if not fut.done():
+                self.recorder.stop()
+                with contextlib.suppress(BaseException):
+                    await fut
+            raise
+        finally:
+            self._capture_in_flight = False
+
+    async def _capture_or_ptt(self, **kw):
+        """A capture that the push-to-talk key can pre-empt: returns the
+        PCM (or None) as usual, or the PTT sentinel if the key went down
+        first — in which case the capture has already been stopped and
+        its thread has returned, so the caller can go straight to a
+        hold-mode capture with nothing else touching the mic."""
+        if self._ptt_event.is_set():
+            return PTT
+        cap = asyncio.ensure_future(self._capture(**kw))
+        ptt = asyncio.ensure_future(self._ptt_event.wait())
+        try:
+            done, _ = await asyncio.wait({cap, ptt}, return_when=asyncio.FIRST_COMPLETED)
+            if cap in done:
+                return cap.result()
+            log.info("ptt during capture")
+            self.recorder.stop()
+            with contextlib.suppress(BaseException):
+                await cap
+            return PTT
+        finally:
+            if not ptt.done():
+                ptt.cancel()
+                with contextlib.suppress(BaseException):
+                    await ptt
+            if not cap.done():
+                # only reachable if we were cancelled mid-wait; don't leave
+                # the capture thread orphaned.
+                self.recorder.stop()
+                with contextlib.suppress(BaseException):
+                    await cap
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -445,19 +535,36 @@ class Orchestrator:
 
     _STOP_DICTATION_WAIT_S = 3
 
+    @staticmethod
+    def _strip_trailing_stop_dictation(text: str) -> tuple[str, bool]:
+        """"hello there, stop dictation" -> ("hello there", True)."""
+        stripped = _TRAILING_STOP_DICTATION_RE.sub("", text)
+        return stripped.strip(), stripped != text
+
     async def _dictation_turn(self) -> None:
         """Local fast path for "dictate"/"start dictation": listen (each
         utterance endpointed normally by the VAD, looped like a follow-up
         window) until "stop dictation" is heard or STOP_DICTATION_WAIT_S of
-        silence passes with nothing said, then type the accumulated text
-        into whatever app is currently focused."""
+        silence passes with nothing said. Each utterance is typed into the
+        focused app as soon as it's transcribed (so a barge, error or
+        timeout mid-dictation keeps what was already said, rather than
+        losing everything); a trailing "stop dictation" spoken in the same
+        breath as the last sentence is stripped from what gets typed."""
         self.player.reset()
         await self.say("Go ahead.")
         self._set("listening")
-        parts: list[str] = []
+        typed_any = False
+        failed = False
         deadline = self._clock() + self.s.dictation_max_s
+        first = True
         while self._clock() < deadline:
-            pcm = await self.recorder.capture(max_s=self._STOP_DICTATION_WAIT_S, partial=True)
+            # skip_ms on the first capture only: drop the tail/echo of the
+            # "Go ahead." prompt so it isn't endpointed as a false onset.
+            pcm = await self._capture(
+                max_s=self._STOP_DICTATION_WAIT_S, partial=True,
+                skip_ms=self.s.followup_skip_ms if first else 0,
+            )
+            first = False
             self._end_partial_window()
             if pcm is None:
                 break
@@ -467,16 +574,25 @@ class Orchestrator:
                 break
             if is_stop_dictation(text):
                 break
-            parts.append(text)
+            text, stop = self._strip_trailing_stop_dictation(text)
+            if text:
+                if not typed_any:
+                    self._emit("tool", {"summary": "Dictate text", "decision": "auto"})
+                chunk = text if not typed_any else f" {text}"
+                res = await asyncio.to_thread(mac_tools.dictate_type, chunk)
+                if res.get("is_error"):
+                    failed = True
+                    break
+                typed_any = True
+            if stop:
+                break
         self._set("thinking")
-        full_text = " ".join(parts).strip()
-        if not full_text:
+        if failed:
+            await self.say("Sorry, I couldn't type that.")
+        elif not typed_any:
             await self.say("I didn't catch anything.")
-            self._set("idle")
-            return
-        self._emit("tool", {"summary": "Dictate text", "decision": "auto"})
-        res = await asyncio.to_thread(mac_tools.dictate_type, full_text)
-        await self.say("Sorry, I couldn't type that." if res.get("is_error") else "Done.")
+        else:
+            await self.say("Done.")
         self._set("idle")
 
     # -- confirmation gate ----------------------------------------------------
@@ -524,11 +640,7 @@ class Orchestrator:
                     "summary": summary, "detail": detail, "decision": "ask",
                     "timeout_ms": self.s.confirm_listen_s * 1000,
                 })
-                self._confirm_capturing = True
-                try:
-                    pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
-                finally:
-                    self._confirm_capturing = False
+                pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
                 if pcm is None:
                     return result
                 heard = await self.stt.atranscribe(pcm)
@@ -544,57 +656,84 @@ class Orchestrator:
         return result
 
     # -- barge-in ---------------------------------------------------------------
-    async def _run_with_barge(self, coro) -> bool:
-        """Run a turn coroutine; return True if the wake word interrupted it."""
+    async def _barge_teardown(self, turn: asyncio.Future) -> None:
+        """Common teardown for a wake-word barge and a push-to-talk press
+        landing mid-turn: stop playback, unblock ANY capture the turn has
+        in flight (confirm()'s yes/no, dictation, ...) so its thread
+        returns instead of being orphaned, cancel the turn, wait for it,
+        then interrupt the brain."""
+        self.player.stop()
+        if self._capture_in_flight:
+            # Unblock the capture thread (confirm()'s yes/no, dictation, a
+            # brain-side capture — whatever it is) so it returns promptly
+            # instead of being orphaned. _capture() additionally waits for
+            # that thread to actually return before letting the
+            # cancellation below propagate, so the mic is guaranteed free
+            # for the re-listen.
+            self.recorder.stop()
+        self._barged = True
+        turn.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await turn
+        await self.brain.interrupt()
+
+    async def _run_with_barge(self, coro) -> str | None:
+        """Run a turn coroutine racing the barge listener and the push-to-
+        talk signal. Returns None if the turn ran to completion, "wake" if
+        the wake word interrupted it, or "ptt" if the push-to-talk key did
+        (in which case the caller should do a hold-mode capture instead of
+        listening for a follow-up)."""
         turn = asyncio.ensure_future(coro)
         listener = asyncio.create_task(
             self.wake.wait(threshold=self.s.barge_threshold, suppress=self._suppress_text)
         )
+        ptt = asyncio.ensure_future(self._ptt_event.wait())
+        pending = {turn, listener, ptt}
         try:
-            done, _ = await asyncio.wait({turn, listener}, return_when=asyncio.FIRST_COMPLETED)
-            if listener in done and listener.exception() is not None:
-                # mic hiccup or similar in the barge listener; the turn is
-                # still good, so don't cancel it — just log and let it finish
-                # normally, as if no barge listener were running at all.
-                try:
-                    listener.result()
-                except Exception:
-                    log.exception("barge listener failed")
-                if not turn.done():
-                    await turn
-                return False
-            if listener in done and listener.result():
-                log.info("barge-in")
-                self.player.stop()
-                if self._confirm_capturing:
-                    # confirm() is blocked in recorder.capture(); wake its
-                    # thread so it returns None promptly instead of being
-                    # orphaned when we cancel the turn below.
-                    self.recorder.stop()
-                self._barged = True
-                turn.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await turn
-                await self.brain.interrupt()
-                return True
-            if listener not in done:
-                # turn finished first; the listener is still running, ask its
-                # thread to exit.
-                self.wake.stop()
-                await listener
-            if not turn.done():
-                # listener resolved (without a barge) before the turn did;
-                # just wait the rest of the way for the turn to finish.
-                await turn
-            turn.result()  # re-raise turn errors
-            return False
+            while True:
+                done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if ptt in done:
+                    log.info("ptt barge-in")
+                    await self._barge_teardown(turn)
+                    return "ptt"
+                if listener in done:
+                    pending.discard(listener)
+                    if listener.exception() is not None:
+                        # mic hiccup or similar in the barge listener; the
+                        # turn is still good, so don't cancel it — just log
+                        # and let it finish normally (PTT can still barge),
+                        # as if no barge listener were running at all.
+                        try:
+                            listener.result()
+                        except Exception:
+                            log.exception("barge listener failed")
+                    elif listener.result():
+                        log.info("barge-in")
+                        await self._barge_teardown(turn)
+                        return "wake"
+                    # listener resolved False (a stop() consumed) — keep
+                    # waiting on the turn (and PTT).
+                    if turn not in done:
+                        continue
+                if turn in done:
+                    if not listener.done():
+                        # turn finished first; the listener is still
+                        # running, ask its thread to exit.
+                        self.wake.stop()
+                        await listener
+                    turn.result()  # re-raise turn errors
+                    return None
         finally:
-            # Never leave either task pending, however we got here (normal
+            # Never leave any task pending, however we got here (normal
             # return, a re-raised turn error, or an exception out of the
             # listener itself, e.g. listener.result() raising because wait()
             # raised). Only stop() a listener that's still running here (one
             # already resolved True above and stopping it again would poison
             # the next wait() with a spurious immediate False).
+            if not ptt.done():
+                ptt.cancel()
+                with contextlib.suppress(BaseException):
+                    await ptt
             if not listener.done():
                 self.wake.stop()
                 with contextlib.suppress(BaseException):
@@ -614,14 +753,24 @@ class Orchestrator:
         pre = self.wake.take_preroll()
         if not self.recorder.has_speech(pre):
             await self.chime(self.s.chime_wake_hz, 120)
-        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s, preroll=pre, partial=True)
+        pcm = await self._capture_or_ptt(max_s=self.s.listen_wait_s, preroll=pre, partial=True)
         self._end_partial_window()
         return pcm
 
-    async def one_turn(self) -> None:
-        """Called after wake word: listen, answer, then follow-up window."""
+    async def _relisten(self, how: str | None):
+        """The capture that follows a barge: a hold-mode capture if the
+        push-to-talk key caused it, else the usual post-wake listen — and
+        if PTT lands during that listen, a hold capture after all."""
+        pcm = await self._listen_after_ptt() if how == "ptt" else await self._listen_after_wake()
+        if pcm is PTT:
+            pcm = await self._listen_after_ptt()
+        return pcm
+
+    async def one_turn(self, ptt: bool = False) -> None:
+        """Called after the wake word (or, with ptt=True, a push-to-talk
+        press while idle): listen, answer, then follow-up window."""
         self._loop = asyncio.get_running_loop()
-        pcm = await self._listen_after_wake()
+        pcm = await self._relisten("ptt" if ptt else None)
         if pcm is None:
             self._set("idle")
             return
@@ -705,7 +854,7 @@ class Orchestrator:
             elif dictation_intent:
                 barged = await self._run_with_barge(self._dictation_turn())
                 if barged:
-                    pcm = await self._listen_after_wake()
+                    pcm = await self._relisten(barged)
                     is_followup = False
                     if pcm is None:
                         break
@@ -713,7 +862,7 @@ class Orchestrator:
             elif screen_intent:
                 barged = await self._run_with_barge(self._screen_turn(text))
                 if barged:
-                    pcm = await self._listen_after_wake()
+                    pcm = await self._relisten(barged)
                     is_followup = False
                     if pcm is None:
                         break
@@ -721,18 +870,29 @@ class Orchestrator:
             else:
                 barged = await self._run_with_barge(self.handle_text(text))
                 if barged:
-                    pcm = await self._listen_after_wake()
+                    pcm = await self._relisten(barged)
                     is_followup = False
                     if pcm is None:
                         break
                     continue
+            if self._ptt_event.is_set():
+                # PTT pressed in the same tick the answer finished: skip
+                # straight to the hold capture, no follow-up chime.
+                pcm = await self._listen_after_ptt()
+                is_followup = False
+                if pcm is None:
+                    break
+                continue
             self._set("followup")
             await self.chime(self.s.chime_followup_hz, 100)
-            pcm = await self.recorder.capture(
+            pcm = await self._capture_or_ptt(
                 max_s=max(1, self.s.followup_window_s), partial=True, skip_ms=self.s.followup_skip_ms
             )
             is_followup = True
             self._end_partial_window()
+            if pcm is PTT:
+                pcm = await self._listen_after_ptt()
+                is_followup = False
             if pcm is None:
                 break
         self._set("idle")
@@ -744,7 +904,7 @@ class Orchestrator:
         silence) is ignored silently; run_forever goes straight back to
         idle either way."""
         self._loop = asyncio.get_running_loop()
-        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+        pcm = await self._capture(max_s=self.s.listen_wait_s)
         if pcm is None:
             return
         text = await self.stt.atranscribe(pcm)
@@ -766,6 +926,27 @@ class Orchestrator:
         await self.say(text)
         self._set("idle")
 
+    async def _guarded_turn(self, *, ptt: bool = False) -> None:
+        """one_turn() with the "Something went wrong" error reporting; used
+        for wake-word and push-to-talk turns alike, so a failing PTT turn
+        is reported to the user just like a failing wake-word turn."""
+        try:
+            await self.one_turn(ptt=ptt)
+        except Exception as exc:
+            log.exception("turn failed")
+            try:
+                self.player.reset()
+                detail = f"{type(exc).__name__} {exc}".lower()
+                if any(k in detail for k in ("login", "logged in", "authenticat")):
+                    message = "Claude Code isn't logged in."
+                else:
+                    message = "Something went wrong, check the log."
+                await self.say(message)
+            except Exception:
+                log.exception("failed to report error")
+            finally:
+                self._set("idle")
+
     async def run_forever(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._set("idle")
@@ -777,6 +958,7 @@ class Orchestrator:
                 await self._deliver_announcement(self._announce_queue.get_nowait())
 
             wake_task = asyncio.ensure_future(self.wake.wait())
+            ptt_task = asyncio.ensure_future(self._ptt_event.wait())
             waiting_on_unmute = self.muted
             if waiting_on_unmute:
                 # Don't consume the queue while muted: race the wake
@@ -787,20 +969,38 @@ class Orchestrator:
             else:
                 signal_task = asyncio.ensure_future(self._announce_queue.get())
             done, _ = await asyncio.wait(
-                {wake_task, signal_task}, return_when=asyncio.FIRST_COMPLETED
+                {wake_task, signal_task, ptt_task}, return_when=asyncio.FIRST_COMPLETED
             )
 
             if wake_task not in done:
-                # Only signal_task resolved: we're idle right now
-                # (run_forever only waits here between turns), so stop the
-                # wake listener, then loop back around to start a fresh one
-                # — "resuming" it. An unmute signal just loops back to the
-                # top, which delivers the now-unmuted queue; a real
-                # announcement is spoken directly.
+                # Only a signal resolved (announcement / unmute / PTT): we're
+                # idle right now (run_forever only waits here between
+                # turns), so stop the wake listener, then loop back around
+                # to start a fresh one — "resuming" it. An unmute signal
+                # just loops back to the top, which delivers the now-unmuted
+                # queue; a real announcement is spoken directly; a PTT press
+                # runs a push-to-talk turn right here, in this task, so the
+                # only listener alive during her answer is the barge
+                # listener (with own-speech suppression).
                 self.wake.stop()
                 with contextlib.suppress(BaseException):
                     await wake_task
-                if not waiting_on_unmute:
+                for t in (signal_task, ptt_task):
+                    if not t.done():
+                        t.cancel()
+                        with contextlib.suppress(BaseException):
+                            await t
+                if ptt_task in done:
+                    if signal_task in done and not waiting_on_unmute:
+                        # keep the same-tick announcement for after the turn
+                        self._announce_queue.put_nowait(signal_task.result())
+                    if self.muted:
+                        # ptt_start() ignores presses while muted, but a
+                        # press can land right before a mute; drop it.
+                        self._ptt_event.clear()
+                        continue
+                    await self._guarded_turn(ptt=True)
+                elif not waiting_on_unmute:
                     await self._deliver_announcement(signal_task.result())
                 continue
 
@@ -817,6 +1017,13 @@ class Orchestrator:
                 signal_task.cancel()
                 with contextlib.suppress(BaseException):
                     await signal_task
+            if not ptt_task.done():
+                ptt_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await ptt_task
+            # (a PTT press that resolved in the same tick as the wake word
+            # stays set; the turn's first capture picks it up as a hold
+            # capture.)
 
             try:
                 detected = wake_task.result()
@@ -832,21 +1039,7 @@ class Orchestrator:
                 continue
             if self.muted:
                 log.info("muted; capturing one utterance to check for unmute")
+                self._ptt_event.clear()
                 await self._muted_capture()
                 continue
-            try:
-                await self.one_turn()
-            except Exception as exc:
-                log.exception("turn failed")
-                try:
-                    self.player.reset()
-                    detail = f"{type(exc).__name__} {exc}".lower()
-                    if any(k in detail for k in ("login", "logged in", "authenticat")):
-                        message = "Claude Code isn't logged in."
-                    else:
-                        message = "Something went wrong, check the log."
-                    await self.say(message)
-                except Exception:
-                    log.exception("failed to report error")
-                finally:
-                    self._set("idle")
+            await self._guarded_turn()

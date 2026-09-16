@@ -708,10 +708,10 @@ def test_ptt_press_and_release_call_orchestrator(fake_env):
         started = threading.Event()
         ended = threading.Event()
 
-        async def ptt_start():
+        def ptt_start():
             started.set()
 
-        async def ptt_end():
+        def ptt_end():
             ended.set()
 
         orch.ptt_start = ptt_start

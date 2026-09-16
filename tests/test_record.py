@@ -390,9 +390,93 @@ async def test_finish_when_not_capturing_is_noop(monkeypatch):
 
 async def test_finish_does_not_affect_non_hold_capture(monkeypatch):
     """finish() only matters in hold mode; a plain capture() must ignore it
-    (nothing in _capture() checks self._finish unless hold=True)."""
+    — and must clear a stale flag on entry (I4) so it can't linger into
+    the *next* hold capture and cut it short."""
     r = make("....ssssss.........", monkeypatch)
     r._finish.set()
     pcm = await r.capture()
     assert pcm is not None
     assert len(pcm) == FRAME * 9
+    assert not r._finish.is_set()
+
+
+async def test_finish_during_non_hold_capture_is_dropped(monkeypatch):
+    """finish() aimed at a normal capture doesn't set the flag at all: the
+    capture ends on its own silence endpoint and nothing lingers."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    r = Recorder(s, frames=lambda: _gated_frames("ssssss.........", 2, started, gate))
+    task = asyncio.create_task(r.capture(max_s=2))
+    await asyncio.to_thread(started.wait, 2)
+    r.finish()
+    assert not r._finish.is_set()
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert len(pcm) == FRAME * 9
+    assert not r._finish.is_set()
+
+
+async def test_stale_stop_and_finish_cleared_at_capture_start(monkeypatch):
+    """A stop()/finish() that raced a previous capture's natural end (and so
+    was never consumed) must not abort the next capture (I4)."""
+    r = make("....ssssss.........", monkeypatch)
+    r._stop.set()
+    r._finish.set()
+    pcm = await r.capture()
+    assert pcm is not None and len(pcm) == FRAME * 9
+    assert not r._stop.is_set() and not r._finish.is_set()
+
+
+async def test_hold_capture_all_silence_ends_within_max_s(monkeypatch):
+    """Regression (reviewer repro_hold): a hold capture with no speech and
+    a lost key-up must not run forever — it's capped at max_s of live
+    audio (C3)."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    consumed = 0
+
+    def silence():
+        nonlocal consumed
+        for f in frames(""):
+            consumed += 1
+            yield f
+
+    r = Recorder(s, frames=silence)
+    r.finish()   # release arrived before capture() started (quick tap during chime): ignored
+    pcm = await asyncio.wait_for(r.capture(max_s=1, hold=True), timeout=3)
+    assert pcm is None
+    assert consumed <= 1000 // 30 + 2   # ~1 s of 30 ms frames
+
+
+async def test_hold_capture_without_max_s_is_capped_by_max_utterance_s(monkeypatch):
+    """Reviewer repro_hold verbatim: max_s=None, max_utterance_s=1, all
+    silence, a finish() that landed before the capture started -> returns
+    within a bounded number of frames instead of running unbounded."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(max_utterance_s=1)
+    consumed = 0
+
+    def silence():
+        nonlocal consumed
+        for f in frames(""):
+            consumed += 1
+            yield f
+
+    r = Recorder(s, frames=silence)
+    r.finish()
+    pcm = await asyncio.wait_for(r.capture(max_s=None, hold=True), timeout=3)
+    assert pcm is None
+    assert consumed <= 1000 // 30 + 2
+
+
+async def test_hold_capture_total_time_capped_even_with_speech(monkeypatch):
+    """The hold cap counts from capture start (onset wait + recording), so
+    speech that starts late still returns at max_s with what was captured."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    # 20 silent frames (600 ms), then speech forever; cap = 1 s = 33 frames
+    r = Recorder(s, frames=lambda: frames("." * 20 + "s" * 500))
+    pcm = await asyncio.wait_for(r.capture(max_s=1, hold=True), timeout=3)
+    assert pcm is not None
+    assert FRAME * 10 <= len(pcm) <= FRAME * 15   # ~13 speech frames before the cap

@@ -242,15 +242,19 @@ class VeronicaApp(rumps.App):
     # -- push-to-talk (A2) --------------------------------------------------------
     def _on_ptt_press(self) -> None:
         # Called via HotkeyMonitor's call_soon_threadsafe, so this already
-        # runs on the orchestrator's background loop thread.
+        # runs on the orchestrator's background loop thread. ptt_start()/
+        # ptt_end() are synchronous signals (they set an asyncio.Event /
+        # finish the in-flight capture); the push-to-talk turn itself is
+        # run by the orchestrator's own run_forever loop, so there's no
+        # fire-and-forget task to keep a reference to here.
         orch = getattr(self, "_orch", None)
         if orch is not None:
-            asyncio.ensure_future(orch.ptt_start())
+            orch.ptt_start()
 
     def _on_ptt_release(self) -> None:
         orch = getattr(self, "_orch", None)
         if orch is not None:
-            asyncio.ensure_future(orch.ptt_end())
+            orch.ptt_end()
 
     def open_accessibility_settings(self, _item: rumps.MenuItem) -> None:
         subprocess.run(["open", ACCESSIBILITY_PANE_URL])

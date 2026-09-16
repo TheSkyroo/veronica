@@ -347,9 +347,11 @@ class RecArgs:
     def __init__(self, pcms):
         self.pcms = list(pcms)
         self.max_s_calls = []
+        self.calls = []
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
         self.max_s_calls.append(max_s)
+        self.calls.append({"max_s": max_s, "partial": partial, "skip_ms": skip_ms, "hold": hold})
         return self.pcms.pop(0) if self.pcms else None
 
     def has_speech(self, pcm): return False
@@ -801,14 +803,18 @@ class ConfirmDuringBargeBrain:
 
 
 async def test_barge_during_confirm_stops_capture():
-    o, states = build(rec_pcms=[], stt_texts=["first"])
+    o, states, ev = build3(rec_pcms=[], stt_texts=["first"])
     rec = StoppableRec([np.zeros(1, np.int16), StoppableRec.BLOCK, None])
     o.recorder = rec
     o.wake = BargeWake(barge_on_call=1)
     o.brain = ConfirmDuringBargeBrain(o)
     await o.one_turn()
-    assert o.brain.results == [False]                 # confirm() returned False, not orphaned
     assert rec.stops == 1                              # in-flight confirm capture was stopped
+    # confirm() (awaited inside the turn's own producer task here) is torn
+    # down with the turn — "declined", never left orphaned in capture(),
+    # and the brain never gets to continue past it ("Second." unreached).
+    assert o.brain.results == []
+    assert ("tool", {"summary": "Bash: rm x", "decision": "declined"}) in ev
     assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
     assert o.tts.said == ["First.", "Run Bash: rm x?"]
 
@@ -1822,58 +1828,593 @@ async def test_music_intent_error_speaks_fallback(monkeypatch):
 
 
 # -- batch A: push-to-talk (A2) ------------------------------------------------
-
-async def test_ptt_start_idle_stops_wake_chimes_and_captures_hold():
-    wake_stops = []
-    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["hello there"])
-    o.wake.stop = lambda: wake_stops.append(True)
-    await o.ptt_start()
-    await o._ptt_task
-    assert wake_stops == [True]
-    assert o.recorder.hold_calls == [True]
-    assert "Sure." in o.tts.said and "Done." in o.tts.said
-    assert o.brain.asked == ["hello there"]
-    assert states[-1] == "idle"
+#
+# PTT is a *signal* into run_forever / the in-flight turn (never a concurrent
+# turn): ptt_start() sets an event that run_forever races with the wake
+# listener while idle, and that _run_with_barge / every capture race during a
+# turn. These fixtures let the tests observe concurrency: EventWake blocks
+# until stop() (one-shot False) or a queued True; SlowRec's capture() blocks
+# until finish()/stop() and counts overlapping captures.
 
 
-async def test_ptt_start_ignored_while_already_active():
-    o, _ = build(rec_pcms=[None])
-    o._ptt_active = True
-    await o.ptt_start()
-    assert o.recorder.hold_calls == []
+class EventWake:
+    """wake.wait() blocks on an asyncio queue; stop() -> False one-shot."""
+    def __init__(self):
+        self.q = asyncio.Queue()
+        self.waits = 0
+        self.stops = 0
+        self.suppress_seen = []
+
+    async def wait(self, threshold=None, suppress=None):
+        self.waits += 1
+        self.suppress_seen.append(suppress)
+        return await self.q.get()
+
+    def stop(self):
+        self.stops += 1
+        self.q.put_nowait(False)
+
+    def take_preroll(self):
+        return np.zeros(0, dtype=np.int16)
 
 
-async def test_ptt_end_calls_recorder_finish_only_when_active():
-    o, _ = build(rec_pcms=[None])
-    await o.ptt_end()
+class SlowRec(Rec):
+    """capture() blocks until finish()/stop() so concurrency is observable."""
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.active = 0
+        self.max_active = 0
+        self.ev = asyncio.Event()
+        self.capture_kw = []
+
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.hold_calls.append(hold)
+        self.capture_kw.append({"max_s": max_s, "hold": hold, "skip_ms": skip_ms})
+        try:
+            await self.ev.wait()
+            self.ev.clear()
+        finally:
+            self.active -= 1
+        return self.pcms.pop(0) if self.pcms else None
+
+    def finish(self):
+        self.finish_calls += 1
+        self.ev.set()
+
+    def stop(self):
+        self.stop_calls += 1
+        self.ev.set()
+
+
+class InterruptibleBrain(Brain):
+    def __init__(self):
+        super().__init__()
+        self.interrupts = 0
+
+    async def interrupt(self):
+        self.interrupts += 1
+
+
+def build_ptt(stt_texts=(), pcms=None):
+    o, states = build(stt_texts=stt_texts)
+    o.ready = True
+    o.wake = EventWake()
+    o.brain = InterruptibleBrain()
+    o.recorder = SlowRec(pcms if pcms is not None else [np.zeros(1, np.int16)] * 4)
+    o.events = []
+    o._on_event = lambda k, p: o.events.append((k, p))
+    return o, states
+
+
+async def _settle(n=5):
+    for _ in range(n):
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+
+
+async def _cancel(task):
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_ptt_start_is_ignored_before_ready_and_while_muted():
+    o, _ = build()
+    o.ptt_start()
+    assert not o._ptt_event.is_set() and not o._ptt_held
+    o.ready = True
+    o.muted = True
+    o.ptt_start()
+    assert not o._ptt_event.is_set() and not o._ptt_held
+    o.muted = False
+    o.ptt_start()
+    assert o._ptt_event.is_set() and o._ptt_held
+
+
+def test_ptt_start_repeat_while_held_is_noop_and_end_without_start_is_noop():
+    o, _ = build()
+    o.ready = True
+    o.ptt_end()                      # release with no press: nothing
     assert o.recorder.finish_calls == 0
-    o._ptt_active = True
-    await o.ptt_end()
+    o.ptt_start()
+    o._ptt_event.clear()             # as _listen_after_ptt would
+    o.ptt_start()                    # key-repeat: must not re-raise the signal
+    assert not o._ptt_event.is_set()
+    o.ptt_end()
+    assert not o._ptt_held
+    assert o.recorder.finish_calls == 0   # capture wasn't in flight: nothing to finish
+
+
+def test_ptt_end_finishes_recorder_only_while_hold_capture_in_flight():
+    o, _ = build()
+    o.ready = True
+    o.ptt_start()
+    o._ptt_capturing = True
+    o.ptt_end()
     assert o.recorder.finish_calls == 1
 
 
-async def test_ptt_start_no_speech_goes_idle_without_asking_brain():
-    o, states = build(rec_pcms=[None])
-    await o.ptt_start()
-    await o._ptt_task
+async def test_ptt_while_idle_runs_one_turn_inside_run_forever():
+    """Regression (reviewer repro_ptt: scenario_wake_word_during_ptt). PTT
+    while idle with run_forever live: exactly one capture in flight, no
+    second one_turn, and the wake listener is NOT re-armed without
+    suppress during the answer (only the barge listener is alive)."""
+    o, states = build_ptt(stt_texts=["ptt text"], pcms=[np.zeros(1, np.int16), None])
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    assert o.wake.waits == 1                      # idle wake listener armed
+    o.ptt_start()
+    await _settle()
+    assert o.wake.stops == 1                      # idle listener stopped...
+    assert o.wake.waits == 1                      # ...and NOT re-armed while capturing
+    assert o.recorder.active == 1 and o.recorder.hold_calls == [True]
+    assert o.state == "listening"
+    o.ptt_end()                                    # key up -> capture finishes
+    await _settle()
+    # answering now: the only live listener is the barge listener, with suppress
+    assert o.wake.waits == 2
+    assert callable(o.wake.suppress_seen[-1])
+    assert o.recorder.max_active == 1
+    assert o.brain.asked == ["ptt text"]
+    assert "Sure." in o.tts.said
+    # follow-up capture is a normal (non-hold) capture
+    assert o.recorder.hold_calls == [True, False]
+    o.recorder.stop()                              # end the follow-up window (None)
+    await _settle()
+    assert o.state == "idle"
+    assert o.wake.waits == 3                       # idle listener re-armed after the turn
+    assert o.wake.suppress_seen[-1] is None
+    await _cancel(rf)
+
+
+async def test_wake_word_during_ptt_capture_does_not_start_second_turn():
+    """The reviewer's original repro: with the old design the idle wake
+    listener got re-armed during the PTT capture and a wake detection
+    started a concurrent one_turn (two captures at once)."""
+    o, _ = build_ptt(stt_texts=["ptt text", "wake text"])
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    o.ptt_start()
+    await _settle()
+    assert o.wake.waits == 1
+    o.wake.q.put_nowait(True)                      # a wake detection arrives anyway
+    await _settle()
+    assert o.recorder.max_active == 1
+    assert o.recorder.hold_calls == [True]
+    assert o.brain.asked == []
+    await _cancel(rf)
+    o.recorder.finish()
+    await _settle()
+
+
+async def test_ptt_while_speaking_cancels_turn_and_hold_captures():
+    """Regression (reviewer repro_barge): PTT while speaking -> the turn is
+    cancelled, brain.interrupt() called, NO follow-up capture from the old
+    turn, the hold capture proceeds, then the new answer."""
+    o, states = build_ptt(stt_texts=["hi", "ptt text"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
+    interrupts = []
+
+    class SlowBrain2:
+        def __init__(self):
+            self.asked = []
+            self.ev = asyncio.Event()
+
+        async def ask(self, text, images=()):
+            self.asked.append(text)
+            yield "First sentence."
+            if text == "hi":
+                await self.ev.wait()       # "thinking" about sentence 2 until interrupted
+
+        async def interrupt(self):
+            interrupts.append(True)
+            self.ev.set()
+
+    o.brain = SlowBrain2()
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()                            # first listen returns -> handle_text under _run_with_barge
+    await _settle()
+    assert o.state == "speaking"
+    assert o.wake.waits == 1                       # barge listener up
+    o.ptt_start()
+    await _settle()
+    assert interrupts == [True]
+    assert o.player.stops >= 1
+    assert o._barged is True
+    assert o.wake.stops == 1                       # barge listener torn down
+    assert o.state == "listening"
+    assert o.recorder.active == 1 and o.recorder.hold_calls == [False, True]
+    assert o.recorder.max_active == 1
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["hi", "ptt text"]
+    assert o.recorder.hold_calls == [False, True, False]   # then a normal follow-up window
+    o.recorder.stop()
+    await _settle()
+    assert t.done() and t.exception() is None
+    assert o.state == "idle"
+
+
+async def test_ptt_during_followup_capture_switches_to_hold_capture():
+    """Regression (reviewer repro_ptt: scenario_ptt_during_followup): with
+    the old design a PTT press during the follow-up window opened a second
+    capture beside the follow-up one and left a stale wake.stop() behind."""
+    o, states = build_ptt(stt_texts=["hi", "ptt text"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()                            # first listen returns
+    await _settle()
+    assert o.state == "followup"
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.stop_calls == 1              # follow-up capture was stopped...
+    assert o.recorder.hold_calls == [False, False, True]   # ...and a hold capture opened
+    assert o.recorder.max_active == 1
+    assert o.wake.stops == 1                       # only the barge listener's own stop; no stale one
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["hi", "ptt text"]
+    o.recorder.stop()
+    await _settle()
+    assert t.done() and t.exception() is None
+    assert o.state == "idle"
+
+
+async def test_ptt_during_initial_listen_switches_to_hold_capture():
+    o, _ = build_ptt(stt_texts=["ptt text"])
+    o.recorder = SlowRec([None, np.zeros(1, np.int16), None])
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    assert o.state == "listening" and o.recorder.hold_calls == [False]
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.stop_calls == 1
+    assert o.recorder.hold_calls == [False, True]
+    assert o.recorder.max_active == 1
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["ptt text"]
+    o.recorder.stop()
+    await t
+
+
+async def test_ptt_while_confirming_declines_confirm_then_runs_ptt_turn():
+    """PTT during a confirmation prompt is a barge (confirm -> declined),
+    never the answer to the question."""
+    o, states = build_ptt(stt_texts=["do the thing", "ptt text"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
+    results = []
+    interrupts = []
+
+    class ConfirmBrain:
+        def __init__(self, orch):
+            self.orch = orch
+            self.asked = []
+
+        async def ask(self, text, images=()):
+            self.asked.append(text)
+            if text == "do the thing":
+                results.append(await self.orch.confirm("Bash: rm x"))
+            yield "Okay."
+
+        async def interrupt(self):
+            interrupts.append(True)
+
+    o.brain = ConfirmBrain(o)
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()                            # first listen returns
+    await _settle()
+    assert o.state == "confirming"
+    assert o.recorder.active == 1 and o.recorder.hold_calls == [False, False]
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.stop_calls == 1              # the yes/no capture was unblocked, not orphaned
+    # confirm() is torn down with the turn: declined, and the brain never
+    # continues past it (results stays empty — "Okay." for "do the thing"
+    # is never reached)
+    assert results == []
+    assert ("tool", {"summary": "Bash: rm x", "decision": "declined"}) in o.events
+    assert interrupts == [True]
+    assert o.recorder.hold_calls == [False, False, True]
+    assert o.recorder.max_active == 1
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["do the thing", "ptt text"]
+    o.recorder.stop()
+    await t
+    assert o.state == "idle"
+
+
+async def test_ptt_quick_tap_released_during_chime_leaves_nothing_stuck():
+    """Regression (reviewer repro_ptt: scenario_quick_tap): a release that
+    lands before the capture started (e.g. during the chime) must not
+    leave _ptt_capturing/_ptt_held stuck or the mic open."""
+    o, states = build_ptt(stt_texts=["x"])
+    o.recorder = SlowRec([None])
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    o.ptt_start()
+    o.ptt_end()                                    # released before run_forever even woke up
+    await _settle()
+    assert o.recorder.hold_calls == []             # mic never opened
+    assert o.recorder.active == 0
+    assert not o._ptt_capturing and not o._ptt_held
+    assert not o._ptt_event.is_set()
+    assert o.state == "idle"
+    assert o.brain.asked == []
+    assert o.wake.waits == 2                       # idle listener re-armed
+    # and a real press afterwards still works
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.hold_calls == [True] and o.recorder.active == 1
+    o.ptt_end()
+    await _settle()
+    await _cancel(rf)
+
+
+async def test_ptt_release_during_chime_ends_capture_that_already_started():
+    """The capture is started before the chime is awaited, so a release
+    that lands while the chime is still playing finishes a real capture."""
+    o, _ = build_ptt(stt_texts=["hello"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None])
+
+    class SlowPlayer(Player):
+        async def play(self, s):
+            await asyncio.sleep(0.05)
+            await super().play(s)
+
+    o.player = SlowPlayer()
+    o.ptt_start()
+    t = asyncio.create_task(o.one_turn(ptt=True))
+    await asyncio.sleep(0.01)                      # chime in progress, capture in flight
+    assert o.recorder.active == 1 and o._ptt_capturing
+    o.ptt_end()
+    assert o.recorder.finish_calls == 1
+    await _settle()
+    assert not o._ptt_capturing
+    o.recorder.stop()
+    await asyncio.wait_for(t, 2)
+    assert o.brain.asked == ["hello"]
+
+
+async def test_ptt_capture_uses_ptt_max_s_hold_and_partial():
+    o, _ = build_ptt(stt_texts=["hello"])
+    o.s = Settings(followup_window_s=0, confirm_listen_s=0, ptt_max_s=7)
+    o.recorder = SlowRec([np.zeros(1, np.int16), None])
+    o.ptt_start()
+    t = asyncio.create_task(o.one_turn(ptt=True))
+    await _settle()
+    assert o.recorder.capture_kw[0] == {"max_s": 7, "hold": True, "skip_ms": 0}
+    o.ptt_end()
+    await _settle()
+    o.recorder.stop()
+    await t
+
+
+async def test_ptt_no_speech_goes_idle_without_asking_brain():
+    o, states = build_ptt()
+    o.recorder = SlowRec([None])
+    o.ptt_start()
+    t = asyncio.create_task(o.one_turn(ptt=True))
+    await _settle()
+    o.ptt_end()
+    await t
     assert o.brain.asked == []
     assert states[-1] == "idle"
 
 
-async def test_ptt_start_while_speaking_barges_then_captures():
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["stop that"])
-    o.state = "speaking"
-    interrupted = []
+async def test_ptt_turn_error_is_reported_like_a_wake_turn():
+    """I8: a failing PTT turn runs inside run_forever's error handling."""
+    o, states = build_ptt(stt_texts=["boom"])
+    o.recorder = SlowRec([np.zeros(1, np.int16)])
+
+    class BoomBrain:
+        asked = []
+
+        async def ask(self, text):
+            raise RuntimeError("kaboom")
+            yield  # noqa: unreachable, makes this an async generator
+
+        async def interrupt(self):
+            pass
+
+    o.brain = BoomBrain()
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    o.ptt_start()
+    await _settle()
+    o.ptt_end()
+    await _settle()
+    assert "Something went wrong, check the log." in o.tts.said
+    assert o.state == "idle"
+    assert o.wake.waits == 3                       # idle, barge listener, idle again: loop resumed
+    assert o.wake.suppress_seen[-1] is None
+    await _cancel(rf)
+
+
+async def test_ptt_can_barge_her_own_ptt_answer():
+    """Spec A2: PTT works while she's speaking — including the answer to a
+    previous PTT question (so _ptt_capturing must be scoped to the capture,
+    not the whole turn)."""
+    o, _ = build_ptt(stt_texts=["one", "two"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
+    interrupts = []
+
+    class HangBrain:
+        def __init__(self):
+            self.asked = []
+            self.ev = asyncio.Event()
+
+        async def ask(self, text):
+            self.asked.append(text)
+            yield "Sure."
+            if text == "one":
+                await self.ev.wait()
+
+        async def interrupt(self):
+            interrupts.append(True)
+            self.ev.set()
+
+    o.brain = HangBrain()
+    o.ptt_start()
+    t = asyncio.create_task(o.one_turn(ptt=True))
+    await _settle()
+    o.ptt_end()
+    await _settle()
+    assert o.state == "speaking"
+    o.ptt_start()                                  # second press during her answer
+    await _settle()
+    assert interrupts == [True]
+    assert o.recorder.hold_calls == [True, True]
+    assert o.recorder.max_active == 1
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["one", "two"]
+    o.recorder.stop()
+    await t
+
+
+async def test_ptt_and_announcement_same_tick_requeues_announcement():
+    o, _ = build_ptt(stt_texts=["ptt text"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None])
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    o.ptt_start()
+    o._announce_queue.put_nowait("Timer done")
+    await _settle()
+    assert "Timer done" not in o.tts.said          # held until the PTT turn ends
+    o.ptt_end()
+    await _settle()
+    o.recorder.stop()
+    await _settle()
+    assert o.tts.said.index("Timer done") > o.tts.said.index("Sure.")
+    await _cancel(rf)
+
+
+async def test_barge_during_dictation_stops_recorder_no_overlap():
+    """Regression: a wake-word barge during dictation must stop the
+    in-flight dictation capture (I6) so its thread isn't orphaned, and the
+    re-listen must not overlap it."""
+    o, states = build_ptt(stt_texts=["dictate", "after"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()                            # "dictate" heard -> dictation turn
+    await _settle()
+    assert o.state == "listening" and o.recorder.active == 1
+    assert o.wake.waits == 1                       # barge listener up during dictation
+    o.wake.q.put_nowait(True)                      # wake-word barge
+    await _settle()
+    assert o.recorder.stop_calls == 1              # dictation capture unblocked
+    assert o.recorder.max_active == 1
+    assert o.state == "listening"                  # re-listening after the barge
+    assert o.recorder.hold_calls == [False, False, False]
+    o.recorder.finish()
+    await _settle()
+    assert o.brain.asked == ["after"]
+    o.recorder.stop()
+    await t
+
+
+async def test_ptt_during_dictation_stops_recorder_and_hold_captures():
+    o, _ = build_ptt(stt_texts=["dictate", "ptt text"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()
+    await _settle()
+    assert o.state == "listening" and o.recorder.active == 1
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.stop_calls == 1
+    assert o.recorder.hold_calls == [False, False, True]
+    assert o.recorder.max_active == 1
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["ptt text"]
+    o.recorder.stop()
+    await t
+
+
+async def test_run_with_barge_returns_none_wake_or_ptt():
+    o, _ = build()
+    o.wake = EventWake()
+
+    async def quick():
+        return 1
+
+    assert await o._run_with_barge(quick()) is None
+
+    async def hang():
+        await asyncio.Event().wait()
 
     async def interrupt():
-        interrupted.append(True)
+        pass
 
     o.brain.interrupt = interrupt
-    await o.ptt_start()
-    await o._ptt_task
-    assert interrupted == [True]
-    assert o.player.stops >= 1
-    assert o.brain.asked == ["stop that"]
+    fut = asyncio.ensure_future(o._run_with_barge(hang()))
+    await _settle()
+    o.wake.q.put_nowait(True)
+    assert await fut == "wake"
+
+    o.wake = EventWake()
+    fut = asyncio.ensure_future(o._run_with_barge(hang()))
+    await _settle()
+    o._ptt_event.set()
+    assert await fut == "ptt"
+    o._ptt_event.clear()
+
+
+async def test_barge_listener_failure_still_lets_ptt_barge():
+    o, _ = build()
+    interrupts = []
+
+    async def interrupt():
+        interrupts.append(True)
+
+    o.brain.interrupt = interrupt
+
+    class FailingWake(EventWake):
+        async def wait(self, threshold=None, suppress=None):
+            raise RuntimeError("mic")
+
+    o.wake = FailingWake()
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    fut = asyncio.ensure_future(o._run_with_barge(hang()))
+    await _settle()
+    assert not fut.done()                          # turn keeps running despite listener failure
+    o._ptt_event.set()
+    assert await fut == "ptt"
+    assert interrupts == [True]
+    o._ptt_event.clear()
 
 
 # -- batch A: notes & dictation (A4) -------------------------------------------
@@ -1939,7 +2480,9 @@ async def test_dictation_captures_until_stop_and_types(monkeypatch):
     )
     await o.one_turn()
     assert "Go ahead." in o.tts.said
-    assert typed == ["hello there how are you"]
+    # M12: committed per utterance (so a barge mid-dictation keeps what was
+    # already said), later chunks space-separated from the previous one
+    assert typed == ["hello there", " how are you"]
     assert "Done." in o.tts.said
     assert o.brain.asked == []
 
@@ -1975,4 +2518,64 @@ async def test_dictation_type_error_speaks_fallback(monkeypatch):
         stt_texts=["dictate", "hello"],
     )
     await o.one_turn()
+    assert "Sorry, I couldn't type that." in o.tts.said
+
+
+async def test_dictation_skips_go_ahead_echo_on_first_capture_only(monkeypatch):
+    monkeypatch.setattr(mac_tools_mod, "dictate_type", lambda text: {"content": [{"type": "text", "text": "ok"}]})
+    o, _ = build(stt_texts=["dictate", "one", "two"])
+    o.recorder = RecArgs([np.zeros(1, np.int16), np.zeros(1, np.int16), np.zeros(1, np.int16), None])
+    await o.one_turn()
+    dictation_calls = o.recorder.calls[1:4]
+    assert dictation_calls[0]["skip_ms"] == o.s.followup_skip_ms
+    assert dictation_calls[1]["skip_ms"] == 0
+    assert dictation_calls[2]["skip_ms"] == 0
+
+
+async def test_dictation_strips_trailing_stop_phrase_from_last_utterance(monkeypatch):
+    typed = []
+    monkeypatch.setattr(
+        mac_tools_mod, "dictate_type",
+        lambda text: (typed.append(text), {"content": [{"type": "text", "text": "ok"}]})[1],
+    )
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["dictate", "hello there", "see you soon, stop dictation."],
+    )
+    await o.one_turn()
+    assert typed == ["hello there", " see you soon"]
+    assert "Done." in o.tts.said
+    # initial listen + 2 dictation captures + the follow-up window: no third
+    # dictation capture after the trailing stop phrase
+    assert len(o.recorder.hold_calls) == 4
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("hello there stop dictation", ("hello there", True)),
+    ("hello there, stop dictating!", ("hello there", True)),
+    ("hello. End dictation", ("hello", True)),
+    ("stop dictation", ("", True)),
+    ("hello there", ("hello there", False)),
+    ("please stop dictation software crashes", ("please stop dictation software crashes", False)),
+])
+def test_strip_trailing_stop_dictation(text, expected):
+    assert Orchestrator._strip_trailing_stop_dictation(text) == expected
+
+
+async def test_dictation_typing_error_mid_way_keeps_earlier_text(monkeypatch):
+    typed = []
+
+    def fake_type(text):
+        typed.append(text)
+        if len(typed) == 2:
+            return {"content": [{"type": "text", "text": "error: no access"}], "is_error": True}
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(mac_tools_mod, "dictate_type", fake_type)
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16)] * 3 + [None],
+        stt_texts=["dictate", "first", "second", "third"],
+    )
+    await o.one_turn()
+    assert typed == ["first", " second"]           # stopped at the failure
     assert "Sorry, I couldn't type that." in o.tts.said

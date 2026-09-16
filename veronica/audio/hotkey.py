@@ -15,6 +15,31 @@ log = logging.getLogger("veronica.audio.hotkey")
 
 RIGHT_OPTION_KEYCODE = 61
 
+# Device-specific modifier bits (IOKit NX_DEVICE*KEYMASK) carried in
+# CGEventFlags, keyed by the modifier's keycode. These distinguish the left
+# and right instances of a modifier, which the generic
+# kCGEventFlagMaskAlternate & co. do not: with left-Option held down, a
+# right-Option release still leaves the generic Alternate bit set, and a
+# monitor reading only that bit would think the key was still down.
+DEVICE_FLAG_MASKS = {
+    54: 0x10,    # right command  (NX_DEVICERCMDKEYMASK)
+    55: 0x08,    # left command   (NX_DEVICELCMDKEYMASK)
+    56: 0x02,    # left shift     (NX_DEVICELSHIFTKEYMASK)
+    58: 0x20,    # left option    (NX_DEVICELALTKEYMASK)
+    59: 0x01,    # left control   (NX_DEVICELCTLKEYMASK)
+    60: 0x04,    # right shift    (NX_DEVICERSHIFTKEYMASK)
+    61: 0x40,    # right option   (NX_DEVICERALTKEYMASK)
+    62: 0x2000,  # right control  (NX_DEVICERCTLKEYMASK)
+}
+
+# CGEventType values the OS posts *to the tap's callback* when it has
+# disabled the tap: after the callback was too slow for too long (Timeout)
+# or because of user input (UserInput, e.g. a secure-input field). A
+# disabled tap never fires again unless re-enabled, which would silently
+# kill push-to-talk for the rest of the session.
+TAP_DISABLED_BY_TIMEOUT = 0xFFFFFFFE
+TAP_DISABLED_BY_USER_INPUT = 0xFFFFFFFF
+
 
 def _import_quartz():
     import Quartz
@@ -40,6 +65,7 @@ class HotkeyMonitor:
         self._on_press = on_press
         self._on_release = on_release
         self._keycode = keycode
+        self._device_mask = DEVICE_FLAG_MASKS.get(keycode)
         self.available = True
         self._pressed = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -47,6 +73,8 @@ class HotkeyMonitor:
         self._run_loop = None
         self._quartz = None
         self._tap = None
+        self._reenable_logged = False
+        self.reenable_count = 0
 
     # -- lifecycle --------------------------------------------------------------
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
@@ -55,9 +83,16 @@ class HotkeyMonitor:
         called from a thread other than the one running that loop, e.g.
         the menu bar's AppKit main thread starting a monitor for a
         background orchestrator loop) — defaults to the calling thread's
-        own loop. Blocks briefly (bounded) for the tap to be set up so
-        `available` reflects reality by the time this returns."""
-        self._loop = loop or asyncio.get_event_loop()
+        running loop, or none at all (callbacks then run directly on the
+        tap thread) if there isn't one. Blocks briefly (bounded) for the
+        tap to be set up so `available` reflects reality by the time this
+        returns."""
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+        self._loop = loop
         ready = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, args=(ready,), daemon=True)
         self._thread.start()
@@ -113,12 +148,30 @@ class HotkeyMonitor:
     # -- event handling -------------------------------------------------------
     def _callback(self, proxy, event_type, event, refcon):
         quartz = self._quartz
+        if event_type in (TAP_DISABLED_BY_TIMEOUT, TAP_DISABLED_BY_USER_INPUT):
+            self._reenable_tap(event_type)
+            return event
         if event_type == quartz.kCGEventFlagsChanged:
             keycode = quartz.CGEventGetIntegerValueField(event, quartz.kCGKeyboardEventKeycode)
             if keycode == self._keycode:
                 flags = quartz.CGEventGetFlags(event)
-                self._dispatch(bool(flags & quartz.kCGEventFlagMaskAlternate))
+                mask = self._device_mask if self._device_mask is not None else quartz.kCGEventFlagMaskAlternate
+                self._dispatch(bool(flags & mask))
         return event
+
+    def _reenable_tap(self, event_type) -> None:
+        """The OS disabled our tap (timeout or user input); turn it back on
+        so push-to-talk keeps working. Logged once per monitor so a flaky
+        tap doesn't spam the log."""
+        if self._tap is None or self._quartz is None:
+            return
+        self.reenable_count += 1
+        if not self._reenable_logged:
+            why = "timeout" if event_type == TAP_DISABLED_BY_TIMEOUT else "user input"
+            log.warning("hotkey monitor: event tap disabled by %s; re-enabling", why)
+            self._reenable_logged = True
+        with contextlib.suppress(Exception):
+            self._quartz.CGEventTapEnable(self._tap, True)
 
     def _dispatch(self, is_down: bool) -> None:
         if is_down == self._pressed:
