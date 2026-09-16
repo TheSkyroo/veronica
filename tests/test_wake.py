@@ -29,7 +29,7 @@ def frames(pattern):
 async def test_wait_returns_on_detection(monkeypatch):
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
     w = WakeWord(Settings(), frames=lambda: frames("...w"))
-    await w.wait()  # must return, not hang
+    assert await w.wait() is True  # must return, not hang
 
 
 @pytest.mark.asyncio
@@ -43,8 +43,45 @@ async def test_threshold_respected(monkeypatch):
             yield np.full(CHUNK, 1000 if ch == "w" else 0, dtype=np.int16).tobytes()
 
     w = WakeWord(Settings(wake_threshold=0.5), frames=f)
-    await w.wait()
+    assert await w.wait() is True
     assert seen == [".", ".", "w"]
+
+
+async def test_wait_returns_true_on_detection(monkeypatch):
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    w = WakeWord(Settings(), frames=lambda: frames("..w"))
+    assert await w.wait() is True
+
+
+async def test_stop_returns_false(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    w = WakeWord(Settings(), frames=lambda: frames("." * 100000))
+    task = asyncio.create_task(w.wait())
+    w.stop()
+    assert await asyncio.wait_for(task, 2) is False
+
+
+async def test_threshold_override(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)  # scores 0.9 on 'w'
+    w = WakeWord(Settings(), frames=lambda: frames("w....."))
+    task = asyncio.create_task(w.wait(threshold=0.95))
+    w.stop()
+    assert await asyncio.wait_for(task, 2) is False   # 0.9 < 0.95 → never detected
+
+
+async def test_stop_is_consumed(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    w = WakeWord(Settings(), frames=lambda: frames("." * 100000))
+    task = asyncio.create_task(w.wait())
+    w.stop()
+    assert await asyncio.wait_for(task, 2) is False
+
+    # a stale stop flag must not poison the next wait()
+    w._frames = lambda: frames("..w")
+    assert await w.wait() is True
 
 
 def test_custom_model_used_when_present(monkeypatch, tmp_home):

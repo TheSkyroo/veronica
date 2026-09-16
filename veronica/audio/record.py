@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections.abc import Callable, Iterator
 
 import numpy as np
@@ -17,6 +18,8 @@ class Recorder:
         self.s = settings
         self._frames = frames or self._mic_frames
         self._vad = self._vad_cls(settings.vad_aggressiveness)
+        self._stop = threading.Event()
+        self._capturing = False
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
@@ -24,6 +27,18 @@ class Recorder:
             while True:
                 data, _ = stream.read(n)
                 yield bytes(data)
+
+    def stop(self) -> None:
+        """Request that the in-flight capture() stop early, returning None.
+        A no-op unless a capture is actually running (checked thread-side) —
+        otherwise a stop() that arrives just after an unrelated capture()
+        already returned on its own would linger and cut short the *next*
+        capture(). There's an unavoidable, acceptably tiny window right
+        around the last frame where this check can still race the capture
+        thread finishing on its own; callers should treat stop() as best-
+        effort, not a guarantee."""
+        if self._capturing:
+            self._stop.set()
 
     async def capture(self, max_s: int | None = None) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
@@ -35,6 +50,11 @@ class Recorder:
         Returns:
             int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
         """
+        # Set on the event-loop thread, before handing off to the worker, so
+        # a stop() issued in the (tiny) window between a caller flipping its
+        # own "capturing" bookkeeping (e.g. Orchestrator._confirm_capturing)
+        # and the worker thread actually starting is not a no-op.
+        self._capturing = True
         return await asyncio.to_thread(self._capture, max_s)
 
     def _capture(self, max_s: int | None) -> np.ndarray | None:
@@ -50,24 +70,30 @@ class Recorder:
         started = False
         waited = 0
 
-        for frame in self._frames():
-            is_speech = self._vad.is_speech(frame, self.s.sample_rate)
-            if not started:
-                waited += 1
-                if is_speech:
-                    started = True
-                elif wait_frames is not None and waited >= wait_frames:
+        try:
+            for frame in self._frames():
+                if self._stop.is_set():
+                    self._stop.clear()
                     return None
+                is_speech = self._vad.is_speech(frame, self.s.sample_rate)
+                if not started:
+                    waited += 1
+                    if is_speech:
+                        started = True
+                    elif wait_frames is not None and waited >= wait_frames:
+                        return None
+                    else:
+                        continue
+                buf.append(frame)
+                if is_speech:
+                    speech_frames += 1
+                    silence_run = 0
                 else:
-                    continue
-            buf.append(frame)
-            if is_speech:
-                speech_frames += 1
-                silence_run = 0
-            else:
-                silence_run += 1
-            if silence_run >= silence_frames_needed or len(buf) >= max_frames:
-                break
+                    silence_run += 1
+                if silence_run >= silence_frames_needed or len(buf) >= max_frames:
+                    break
+        finally:
+            self._capturing = False
 
         if speech_frames < min_speech_frames:
             return None

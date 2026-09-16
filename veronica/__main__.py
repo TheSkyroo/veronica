@@ -34,15 +34,24 @@ def build_orchestrator(s: Settings, on_state=None, *, audio: bool = True) -> Orc
     return orch
 
 
+def _ask_stdin(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError:
+        return "n"
+
+
 async def _text_mode(text: str) -> None:
     orch = build_orchestrator(settings, audio=False)
-    # no mic in text mode: auto-approve tool calls and print them
+    # no mic in text mode: risky (confirm-class) tools ask y/N on stdin.
     async def confirm(summary: str) -> bool:
-        print(f"[tool] {summary} -> allowed")
-        return True
+        answer = await asyncio.to_thread(_ask_stdin, f"Run {summary}? [y/N] ")
+        ok = answer.strip().lower() in ("y", "yes")
+        print(f"[tool] {summary} -> {'allowed' if ok else 'declined'}")
+        return ok
     orch.brain._confirm = confirm
     try:
-        print("[text mode] all tool calls are auto-approved — no voice confirmation")
+        print("[text mode] safe tools run automatically; risky tools ask y/N on this terminal")
         for sent in await orch.handle_text(text):
             print(sent)
     finally:

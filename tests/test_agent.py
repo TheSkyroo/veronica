@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import datetime as dt
 
 import pytest
@@ -90,6 +92,8 @@ async def test_options_wired(brain):
     assert "You are Veronica" in o.system_prompt
     assert o.can_use_tool is not None
     assert o.setting_sources == []
+    assert "mac" in o.mcp_servers
+    assert not o.allowed_tools
 
 
 async def test_resume_from_saved_session(brain, tmp_home):
@@ -101,7 +105,7 @@ async def test_resume_from_saved_session(brain, tmp_home):
 async def test_can_use_tool_gate(brain):
     [s async for s in brain.ask("x")]
     gate = FakeClient.instances[0].options.can_use_tool
-    allow = await gate("Bash", {"command": "ls"}, None)
+    allow = await gate("Bash", {"command": "rm x"}, None)
     deny = await gate("Write", {"file_path": "a"}, None)
     assert allow.behavior == "allow"
     assert deny.behavior == "deny" and deny.message == "user declined"
@@ -187,3 +191,193 @@ async def test_stream_exception_closes_client(brain, monkeypatch):
     with pytest.raises(RuntimeError):
         [s async for s in brain.ask("x")]
     assert brain._client is None
+
+
+def test_summarize_mac_tools():
+    assert summarize_tool("mcp__mac__open_app", {"name": "Safari"}) == "Open Safari"
+    assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
+    assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
+    assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'Run AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
+
+
+async def test_gate_auto_allows_safe_tools_without_confirm(brain):
+    calls = []
+
+    async def confirm(summary):
+        calls.append(summary)
+        return False
+
+    brain._confirm = confirm
+    res = await brain._can_use_tool("Read", {"file_path": "/x"}, None)
+    assert res.behavior == "allow" and calls == []
+    res = await brain._can_use_tool("Bash", {"command": "ls"}, None)
+    assert res.behavior == "allow" and calls == []
+    res = await brain._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "deny" and calls == ["Bash: rm x"]
+
+
+async def test_interrupt_without_client_is_noop(brain):
+    await brain.interrupt()  # must not raise
+
+
+async def test_interrupt_after_completed_ask_is_noop(brain):
+    [s async for s in brain.ask("x")]
+    client = FakeClient.instances[0]
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    client.interrupt = interrupt
+
+    await asyncio.wait_for(brain.interrupt(), 0.5)
+
+    assert client.interrupts == 0     # no turn in flight: no control request, no drain
+    assert brain._client is not None
+
+
+async def _consume(agen):
+    return [s async for s in agen]
+
+
+async def _start_in_flight_ask(brain, monkeypatch):
+    """Puts brain into _in_flight state by starting ask() against a client
+    whose stream yields one message then blocks forever, and running that
+    ask() as a background task. Returns (task, client)."""
+    about_to_hang = asyncio.Event()
+
+    class BlockingClient(FakeClient):
+        async def receive_response(self):
+            yield _Assistant("Hello there.")
+            about_to_hang.set()
+            await asyncio.Event().wait()   # never set: simulates a stalled turn
+
+    monkeypatch.setattr(Brain, "_client_cls", BlockingClient)
+    task = asyncio.create_task(_consume(brain.ask("x")))
+    await about_to_hang.wait()   # ask() is past client.query() (sets _in_flight) and hung
+    return task, FakeClient.instances[0]
+
+
+async def test_interrupt_calls_client(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        yield _Result("s")   # drain sees the turn end immediately
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+    await brain.interrupt()
+    assert client.interrupts == 1
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_interrupt_drains_leftover_stream(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+    client.interrupts = 0
+    client.drained = []
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        for m in [_Assistant("leftover 1"), _Assistant("leftover 2"), _Result("s")]:
+            client.drained.append(m)
+            yield m
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+
+    await brain.interrupt()
+
+    assert client.interrupts == 1
+    assert len(client.drained) == 3   # both leftover assistant messages + the ResultMessage
+    assert brain._client is not None
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_interrupt_after_consumer_cancelled_still_interrupts(brain, monkeypatch):
+    """Mirrors the real barge path: the orchestrator cancels the turn (the
+    task consuming ask()) BEFORE calling brain.interrupt(). Cancelling the
+    consumer must not clear _in_flight — the SDK turn is still running from
+    Claude's point of view until interrupt()+drain actually observes it end."""
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    client.interrupts = 0
+    client.drained = []
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        for m in [_Assistant("leftover"), _Result("s")]:
+            client.drained.append(m)
+            yield m
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+
+    await brain.interrupt()
+
+    assert client.interrupts == 1
+    assert len(client.drained) == 2
+    assert brain._in_flight is False
+
+
+async def test_interrupt_drain_timeout_closes_client(brain, monkeypatch):
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+    client.interrupts = 0
+
+    async def interrupt():
+        client.interrupts += 1
+
+    async def receive_response():
+        await asyncio.sleep(10)
+        yield _Result("s")   # pragma: no cover - unreachable, drain times out first
+
+    client.interrupt = interrupt
+    client.receive_response = receive_response
+    brain.s = Settings(interrupt_drain_s=0)
+
+    await brain.interrupt()
+
+    assert brain._client is None
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_interrupt_call_itself_timing_out_closes_client(brain, monkeypatch):
+    """client.interrupt() (the control-request call, not the drain) can hang
+    too — the SDK awaits an ack for up to 60s. That must also be bounded by
+    interrupt_drain_s and close the client rather than hang."""
+    task, client = await _start_in_flight_ask(brain, monkeypatch)
+
+    async def slow_interrupt():
+        await asyncio.sleep(10)
+
+    client.interrupt = slow_interrupt
+    brain.s = Settings(interrupt_drain_s=0)
+
+    await asyncio.wait_for(brain.interrupt(), 1)
+
+    assert brain._client is None
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task

@@ -5,7 +5,7 @@ def test_defaults(tmp_home):
     s = Settings()
     assert s.home == tmp_home
     assert s.sample_rate == 16000
-    assert s.vad_silence_ms == 700
+    assert s.vad_silence_ms == 800
     assert s.max_utterance_s == 15
     assert s.min_speech_ms == 300
     assert s.followup_window_s == 8
@@ -16,6 +16,10 @@ def test_defaults(tmp_home):
     assert s.wake_model == "hey_veronica"
     assert s.session_file == tmp_home / "session"
     assert s.log_file == tmp_home / "logs" / "veronica.log"
+    assert s.whisper_model == "small.en"
+    assert s.vad_silence_ms == 800
+    assert s.barge_threshold == 0.8
+    assert s.chime_wake_hz == 880 and s.chime_followup_hz == 660
 
 
 def test_dirs_created(tmp_home):
