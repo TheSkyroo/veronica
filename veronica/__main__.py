@@ -71,6 +71,9 @@ async def _text_mode(text: str) -> None:
     finally:
         await orch.brain.close()
         orch.player.close()
+        store = getattr(orch, "store", None)
+        if store is not None:
+            store.close()
 
 
 def main(argv: list[str] | None = None) -> None:

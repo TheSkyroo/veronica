@@ -29,6 +29,22 @@ def _fts_match_expr(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
+# Words too generic to identify a specific fact on their own — "forget it" /
+# "forget everything" must not turn into a delete-everything-that-matches-
+# "it" scan; if only these are left after removing them, delete_fact_matching
+# treats the query as having no real content and deletes nothing.
+FORGET_STOPWORDS = frozenset({
+    "a", "an", "the", "that", "this", "it", "is", "am", "are", "was", "were",
+    "to", "of", "in", "on", "at", "for", "and", "or", "my", "i", "me", "you",
+    "your", "be", "been", "being", "with", "about", "everything", "all",
+    "stuff", "thing", "things", "please",
+})
+
+
+def _normalize_ws(s: str) -> str:
+    return " ".join((s or "").split())
+
+
 def _now() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
 
@@ -68,6 +84,8 @@ class MemoryStore:
 
     # -- turns --------------------------------------------------------------
     def add_turn(self, heard: str, reply: str) -> int:
+        heard = _normalize_ws(heard)
+        reply = _normalize_ws(reply)
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO turns (ts, heard, reply) VALUES (?, ?, ?)",
@@ -118,6 +136,7 @@ class MemoryStore:
 
     # -- facts --------------------------------------------------------------
     def add_fact(self, text: str) -> int:
+        text = _normalize_ws(text)
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO facts (ts, text) VALUES (?, ?)", (_now(), text)
@@ -136,29 +155,51 @@ class MemoryStore:
             ).fetchall()
 
     def delete_fact_matching(self, text: str) -> int:
+        """Delete facts matching `text`, as precisely as possible so a short
+        or generic "forget X" can't sweep up unrelated facts:
+
+        1. An exact (case-insensitive, whitespace-normalized) match on a
+           fact's full text — the common case, since `text` here is usually
+           exactly what was originally remembered.
+        2. Else, a substring match (case-insensitive) — `text` names part of
+           a fact.
+        3. Else, an FTS AND-match on every non-stopword token in `text` — a
+           looser paraphrase still has to hit every content word. If nothing
+           but stopwords are left (e.g. "it", "that", "everything"), nothing
+           is deleted rather than guessing.
+        """
+        norm_query = _normalize_ws(text).lower()
+        if not norm_query:
+            return 0
         with self._lock:
-            if self.fts_enabled:
-                expr = _fts_match_expr(text)
-                if not expr:
-                    return 0
-                ids = [
-                    row[0]
-                    for row in self._conn.execute(
-                        "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?", (expr,)
-                    ).fetchall()
+            rows = self._conn.execute("SELECT id, text FROM facts").fetchall()
+            ids = [rid for rid, t in rows if _normalize_ws(t).lower() == norm_query]
+            if not ids:
+                ids = [rid for rid, t in rows if norm_query in _normalize_ws(t).lower()]
+            if not ids:
+                tokens = [
+                    tok for tok in re.findall(r"\w+", text or "")
+                    if tok.lower() not in FORGET_STOPWORDS
                 ]
-            else:
-                tokens = re.findall(r"\w+", text or "")
                 if not tokens:
                     return 0
-                clauses = " OR ".join(["text LIKE ?"] * len(tokens))
-                params = [f"%{t}%" for t in tokens]
-                ids = [
-                    row[0]
-                    for row in self._conn.execute(
-                        f"SELECT id FROM facts WHERE {clauses}", params
-                    ).fetchall()
-                ]
+                if self.fts_enabled:
+                    expr = " AND ".join(f'"{tok}"' for tok in tokens)
+                    ids = [
+                        row[0]
+                        for row in self._conn.execute(
+                            "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?", (expr,)
+                        ).fetchall()
+                    ]
+                else:
+                    clauses = " AND ".join(["text LIKE ?"] * len(tokens))
+                    params = [f"%{tok}%" for tok in tokens]
+                    ids = [
+                        row[0]
+                        for row in self._conn.execute(
+                            f"SELECT id FROM facts WHERE {clauses}", params
+                        ).fetchall()
+                    ]
             if not ids:
                 return 0
             with self._conn:

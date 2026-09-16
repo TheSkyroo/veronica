@@ -96,8 +96,8 @@ search when the local Python's sqlite3 build has it, otherwise a plain substring
 - **Forget a fact** — "forget that I take my coffee black" / "forget the peanut thing": removes any matching fact
   and says "Forgotten." (or "I didn't have that." if nothing matched).
 - Claude can also manage memory itself mid-conversation via MCP tools: `recall` (search past turns) and `facts_list`
-  run automatically; `fact_add` runs automatically; `fact_delete` asks "Run …?" first, like other tools that change
-  state.
+  run automatically; `fact_add` and `fact_delete` both ask "Run …?" first — a fact persists across every future
+  session, so it gets the same confirmation as anything else that changes standing state.
 - On every new Claude session, Veronica injects a short "Facts about the user" list and the last few turns
   ("Recent conversation") into the system prompt, capped small (2 KB / 1 KB) so it stays cheap — an existing session
   already carries its own context, so this only matters right after a fresh one starts.

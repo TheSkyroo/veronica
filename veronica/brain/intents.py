@@ -100,6 +100,11 @@ _MEMORY_LEAD_RE = re.compile(r"^(?:hey\s+veronica|veronica)[,\s]+", re.IGNORECAS
 _REMEMBER_RE = re.compile(r"^remember\s+(?:that\s+)?(.+)$", re.IGNORECASE)
 _FORGET_RE = re.compile(r"^forget\s+(?:that\s+)?(.+)$", re.IGNORECASE)
 
+# "remember when/what/how/if/why ..." reads as a recall question ("remember
+# when we went to Paris?"), not a fact to store — fall through to Claude
+# instead of stashing the literal question text as a fact.
+_REMEMBER_QUESTION_LEADS = frozenset({"when", "what", "how", "if", "why"})
+
 
 def match_memory_intent(text: str) -> tuple[str, str] | None:
     """Match "remember (that) X" / "forget (that) X" against a heard
@@ -115,9 +120,11 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
         m = pattern.match(raw)
         if m:
             arg = m.group(1).strip().rstrip(".!?").strip()
-            if arg and arg.lower() != "that":
-                return (kind, arg)
-            return None
+            if not arg or arg.lower() == "that":
+                return None
+            if kind == "remember" and arg.split()[0].lower() in _REMEMBER_QUESTION_LEADS:
+                return None
+            return (kind, arg)
     return None
 
 

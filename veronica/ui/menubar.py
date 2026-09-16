@@ -157,6 +157,9 @@ class VeronicaApp(rumps.App):
         orch = getattr(self, "_orch", None)
         if orch is not None:
             orch.player.close()
+            store = getattr(orch, "store", None)
+            if store is not None:
+                store.close()
         self._loop.call_soon_threadsafe(self._loop.stop)
         rumps.quit_application()
 

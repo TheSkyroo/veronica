@@ -125,7 +125,7 @@ CASES = [
     # memory tools
     ("mcp__memory__recall", {"query": "weather"}, ALLOW),
     ("mcp__memory__facts_list", {}, ALLOW),
-    ("mcp__memory__fact_add", {"text": "likes tea"}, ALLOW),
+    ("mcp__memory__fact_add", {"text": "likes tea"}, CONFIRM),
     ("mcp__memory__fact_delete", {"text": "likes tea"}, CONFIRM),
     ("mcp__memory__unknown", {}, CONFIRM),
     ("mcp__unknownserver__anything", {}, CONFIRM),

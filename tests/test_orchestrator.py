@@ -1578,6 +1578,22 @@ async def test_handle_text_skips_logging_when_memory_disabled():
     assert store.turns == []
 
 
+class EmptyBrain:
+    async def ask(self, text):
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+
+async def test_handle_text_skips_logging_when_nothing_spoken():
+    store = FakeStore()
+    o, _ = build()
+    o.store = store
+    o.brain = EmptyBrain()
+    out = await o.handle_text("...")
+    assert out == []
+    assert store.turns == []
+
+
 async def test_remember_intent_stores_fact_and_says_got_it():
     store = FakeStore()
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])

@@ -116,6 +116,58 @@ def test_fts5_available_on_this_python(store):
     assert store.fts_enabled is True
 
 
+def test_delete_fact_matching_is_precise_across_similar_facts(store):
+    store.add_fact("gym session at 7")
+    store.add_fact("dinner reservation at 7")
+    store.add_fact("call mom")
+    store.add_fact("buy milk")
+    n = store.delete_fact_matching("my gym is at 7")
+    assert n == 1
+    remaining = sorted(f[2] for f in store.facts())
+    assert remaining == ["buy milk", "call mom", "dinner reservation at 7"]
+
+
+def test_delete_fact_matching_exact_match_preferred(store):
+    store.add_fact("likes tea")
+    store.add_fact("likes tea and coffee")
+    n = store.delete_fact_matching("likes tea")
+    assert n == 1
+    remaining = [f[2] for f in store.facts()]
+    assert remaining == ["likes tea and coffee"]
+
+
+def test_forget_it_deletes_nothing(store):
+    store.add_fact("likes tea")
+    n = store.delete_fact_matching("it")
+    assert n == 0
+    assert len(store.facts()) == 1
+
+
+def test_forget_everything_deletes_nothing(store):
+    store.add_fact("likes tea")
+    store.add_fact("works at Acme")
+    n = store.delete_fact_matching("everything")
+    assert n == 0
+    assert len(store.facts()) == 2
+
+
+def test_forget_that_alone_deletes_nothing(store):
+    store.add_fact("likes tea")
+    n = store.delete_fact_matching("that")
+    assert n == 0
+
+
+def test_add_fact_normalizes_whitespace(store):
+    store.add_fact("  likes   tea  \n\n and coffee ")
+    assert [f[2] for f in store.facts()] == ["likes tea and coffee"]
+
+
+def test_add_turn_normalizes_whitespace(store):
+    store.add_turn(" hello   there ", "hi \n there ")
+    rows = store.recent(1)
+    assert [(h, r) for _, h, r in rows] == [("hello there", "hi there")]
+
+
 def test_close_then_reopen(tmp_path):
     s1 = MemoryStore(tmp_path / "memory.db")
     s1.add_fact("persisted")

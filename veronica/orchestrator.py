@@ -321,7 +321,7 @@ class Orchestrator:
             self._speech_queue = None
         if not spoken:
             await self.say("I have nothing to say to that.")
-        if self.store is not None and self.s.memory_enabled:
+        elif self.store is not None and self.s.memory_enabled:
             self.store.add_turn(text, " ".join(spoken))
         return spoken
 
