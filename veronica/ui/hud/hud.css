@@ -68,13 +68,27 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #hint{margin-top:3px}
 #hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
 
-/* ---- mini mode: just the orb, status dot overlaid at the corner ---- */
-body.mini #card{width:110px;height:110px;padding:0;gap:0;border:none;background:transparent;
-  box-shadow:none;backdrop-filter:none;position:relative;border-radius:50%}
-body.mini #orb{width:110px;height:110px;flex:0 0 110px}
-body.mini #chat,body.mini #action,
-body.mini #status .label,body.mini #status .level{display:none !important}
-body.mini #text{position:absolute;inset:0;display:flex;align-items:flex-end;justify-content:flex-end;
-  gap:0;padding:6px;max-height:none;overflow:visible;pointer-events:none}
-body.mini #status{min-height:0}
-body.mini #status .dot{width:10px;height:10px}
+/* ---- mini mode: compact bar — a 64px orb plus a caption pill ---- */
+body.mini #card{width:400px;height:72px;padding:0 8px;gap:12px;align-items:center;justify-content:flex-start;
+  border:none;background:transparent;box-shadow:none;backdrop-filter:none;border-radius:0}
+body.mini #orb{width:64px;height:64px;flex:0 0 64px}
+body.mini #text{display:none}
+
+/* ---- caption pill: single-line status/turn text, mini mode only ---- */
+#caption{display:none}
+body.mini #caption{display:flex;align-items:center;gap:6px;max-width:320px;box-sizing:border-box;
+  padding:8px 12px;border-radius:16px;background:rgba(8,10,16,.72);border:1px solid rgba(255,255,255,.10);
+  backdrop-filter:blur(18px);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 20px 40px rgba(0,0,0,.35);
+  font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.mini #caption.hidden{display:none}
+#caption .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25)}
+#caption .msg{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#caption .msg.partial{font-style:italic;opacity:.75}
+#caption .msg.prompt{color:#f0c36c;font-weight:500}
+
+#caption[data-state="warming"] .dot{background:#a0a4ad}
+#caption[data-state="listening"] .dot,#caption[data-state="followup"] .dot{background:#7ad0ff}
+#caption[data-state="thinking"] .dot{background:#ffb454}
+#caption[data-state="speaking"] .dot{background:#f0c36c}
+#caption[data-state="confirming"] .dot{background:#ff8a3c}
+#caption[data-state="error"] .dot{background:#ff5a5a}

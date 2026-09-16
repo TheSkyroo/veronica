@@ -228,7 +228,7 @@ def test_set_mode_mini_resizes_panel_and_calls_js():
     h, web, panel, _ = make()
     h.set_mode("mini")
     assert h._mode == "mini"
-    assert panel.setFrame_calls[-1][2:] == (110, 110)   # width, height
+    assert panel.setFrame_calls[-1][2:] == (400, 72)   # width, height
     assert web.js[-1] == 'window.hud.setMode("mini")'
 
 
@@ -266,7 +266,7 @@ def test_construction_applies_saved_mini_mode():
         main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "mini"}, prefs_save=_noop_prefs_save,
     )
     assert h._mode == "mini"
-    assert panel.setFrame_calls[-1][2:] == (110, 110)
+    assert panel.setFrame_calls[-1][2:] == (400, 72)
 
 
 def test_construction_falls_back_to_settings_hud_mode_when_no_saved_pref():
@@ -292,9 +292,9 @@ def test_construction_applies_saved_position():
     web, panel = FakeWeb(), FakePanel()
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
-        main=lambda fn: fn(), prefs_load=lambda: {"hud_pos": [12.0, 34.0]}, prefs_save=_noop_prefs_save,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_pos_full": [12.0, 34.0]}, prefs_save=_noop_prefs_save,
     )
-    assert h._pos == (12.0, 34.0)
+    assert h._pos["full"] == (12.0, 34.0)
     assert panel.setFrame_calls[-1][:2] == (12.0, 34.0)
 
 
@@ -307,8 +307,51 @@ def test_hide_persists_panel_position():
         prefs_save=lambda p: saved.update(p),
     )
     h.hide()
-    assert saved == {"hud_pos": [100.0, 200.0]}
-    assert h._pos == (100.0, 200.0)
+    assert saved == {"hud_pos_full": [100.0, 200.0]}
+    assert h._pos["full"] == (100.0, 200.0)
+
+
+def test_hide_persists_panel_position_separately_per_mode():
+    saved = {}
+    web, panel = FakeWeb(), FakePanel(x=5.0, y=6.0)
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=_noop_prefs_load,
+        prefs_save=lambda p: saved.update(p),
+    )
+    h.set_mode("mini")
+    # Simulate the user dragging the (now mini) panel to a new spot.
+    panel._rect = FakeRect(7.0, 8.0, 400, 72)
+    saved.clear()
+    h.hide()
+    assert saved == {"hud_pos_mini": [7.0, 8.0]}
+    assert h._pos["mini"] == (7.0, 8.0)
+    assert h._pos["full"] is None
+
+
+def test_set_mode_mini_defaults_to_top_center_below_menubar(monkeypatch):
+    """With no saved position for mini mode, switching to mini should place
+    the compact bar centered horizontally under the menu bar (a
+    notch/Dynamic-Island style default), not the full card's top-right
+    corner."""
+    import types as _types
+
+    frame = _types.SimpleNamespace(
+        origin=_types.SimpleNamespace(x=0, y=0),
+        size=_types.SimpleNamespace(width=1440, height=900),
+    )
+    fake_appkit = _types.SimpleNamespace(
+        NSScreen=_types.SimpleNamespace(mainScreen=lambda: _types.SimpleNamespace(visibleFrame=lambda: frame)),
+    )
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+
+    h, web, panel, _ = make()
+    h.set_mode("mini")
+
+    x, y, w, hgt = panel.setFrame_calls[-1]
+    assert (w, hgt) == (400, 72)
+    assert x == (1440 - 400) / 2
+    assert y == 900 - 72 - 8
 
 
 def test_prefs_load_failure_is_soft(caplog):

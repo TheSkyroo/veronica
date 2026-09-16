@@ -56,7 +56,8 @@ A few phrases are handled locally (no round-trip to Claude) to control the HUD i
 other command — with or without "Veronica"/"hey Veronica" first, optionally ending in "please":
 
 - **Mini mode** — "shrink", "make yourself smaller", "minimize", "mini mode", "small mode", "go small": collapses
-  the HUD to a small Siri-style orb (just the orb plus a status dot in the corner).
+  the HUD to a compact bar (a small orb plus a single-line caption pill showing what's being heard or said), which
+  defaults to a notch-style position centered under the menu bar rather than the full card's top-right corner.
 - **Full mode** — "expand", "make yourself bigger", "full mode", "show details", "go big": returns to the full card
   layout (transcript, reply, tool activity).
 - **Hide** — "hide", "hide yourself", "hide the hud", "hide the panel": hides the HUD immediately and goes idle.

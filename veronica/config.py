@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     hud_height: int = 300
     hud_margin: int = 24
     hud_mode: str = "full"    # "full" | "mini"; runtime pref, see veronica.prefs
-    hud_mini_size: int = 110
+    hud_mini_width: int = 400
+    hud_mini_height: int = 72
 
     @property
     def session_file(self) -> Path:
