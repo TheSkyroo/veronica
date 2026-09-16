@@ -388,6 +388,65 @@ def menubar_module():
     return menubar
 
 
+# -- commit: "Start at Login" menu item ---------------------------------
+
+def test_login_item_disabled_when_not_running_from_bundle(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    monkeypatch.setattr(menubar.login_item, "bundle_app_path", lambda: None)
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert app._login_item_item.title == "Start at Login (build the app first)"
+        assert app._login_item_item.callback is None
+    finally:
+        _quit_and_join(app)
+
+
+def test_login_item_enabled_when_running_from_bundle(fake_env, monkeypatch, tmp_path):
+    menubar, fake_rumps, orch_holder = fake_env
+    app_path = tmp_path / "Veronica.app"
+    monkeypatch.setattr(menubar.login_item, "bundle_app_path", lambda: app_path)
+    monkeypatch.setattr(menubar.login_item, "is_enabled", lambda: False)
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert app._login_item_item.title == "Start at Login"
+        assert app._login_item_item.callback is not None
+        assert app._login_item_item.state is False
+    finally:
+        _quit_and_join(app)
+
+
+def test_toggle_login_item_enables_and_disables(fake_env, monkeypatch, tmp_path):
+    menubar, fake_rumps, orch_holder = fake_env
+    app_path = tmp_path / "Veronica.app"
+    calls = {"enabled": False}
+
+    monkeypatch.setattr(menubar.login_item, "bundle_app_path", lambda: app_path)
+    monkeypatch.setattr(menubar.login_item, "is_enabled", lambda: calls["enabled"])
+
+    def fake_enable(p):
+        assert p == app_path
+        calls["enabled"] = True
+
+    def fake_disable():
+        calls["enabled"] = False
+
+    monkeypatch.setattr(menubar.login_item, "enable", fake_enable)
+    monkeypatch.setattr(menubar.login_item, "disable", fake_disable)
+
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        item = app._login_item_item
+        app.toggle_login_item(item)
+        assert calls["enabled"] is True
+        assert item.state is True
+
+        app.toggle_login_item(item)
+        assert calls["enabled"] is False
+        assert item.state is False
+    finally:
+        _quit_and_join(app)
+
+
 def test_real_rumps_restored_after_fixture_teardown():
     # Must run after the fake_env-using tests above (default pytest order is
     # file/definition order). Confirms the fixture's finalizer put the real

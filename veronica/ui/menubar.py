@@ -7,6 +7,7 @@ import rumps
 
 from veronica.__main__ import build_orchestrator
 from veronica.config import settings
+from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
@@ -47,11 +48,13 @@ class VeronicaApp(rumps.App):
         self._muted = False
         self._quitting = False
         hud_mode_item = rumps.MenuItem("HUD: Full", callback=self.toggle_hud_mode)
+        login_item_item = self._make_login_item()
         self.menu = [
-            rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, None,
+            rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, login_item_item, None,
             rumps.MenuItem("Quit", callback=self.quit),
         ]
         self._hud_mode_item = hud_mode_item
+        self._login_item_item = login_item_item
         hud = HudWindow(settings) if settings.hud_enabled else None
         self._hud = hud if (hud is not None and hud.available) else _NoopHud()
         self._refresh_hud_mode_item()
@@ -140,6 +143,25 @@ class VeronicaApp(rumps.App):
         mode = getattr(self._hud, "_mode", "full")
         self._hud.set_mode("full" if mode == "mini" else "mini")
         self._refresh_hud_mode_item()
+
+    def _make_login_item(self) -> rumps.MenuItem:
+        app_path = login_item.bundle_app_path()
+        if app_path is None:
+            item = rumps.MenuItem("Start at Login (build the app first)", callback=None)
+            return item
+        item = rumps.MenuItem("Start at Login", callback=self.toggle_login_item)
+        item.state = login_item.is_enabled()
+        return item
+
+    def toggle_login_item(self, item: rumps.MenuItem) -> None:
+        app_path = login_item.bundle_app_path()
+        if app_path is None:
+            return
+        if login_item.is_enabled():
+            login_item.disable()
+        else:
+            login_item.enable(app_path)
+        item.state = login_item.is_enabled()
 
     def toggle_mute(self, item: rumps.MenuItem) -> None:
         self._muted = not self._muted
