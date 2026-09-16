@@ -12,7 +12,7 @@
     confirming: {speed:1.0, alpha:1.0,  glow:'rgba(255,138,60,.45)',  tint:{front:'#ff8a3c', highlight:'#ffc199', back:'#8a3d10'}},
     error:      {speed:0.0, alpha:1.0,  glow:'rgba(255,90,90,.40)',   tint:{front:'#ff5a5a', highlight:'#ffb0b0', back:'#7a1f1f'}},
   };
-  const GOLD = {front:'#ffcc66', highlight:'#ffe6b0', back:'#8a5a1e'};
+  const GOLD = {front:'#f2c37a', highlight:'#ffe6b0', back:'#6b4a1c'};
   const model = {state:'idle', heard:'', reply:'', tool:null, mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:0, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
@@ -132,7 +132,7 @@
   window.hud = hud;
 
   // ---- orb renderer: JARVIS-style golden wireframe holo-globe --------------
-  const SIZE = 170, CX = SIZE / 2, CY = SIZE / 2, R = 70;
+  const SIZE = 170, CX = SIZE / 2, CY = SIZE / 2, R = 66;
   const canvas = $('orb'), ctx = canvas.getContext('2d');
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = SIZE * dpr; canvas.height = SIZE * dpr; ctx.scale(dpr, dpr);
@@ -160,40 +160,59 @@
     return {x: p.x * c + p.z * s, y: p.y, z: -p.x * s + p.z * c};
   }
 
-  const STEP_DEG = 6;
+  const STEP_DEG = 4;
+
+  // Short, sparse gap runs (~10% coverage, 1-2 segments per gap) so rings
+  // and arcs still read as continuous circles rather than a scribble.
+  function buildGapMask(n, rand) {
+    const mask = new Array(n).fill(false);
+    let i = 0;
+    while (i < n) {
+      if (rand() < 0.07) {
+        const runLen = 1 + (rand() < 0.5 ? 0 : 1);
+        for (let j = 0; j < runLen && i < n; j++, i++) mask[i] = true;
+      } else {
+        i++;
+      }
+    }
+    return mask;
+  }
+
   function buildShellCurves(seed) {
     const rand = mulberry32(seed);
     const curves = [];
-    const latDegs = [-60, -36, -12, 12, 36, 60]; // 6 latitude rings
-    for (const latDeg of latDegs) {
+    const N_LAT = 9, N_LON = 12;
+    for (let i = 0; i < N_LAT; i++) { // 9 latitude rings, evenly spaced, poles skipped
+      const latDeg = -80 + (160 / (N_LAT - 1)) * i;
       const lat = latDeg * Math.PI / 180;
       const pts = [];
       for (let lonDeg = 0; lonDeg <= 360; lonDeg += STEP_DEG) pts.push(sphPoint(lat, lonDeg * Math.PI / 180));
-      curves.push({pts, gaps: pts.map(() => rand() < 0.22)});
+      curves.push({pts, gaps: buildGapMask(pts.length, rand)});
     }
-    for (let i = 0; i < 8; i++) { // 8 longitude arcs
-      const lon = (i / 8) * Math.PI * 2;
+    for (let i = 0; i < N_LON; i++) { // 12 longitude arcs
+      const lon = (i / N_LON) * Math.PI * 2;
       const pts = [];
       for (let latDeg = -90; latDeg <= 90; latDeg += STEP_DEG) pts.push(sphPoint(latDeg * Math.PI / 180, lon));
-      curves.push({pts, gaps: pts.map(() => rand() < 0.22)});
+      curves.push({pts, gaps: buildGapMask(pts.length, rand)});
     }
     return curves;
   }
 
-  // shell0 = outermost, shell2 = innermost
+  // shell0 = outermost, shell2 = innermost. shell2 spins about a different
+  // axis (X instead of Y) so the three layers visibly slide past each other.
   const SHELLS = [
-    {factor: 1.00, tilt: 0.40, baseSpeed: 0.35, curves: buildShellCurves(1), angle: 0},
-    {factor: 0.78, tilt: -0.70, baseSpeed: -0.55, curves: buildShellCurves(2), angle: 0},
-    {factor: 0.55, tilt: 0.55, baseSpeed: 0.90, curves: buildShellCurves(3), angle: 0, driftAxis: true},
+    {factor: 1.00, tilt: 0.35, baseSpeed: 0.25, curves: buildShellCurves(1), angle: 0, axis: 'y'},
+    {factor: 0.78, tilt: -0.60, baseSpeed: -0.40, curves: buildShellCurves(2), angle: 0, axis: 'y'},
+    {factor: 0.55, tilt: 0.55, baseSpeed: 0.60, curves: buildShellCurves(3), angle: 0, axis: 'x'},
   ];
 
-  const N_PARTICLES = 180;
+  const N_PARTICLES = 120;
   const particles = Array.from({length: N_PARTICLES}, (_, i) => {
     const rnd = mulberry32(1000 + i);
-    return {base: sphPoint(Math.asin(rnd() * 2 - 1), rnd() * Math.PI * 2), size: 1 + rnd() * 0.6};
+    return {base: sphPoint(Math.asin(rnd() * 2 - 1), rnd() * Math.PI * 2), size: 0.8 + rnd() * 0.4};
   });
 
-  const N_SPARKS = 40;
+  const N_SPARKS = 24;
   const sparkRand = mulberry32(777);
   const sparks = Array.from({length: N_SPARKS}, () => spawnSpark(-sparkRand() * 2));
   function spawnSpark(t0offset) {
@@ -240,6 +259,12 @@
     return {x: CX + p.x * R * factor, y: CY + p.y * R * factor, z: p.z};
   }
 
+  function shellTransform(shell, base) {
+    return shell.axis === 'x'
+      ? rotX(rotY(base, shell.tilt), shell.angle)
+      : rotY(rotX(base, shell.tilt), shell.angle);
+  }
+
   function frame(now) {
     rafId = 0;
     const dt = Math.min(0.1, (now - t0) / 1000); t0 = now;
@@ -256,12 +281,13 @@
     let colors = pal.tint ? pal.tint : GOLD;
     if (pal.grey) colors = {front: greyOf(GOLD.front), highlight: greyOf(GOLD.highlight), back: greyOf(GOLD.back)};
 
-    // soft radial glow, behind everything, normal blending
+    // soft radial glow, behind everything, normal blending — brightest at
+    // the very center, fully transparent by 0.9R.
     let glowAlphaBoost = 1;
     if (pal.voiceBoost) glowAlphaBoost = 1 + vLevel * 0.6;
     else if (pal.flicker) glowAlphaBoost = 0.8 + 0.4 * Math.sin(now / 130);
-    const glow = ctx.createRadialGradient(CX, CY, 6, CX, CY, R * 1.5);
-    glow.addColorStop(0, pal.glow); glow.addColorStop(1, 'rgba(0,0,0,0)');
+    const glow = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * 0.9);
+    glow.addColorStop(0, 'rgba(255,170,60,.45)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.globalAlpha = Math.min(1, glowAlphaBoost);
     ctx.fillStyle = glow; ctx.fillRect(0, 0, SIZE, SIZE);
     ctx.globalAlpha = 1;
@@ -271,16 +297,16 @@
       const shell = SHELLS[si];
       let factor = shell.factor;
       if (pal.micBoost && si === 0) factor *= 1 + 0.15 * micSmooth;
-      const extraLine = pal.voiceBoost ? 2 * vLevel : 0;
+      const extraLine = pal.voiceBoost ? 1.2 * vLevel : 0;
+
+      // faint filled disc behind the wireframe so the sphere reads as a body
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(255,180,80,0.04)';
+      ctx.beginPath(); ctx.arc(CX, CY, R * factor, 0, Math.PI * 2); ctx.fill();
 
       const frontPath = new Path2D(), backPath = new Path2D();
       for (const curve of shell.curves) {
-        const proj = curve.pts.map(base => {
-          let q = rotX(base, shell.tilt);
-          q = rotY(q, shell.angle);
-          if (shell.driftAxis) q = rotX(q, shell.angle * 0.3);
-          return project(q, factor);
-        });
+        const proj = curve.pts.map(base => project(shellTransform(shell, base), factor));
         for (let i = 0; i < proj.length - 1; i++) {
           if (curve.gaps[i] || curve.gaps[i + 1]) continue;
           const a = proj[i], b = proj[i + 1];
@@ -288,14 +314,15 @@
           path.moveTo(a.x, a.y); path.lineTo(b.x, b.y);
         }
       }
-      ctx.globalAlpha = pal.alpha;
-      ctx.strokeStyle = colors.front;
-      ctx.lineWidth = 1.4 + extraLine;
-      ctx.stroke(frontPath);
-      ctx.globalAlpha = pal.alpha * 0.35;
+      // back-facing first, front-facing drawn on top of it
+      ctx.globalAlpha = pal.alpha * 0.18;
       ctx.strokeStyle = colors.back;
-      ctx.lineWidth = 0.7 + extraLine;
+      ctx.lineWidth = 0.45 + extraLine;
       ctx.stroke(backPath);
+      ctx.globalAlpha = pal.alpha * 0.9;
+      ctx.strokeStyle = colors.front;
+      ctx.lineWidth = 0.8 + extraLine;
+      ctx.stroke(frontPath);
     }
     ctx.globalAlpha = 1;
 
@@ -303,12 +330,12 @@
     ctx.globalCompositeOperation = 'lighter';
     const shell0 = SHELLS[0];
 
+    // particles: front-facing only, so they don't muddy the wireframe
     ctx.fillStyle = colors.highlight;
+    ctx.globalAlpha = pal.alpha * 0.6;
     for (const q of particles) {
-      let pt = rotX(q.base, shell0.tilt);
-      pt = rotY(pt, shell0.angle);
-      const proj = project(pt, shell0.factor);
-      ctx.globalAlpha = pal.alpha * (proj.z >= 0 ? 0.9 : 0.25);
+      const proj = project(shellTransform(shell0, q.base), shell0.factor);
+      if (proj.z <= 0.1) continue;
       ctx.beginPath(); ctx.arc(proj.x, proj.y, q.size, 0, Math.PI * 2); ctx.fill();
     }
 
@@ -319,26 +346,28 @@
       if (age < 0) continue;
       const frac = age / spark.dur;
       const rr = 1.0 + 0.35 * frac;
-      let pt = rotX(spark.dir, shell0.tilt);
-      pt = rotY(pt, shell0.angle);
-      const proj = project(pt, rr);
-      ctx.globalAlpha = pal.alpha * (1 - frac);
-      ctx.beginPath(); ctx.arc(proj.x, proj.y, 1.2, 0, Math.PI * 2); ctx.fill();
+      const proj = project(shellTransform(shell0, spark.dir), rr);
+      ctx.globalAlpha = pal.alpha * 0.5 * (1 - frac);
+      ctx.beginPath(); ctx.arc(proj.x, proj.y, 0.8, 0, Math.PI * 2); ctx.fill();
     }
 
-    // central hub: bright ring + counter-rotating spokes
+    // central hub — the "eye": glow + bright ring + counter-rotating spokes
     const hubAngle = -shell0.angle * 1.4;
     let hubAlpha = pal.alpha;
     if (pal.flicker) hubAlpha *= 0.55 + 0.45 * Math.sin(now / 60);
     ctx.globalAlpha = hubAlpha;
+    const hubGlow = ctx.createRadialGradient(CX, CY, 0, CX, CY, 20);
+    hubGlow.addColorStop(0, colors.highlight); hubGlow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hubGlow;
+    ctx.beginPath(); ctx.arc(CX, CY, 20, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = colors.highlight;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(CX, CY, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(CX, CY, 8, 0, Math.PI * 2); ctx.stroke();
     for (let i = 0; i < 6; i++) {
       const a = hubAngle + (i / 6) * Math.PI * 2;
       ctx.beginPath();
-      ctx.moveTo(CX + Math.cos(a) * 9, CY + Math.sin(a) * 9);
-      ctx.lineTo(CX + Math.cos(a) * 18, CY + Math.sin(a) * 18);
+      ctx.moveTo(CX + Math.cos(a) * 8, CY + Math.sin(a) * 8);
+      ctx.lineTo(CX + Math.cos(a) * 16, CY + Math.sin(a) * 16);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
