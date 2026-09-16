@@ -165,7 +165,7 @@ def _status(kind: str) -> UpdateStatus:
 
 UPDATE_OK = {
     "git pull --ff-only --quiet": (0, "", ""),
-    "uv sync --frozen": (0, "", ""),
+    "uv sync": (0, "", ""),
 }
 
 
@@ -173,7 +173,7 @@ def test_update_remote_pulls_syncs_builds_in_order():
     run = FakeRun(UPDATE_OK)
     built = []
     log = updater.update(REPO, _status("remote"), run=run, build=lambda: built.append(1) or Path("/x/Veronica.app"), which=lambda n: "/usr/local/bin/uv")
-    assert run.argv_strings == ["git pull --ff-only --quiet", "uv sync --frozen"]
+    assert run.argv_strings == ["git pull --ff-only --quiet", "uv sync"]
     assert built == [1]
     assert all(kw.get("cwd") == REPO for kw in run.kwargs)
     assert "git pull" in log
@@ -185,7 +185,7 @@ def test_update_local_skips_pull():
     run = FakeRun(UPDATE_OK)
     built = []
     updater.update(REPO, _status("local"), run=run, build=lambda: built.append(1), which=lambda n: "/usr/local/bin/uv")
-    assert run.argv_strings == ["uv sync --frozen"]
+    assert run.argv_strings == ["uv sync"]
     assert built == [1]
 
 
@@ -208,7 +208,7 @@ def test_update_pull_failure_raises_and_stops():
 
 
 def test_update_sync_failure_raises_and_stops():
-    run = FakeRun({**UPDATE_OK, "uv sync --frozen": (2, "", "error: lockfile out of date\n")})
+    run = FakeRun({**UPDATE_OK, "uv sync": (2, "", "error: lockfile out of date\n")})
     built = []
     with pytest.raises(UpdateError, match="lockfile out of date"):
         updater.update(REPO, _status("local"), run=run, build=lambda: built.append(1), which=lambda n: "/uv")

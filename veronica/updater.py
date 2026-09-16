@@ -118,14 +118,15 @@ def update(
     build: Callable[[], object] | None = None,
     which: Callable[[str], str | None] = shutil.which,
 ) -> str:
-    """Pull (remote only), `uv sync --frozen` (if uv is present), rebuild the
+    """Pull (remote only), `uv sync` (if uv is present; not `--frozen` —
+    uv.lock is gitignored, so the lock must be re-resolved after a pull), rebuild the
     .app. Returns a short log; raises UpdateError on the first failure. The
     caller relaunches afterwards."""
     log: list[str] = []
     if status.kind == "remote":
         _run_step(run, repo, ["git", "pull", "--ff-only", "--quiet"], log)
     if which("uv"):
-        _run_step(run, repo, ["uv", "sync", "--frozen"], log)
+        _run_step(run, repo, ["uv", "sync"], log)
     else:
         log.append("uv not found: skipped sync")
     try:
