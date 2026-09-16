@@ -25,18 +25,38 @@ CURL_HEADER_NAME_ALLOW = frozenset({
     "accept", "accept-language", "accept-encoding", "user-agent", "cache-control",
 })
 
-MAC_TOOL_RISK: dict[str, Decision] = {
-    "open_app": "allow",
-    "open_url": "allow",
-    "clipboard_read": "allow",
-    "clipboard_write": "confirm",
-    "notify": "allow",
-    "volume_get": "allow",
-    "volume_set": "allow",
-    "applescript": "confirm",
+# Per-in-process-MCP-server risk table, keyed by server name; tool calls
+# from server `X` arrive as `mcp__X__<tool>` (MCP_PREFIX_FMT).
+MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
+    "mac": {
+        "open_app": "allow",
+        "open_url": "allow",
+        "clipboard_read": "allow",
+        "clipboard_write": "confirm",
+        "notify": "allow",
+        "volume_get": "allow",
+        "volume_set": "allow",
+        "applescript": "confirm",
+    },
+    "pim": {
+        "calendar_events": "allow",
+        "calendar_create": "confirm",
+        "mail_unread": "allow",
+        "mail_search": "allow",
+        "mail_send": "confirm",
+        "reminder_create": "confirm",
+        "reminders_due": "allow",
+        "timer_set": "allow",
+        "timer_list": "allow",
+        "timer_cancel": "allow",
+    },
 }
 
-MAC_PREFIX = "mcp__mac__"
+MCP_PREFIX_FMT = "mcp__{server}__"
+
+# Back-compat aliases (kept for anything still importing the old names).
+MAC_TOOL_RISK: dict[str, Decision] = MCP_TOOL_RISK["mac"]
+MAC_PREFIX = MCP_PREFIX_FMT.format(server="mac")
 
 
 def _is_safe_short_combo(tok: str) -> bool:
@@ -147,6 +167,10 @@ def classify(tool_name: str, tool_input: dict) -> Decision:
         return "allow"
     if tool_name == "Bash":
         return "allow" if _bash_is_safe(str(tool_input.get("command", ""))) else "confirm"
-    if tool_name.startswith(MAC_PREFIX):
-        return MAC_TOOL_RISK.get(tool_name[len(MAC_PREFIX):], "confirm")
+    if tool_name.startswith("mcp__"):
+        rest = tool_name[len("mcp__"):]
+        server, _, short = rest.partition("__")
+        risk_table = MCP_TOOL_RISK.get(server)
+        if risk_table is not None:
+            return risk_table.get(short, "confirm")
     return "confirm"

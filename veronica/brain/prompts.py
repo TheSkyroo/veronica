@@ -10,5 +10,7 @@ def system_prompt(today: dt.date) -> str:
         "For information from the internet, use WebSearch or WebFetch rather than "
         "shell commands. Use shell commands only for actions on this Mac. "
         "Your working directory is the user's home folder. Only modify files the "
-        "user explicitly names."
+        "user explicitly names. "
+        "You can read the user's calendar, unread mail and reminders and set timers "
+        "with your tools; prefer them over shell commands for these."
     )

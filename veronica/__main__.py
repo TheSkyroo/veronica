@@ -12,6 +12,8 @@ from veronica.config import Settings, settings, setup_logging
 from veronica.orchestrator import Orchestrator
 from veronica.speech.stt import Transcriber
 from veronica.speech.tts import Synthesizer
+from veronica.tools import pim
+from veronica.tools.timers import TimerService
 
 
 def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True) -> Orchestrator:
@@ -35,6 +37,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         on_event=on_event,
     )
     holder["orch"] = orch
+    pim.bind(TimerService(on_fire=orch.announce))
     return orch
 
 
