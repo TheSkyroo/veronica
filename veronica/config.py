@@ -106,10 +106,11 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     fh = RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=5)
     fh.setFormatter(fmt)
     log.addHandler(fh)
-    # When launched from the .app bundle (no controlling terminal), stdout
-    # isn't a TTY: skip the StreamHandler so nothing tries to write to a
-    # closed/redirected stream, and rely on the log file alone.
-    if sys.stdout is not None and sys.stdout.isatty():
+    # When launched from the .app bundle (no controlling terminal), stderr
+    # (logging.StreamHandler's default stream) isn't a TTY: skip the
+    # StreamHandler so nothing tries to write to a closed/redirected stream,
+    # and rely on the log file alone.
+    if sys.stderr is not None and sys.stderr.isatty():
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         log.addHandler(sh)

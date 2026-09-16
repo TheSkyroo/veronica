@@ -29,19 +29,13 @@ def is_enabled() -> bool:
     return plist_path().exists()
 
 
-def is_running_from_bundle(argv0: str | None = None) -> bool:
-    """True when this process was launched via the built .app's launcher
-    (as opposed to `uv run python -m veronica` / a bare interpreter), which
-    is required before "Start at Login" can point at a real app bundle."""
-    import sys
-
-    candidate = argv0 if argv0 is not None else sys.argv[0]
-    return candidate.endswith(APP_EXEC_SUFFIX)
-
-
 def bundle_app_path(argv0: str | None = None) -> Path | None:
-    """The .app bundle's path (…/Veronica.app) when running from one, else
-    None. `argv0` defaults to sys.argv[0]."""
+    """The .app bundle's path (…/Veronica.app) when running from one (i.e.
+    launched via the built .app's launcher, as opposed to
+    `uv run python -m veronica` / a bare interpreter), else None. This is
+    also the "are we running from a bundle" check "Start at Login" needs,
+    since it must point the LaunchAgent at a real .app path. `argv0`
+    defaults to sys.argv[0]."""
     import sys
 
     candidate = argv0 if argv0 is not None else sys.argv[0]

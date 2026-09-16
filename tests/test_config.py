@@ -64,7 +64,7 @@ def _fresh_veronica_logger():
 
 def test_setup_logging_drops_stream_handler_when_not_a_tty(tmp_home, monkeypatch):
     log = _fresh_veronica_logger()
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
     try:
         log = setup_logging()
         assert not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
@@ -76,7 +76,7 @@ def test_setup_logging_drops_stream_handler_when_not_a_tty(tmp_home, monkeypatch
 
 def test_setup_logging_keeps_stream_handler_when_tty(tmp_home, monkeypatch):
     log = _fresh_veronica_logger()
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
     try:
         log = setup_logging()
         assert any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)

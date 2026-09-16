@@ -78,14 +78,9 @@ def test_enable_ignores_launchctl_failure(fake_home, monkeypatch):
     assert login_item.is_enabled() is True
 
 
-def test_is_running_from_bundle():
-    assert login_item.is_running_from_bundle("/Applications/Veronica.app/Contents/MacOS/Veronica") is True
-    assert login_item.is_running_from_bundle("/usr/bin/python3") is False
-    assert login_item.is_running_from_bundle("veronica/__main__.py") is False
-
-
 def test_bundle_app_path():
     assert login_item.bundle_app_path("/Applications/Veronica.app/Contents/MacOS/Veronica") == Path(
         "/Applications/Veronica.app"
     )
     assert login_item.bundle_app_path("/usr/bin/python3") is None
+    assert login_item.bundle_app_path("veronica/__main__.py") is None
