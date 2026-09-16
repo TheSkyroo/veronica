@@ -4,11 +4,13 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
 from veronica.audio.chime import tone
 from veronica.config import Settings
+from veronica.ui.events import envelope
 
 log = logging.getLogger("veronica.orchestrator")
 
@@ -32,11 +34,13 @@ class Orchestrator:
         return False
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
-                 on_state: Callable[[str], None] | None = None) -> None:
+                 on_state: Callable[[str], None] | None = None,
+                 on_event: Callable[[str, Any], None] | None = None) -> None:
         self.s = settings
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
         self._on_state = on_state or (lambda _: None)
+        self._on_event = on_event
         self.state = "idle"
         self.muted = False
         self.ready = False
@@ -47,6 +51,7 @@ class Orchestrator:
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
+        self._emit("warm", {"ready": False})
         self._set("warming")
         t0 = time.monotonic()
         await self.tts.asynth("ok")
@@ -55,15 +60,27 @@ class Orchestrator:
         log.info("warmup done in %.1fs", time.monotonic() - t0)
         self.ready = True
         self._set("idle")
+        self._emit("warm", {"ready": True})
 
     def _set(self, state: str) -> None:
         self.state = state
         log.info("state=%s", state)
         self._on_state(state)
+        self._emit("state", state)
+
+    def _emit(self, kind: str, payload) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(kind, payload)
+        except Exception:
+            log.exception("on_event failed for %s", kind)
 
     # -- speaking -------------------------------------------------------------
     async def _say_unlocked(self, text: str) -> None:
-        samples, _ = await self.tts.asynth(text)
+        samples, sr = await self.tts.asynth(text)
+        self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
+        self._emit("sentence", text)
         await self.player.play(samples)
 
     async def say(self, text: str) -> None:
@@ -144,12 +161,14 @@ class Orchestrator:
                     if item is None:
                         break
                     sent, fut = item
-                    samples, _ = await fut
+                    samples, sr = await fut
                     if first:
                         first = False
                         self._set("speaking")
                         log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
                     if not self.muted:
+                        self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
+                        self._emit("sentence", sent)
                         async with self._speech_lock:
                             await self.player.play(samples)
                 finally:
@@ -187,8 +206,10 @@ class Orchestrator:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
             return False
+        self._emit("tool", {"summary": summary, "decision": "ask"})
         prev = self.state
         self._set("confirming")
+        result = False
         try:
             queue = self._speech_queue
             if queue is not None:
@@ -202,7 +223,7 @@ class Orchestrator:
                 # the turn this confirmation belongs to is already being torn
                 # down, so don't speak the prompt or eat the follow-up capture.
                 log.info("confirm aborted by barge")
-                return False
+                return result
             async with self._speech_lock:
                 if self._barged:
                     # a barge landed while we were waiting to acquire the
@@ -210,30 +231,31 @@ class Orchestrator:
                     # holding it); don't speak the prompt for a turn that's
                     # already being torn down.
                     log.info("confirm aborted by barge")
-                    return False
+                    return result
                 self.player.reset()
                 await self._say_unlocked(f"Run {summary}?")
                 if self._barged:
                     # barged while the prompt was being spoken.
                     log.info("confirm aborted by barge")
-                    return False
+                    return result
                 self._confirm_capturing = True
                 try:
                     pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
                 finally:
                     self._confirm_capturing = False
                 if pcm is None:
-                    return False
+                    return result
                 heard = await self.stt.atranscribe(pcm)
                 if self._barged:
                     # barged while we were transcribing the reply.
                     log.info("confirm aborted by barge")
-                    return False
+                    return result
+                result = self.is_confirmation(heard)
+                log.info("confirm heard=%r -> %s", heard, result)
         finally:
             self._set(prev)
-        ok = self.is_confirmation(heard)
-        log.info("confirm heard=%r -> %s", heard, ok)
-        return ok
+            self._emit("tool", {"summary": summary, "decision": "allowed" if result else "declined"})
+        return result
 
     # -- barge-in ---------------------------------------------------------------
     async def _run_with_barge(self, coro) -> bool:
@@ -305,6 +327,7 @@ class Orchestrator:
             return
         while True:
             text = await self.stt.atranscribe(pcm)
+            self._emit("heard", text)
             log.info("heard=%r", text)
             if not text:
                 self.player.reset()

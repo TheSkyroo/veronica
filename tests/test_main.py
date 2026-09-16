@@ -14,9 +14,10 @@ class _FakeSynthesizer:
 
 
 class _FakeBrain:
-    def __init__(self, settings, confirm):
+    def __init__(self, settings, confirm, on_tool=None):
         self.s = settings
         self._confirm = confirm
+        self.on_tool = on_tool
 
 
 async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
@@ -40,6 +41,47 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
     result = await orch.brain._confirm("Bash: ls")
     assert result is True
     assert calls == ["Bash: ls"]
+
+
+class _FakeWakeWord:
+    def __init__(self, settings):
+        self.s = settings
+
+
+class _FakeTranscriber:
+    def __init__(self, model):
+        self.model = model
+
+
+class _FakeRecorder:
+    def __init__(self, settings, on_level=None):
+        self.s = settings
+        self.on_level = on_level
+
+
+class _FakeBrainWithOnTool:
+    def __init__(self, settings, confirm, on_tool=None):
+        self.s = settings
+        self._confirm = confirm
+        self.on_tool = on_tool
+
+
+async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "WakeWord", _FakeWakeWord)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+
+    seen = []
+    orch = main_mod.build_orchestrator(
+        Settings(), on_event=lambda k, p: seen.append((k, p)), audio=True
+    )
+
+    orch.recorder.on_level(0.5)
+    orch.brain.on_tool("Read: /x", "auto")
+
+    assert seen == [("mic", 0.5), ("tool", {"summary": "Read: /x", "decision": "auto"})]
 
 
 def test_main_text_mode_parses(monkeypatch):
