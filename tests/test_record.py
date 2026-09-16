@@ -560,3 +560,15 @@ def test_disarm_resets_arm_flags(monkeypatch):
     assert rec._capturing and rec._armed and rec._hold
     rec.disarm()
     assert not rec._capturing and not rec._armed and not rec._hold
+
+
+def test_recorder_registers_capture_in_flight_as_device_busy():
+    # (devices.reset() in the autouse fixture clears the hook between tests)
+    from veronica.audio import devices
+
+    r = Recorder(Settings(), frames=lambda: iter([]))
+    assert devices.busy() is False
+    r.arm()
+    assert devices.busy() is True
+    r.disarm()
+    assert devices.busy() is False

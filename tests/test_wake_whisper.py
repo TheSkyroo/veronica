@@ -172,12 +172,13 @@ def _wordseg_model_cls(words, text):
 
 @pytest.mark.asyncio
 async def test_take_preroll_returns_tail_after_last_wake_word_then_empty(monkeypatch):
-    # First hop transcribed is exactly wake_hop_s (0.4s) of buffered audio;
+    # First hop transcribed is exactly wake_hop_s (0.4s here, set explicitly
+    # so the arithmetic doesn't shift with the defaults) of buffered audio;
     # "veronica" ends at 0.3s into that window, so the tail from 0.3s to 0.4s
     # (0.1s = 1600 samples at 16 kHz) should become the pre-roll.
     words = [Word(0.0, 0.15, "hey"), Word(0.15, 0.3, "veronica")]
     monkeypatch.setattr(WhisperWake, "_model_cls", _wordseg_model_cls(words, "hey veronica"))
-    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    w = WhisperWake(Settings(wake_hop_s=0.4, wake_window_s=1.6), frames=lambda: const_frames(1000))
     assert await _wait_for(w.wait(), 3) is True
 
     preroll = w.take_preroll()
@@ -189,10 +190,10 @@ async def test_take_preroll_returns_tail_after_last_wake_word_then_empty(monkeyp
 @pytest.mark.asyncio
 async def test_take_preroll_falls_back_without_word_timestamps(monkeypatch):
     # No word-level timestamps at all -> fallback to window_end - 0.3s.
-    # window here is 0.4s (wake_hop_s), so fallback end_s = 0.1s -> tail is
-    # 0.3s = 4800 samples.
+    # window here is 0.4s (wake_hop_s, set explicitly), so fallback
+    # end_s = 0.1s -> tail is 0.3s = 4800 samples.
     monkeypatch.setattr(WhisperWake, "_model_cls", _wordseg_model_cls([], "veronica"))
-    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    w = WhisperWake(Settings(wake_hop_s=0.4, wake_window_s=1.6), frames=lambda: const_frames(1000))
     assert await _wait_for(w.wait(), 3) is True
 
     preroll = w.take_preroll()
@@ -227,6 +228,7 @@ def test_mic_frames_buffers_while_consumer_stalls(monkeypatch):
     import threading
     import time
 
+    from veronica.audio import devices, mic
     from veronica.audio import wake_whisper as ww
 
     produced = []
@@ -245,7 +247,8 @@ def test_mic_frames_buffers_while_consumer_stalls(monkeypatch):
             produced.append(frame)
             return frame, False
 
-    monkeypatch.setattr(ww.sd, "RawInputStream", FakeStream)
+    monkeypatch.setattr(mic.sd, "RawInputStream", FakeStream)
+    monkeypatch.setattr(devices, "default_input_id", lambda: None)   # never touch CoreAudio
     w = ww.WhisperWake.__new__(ww.WhisperWake)
     w.s = ww.Settings()
     frames = w._mic_frames()
@@ -275,8 +278,8 @@ async def test_wait_skips_transcription_while_behind(monkeypatch):
 
     monkeypatch.setattr(ww.WhisperWake, "_model_cls", Model)
     loud = (np.ones(ww.CHUNK, dtype=np.int16) * 3000).tobytes()
-    n_frames = 60
-    w = ww.WhisperWake(ww.Settings(), frames=lambda: iter([loud] * n_frames))
+    n_frames = 60   # 12 hops at the explicit 0.4 s hop below
+    w = ww.WhisperWake(ww.Settings(wake_hop_s=0.4, wake_window_s=1.6), frames=lambda: iter([loud] * n_frames))
     hops = {"n": 0}
 
     def backlog():
@@ -287,3 +290,71 @@ async def test_wait_skips_transcription_while_behind(monkeypatch):
     w._backlog = backlog
     assert await w.wait() is False      # frames exhausted without a match
     assert 0 < len(calls) <= 2      # only the final, caught-up hop(s) are transcribed
+
+
+@pytest.mark.asyncio
+async def test_wait_logs_rms_per_hop_at_debug(monkeypatch, caplog):
+    """Every hop logs its window rms against the gate at DEBUG (opt-in via
+    VERONICA_LOG_LEVEL=DEBUG) so far-field sensitivity can be diagnosed."""
+    import logging
+
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["hey veronica"]))
+    s = Settings(wake_min_rms=0.01)
+    quiet = np.full(CHUNK, 100, dtype=np.int16).tobytes()      # rms ~0.003 < gate
+    loud = np.full(CHUNK, 1000, dtype=np.int16).tobytes()      # rms ~0.03 > gate
+    hop_frames = int(s.wake_hop_s * s.sample_rate) // CHUNK + 1
+    w = WhisperWake(s, frames=lambda: iter([quiet] * hop_frames + [loud] * hop_frames * 4))
+    with caplog.at_level(logging.DEBUG, logger="veronica.audio"):
+        assert await _wait_for(w.wait(), 3) is True
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("wake hop rms=")]
+    assert lines[0] == "wake hop rms=0.0031 gate=0.0100 (below gate)"
+    assert any(line.endswith("gate=0.0100") for line in lines[1:])   # the loud hop is not suffixed
+
+
+def test_engines_delegate_mic_frames_to_shared_reader(monkeypatch, tmp_home):
+    """Both engines' default frame source is veronica.audio.mic.mic_frames
+    with an InputWatch and the Player-closing refresh hook."""
+    from veronica.audio import wake as wake_mod
+    from veronica.audio import wake_whisper as ww
+    from veronica.audio.devices import InputWatch
+    from veronica.audio.play import close_registered_streams
+
+    calls = []
+
+    def fake_mic_frames(settings, chunk, prefix, **kw):
+        calls.append((chunk, prefix, kw))
+        return iter([])
+
+    monkeypatch.setattr(ww, "mic_frames", fake_mic_frames)
+    monkeypatch.setattr(wake_mod, "mic_frames", fake_mic_frames)
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls([""]))
+    monkeypatch.setattr(WakeWord, "_model_cls", staticmethod(lambda wakeword_models, inference_framework: object()))
+
+    w = WhisperWake(Settings())
+    assert list(w._mic_frames()) == []
+    chunk, prefix, kw = calls[-1]
+    assert (chunk, prefix) == (CHUNK, "wake")
+    assert isinstance(kw["watch"], InputWatch) and kw["before_refresh"] is close_registered_streams
+    kw["on_backlog"](lambda: 7)
+    assert w._backlog() == 7
+
+    o = WakeWord(Settings(wake_engine="openwakeword"))
+    assert list(o._mic_frames()) == []
+    chunk, prefix, kw = calls[-1]
+    assert (chunk, prefix) == (CHUNK, "wake")
+    assert isinstance(kw["watch"], InputWatch) and kw["before_refresh"] is close_registered_streams
+
+
+@pytest.mark.asyncio
+async def test_wait_raises_when_frames_raise(monkeypatch):
+    """A dead mic reader (mic_frames raising) must surface from wait() so
+    the orchestrator's 'wake listener failed; retrying' backoff applies."""
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls([""]))
+
+    def broken_frames():
+        yield b"\x00\x00" * 1280
+        raise OSError("no input device")
+
+    w = WhisperWake(Settings(), frames=broken_frames)
+    with pytest.raises(OSError, match="no input device"):
+        await _wait_for(w.wait(), 2)

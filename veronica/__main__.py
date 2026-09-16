@@ -5,7 +5,7 @@ import os
 import sys
 
 from veronica import prefs, proactive
-from veronica.audio.play import Player
+from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
 from veronica.brain.agent import Brain
@@ -19,7 +19,14 @@ from veronica.tools import memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
-def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None) -> Orchestrator:
+def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None,
+                       updater_check=None, updater_update=None, relaunch=None, can_relaunch=None,
+                       version_describe=None) -> Orchestrator:
+    """`updater_check`/`updater_update`/`relaunch`/`can_relaunch` are the
+    menu bar app's self-update hooks (see Orchestrator); None (text mode)
+    disables the "update yourself" turn. `version_describe` is a cached
+    "Veronica x.y.z (sha, date)" for the version turn (default: git, on a
+    thread)."""
     holder: dict = {}
 
     async def confirm(summary: str, detail: str = "") -> bool:
@@ -121,6 +128,8 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
             announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
             calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
         )
+    player = Player()
+    register_for_refresh(player)
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
@@ -129,7 +138,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         partial_stt=partial_stt,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
         tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed, hindi_voice=saved_hindi_voice),
-        player=Player(),
+        player=player,
         store=store,
         on_state=on_state,
         on_event=on_event,
@@ -137,6 +146,11 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         proactive=pro,
         stt_factory=make_stt,
         language=language,
+        updater_check=updater_check,
+        updater_update=updater_update,
+        relaunch=relaunch,
+        can_relaunch=can_relaunch,
+        version_describe=version_describe,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

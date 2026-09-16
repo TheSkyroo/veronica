@@ -79,8 +79,43 @@ def test_enable_ignores_launchctl_failure(fake_home, monkeypatch):
 
 
 def test_bundle_app_path():
-    assert login_item.bundle_app_path("/Applications/Veronica.app/Contents/MacOS/Veronica") == Path(
+    assert login_item.bundle_app_path("/Applications/Veronica.app/Contents/MacOS/Veronica", env={}) == Path(
         "/Applications/Veronica.app"
     )
-    assert login_item.bundle_app_path("/usr/bin/python3") is None
-    assert login_item.bundle_app_path("veronica/__main__.py") is None
+    assert login_item.bundle_app_path("/usr/bin/python3", env={}) is None
+    assert login_item.bundle_app_path("veronica/__main__.py", env={}) is None
+
+
+def test_bundle_app_path_prefers_app_bundle_env():
+    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica.app"}
+    # the launcher runs `python -m veronica`, so argv0 is __main__.py: env must win
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) == Path(
+        "/Apps/Veronica.app"
+    )
+
+
+def test_bundle_app_path_env_must_exist_and_end_with_app():
+    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica.app"}
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: False) is None
+    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica"}
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) is None
+    assert login_item.bundle_app_path("veronica/__main__.py", env={"VERONICA_APP_BUNDLE": ""}, exists=lambda p: True) is None
+
+
+def test_bundle_app_path_derives_from_bundle_build():
+    env = {"VERONICA_BUNDLE_BUILD": "/Apps/Veronica.app/Contents/Resources/build.json"}
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) == Path(
+        "/Apps/Veronica.app"
+    )
+    # a build.json that isn't inside a .app is ignored
+    env = {"VERONICA_BUNDLE_BUILD": "/tmp/x/y/build.json"}
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) is None
+    env = {"VERONICA_BUNDLE_BUILD": "/Apps/Veronica.app/Contents/Resources/build.json"}
+    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: False) is None
+
+
+def test_bundle_app_path_falls_back_to_argv_when_env_empty():
+    assert login_item.bundle_app_path(
+        "/Applications/Veronica.app/Contents/MacOS/Veronica", env={}, exists=lambda p: False
+    ) == Path("/Applications/Veronica.app")
+    assert login_item.bundle_app_path("veronica/__main__.py", env={}) is None

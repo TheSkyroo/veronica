@@ -3,6 +3,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from veronica.audio import devices
 from veronica.audio import play as play_mod
 
 
@@ -263,11 +264,157 @@ async def test_stream_open_retries_after_portaudio_reinit(monkeypatch):
 
     fsd = SD()
     monkeypatch.setattr(play_mod, "sd", fsd)
-    p = play_mod.Player(sample_rate=24000, blocksize=1024)
-    task = asyncio.ensure_future(p.play(np.ones(500, dtype=np.float32)))
-    await asyncio.sleep(0.01)
+    monkeypatch.setattr(devices, "sd", fsd)     # reinit is routed through devices.refresh_portaudio
+    other = play_mod.Player(sample_rate=24000, blocksize=1024)
+    play_mod.register_for_refresh(other)
+    other._stream = FakeStream(callback=None)   # a second Player's open stream must close first
+    try:
+        p = play_mod.Player(sample_rate=24000, blocksize=1024)
+        task = asyncio.ensure_future(p.play(np.ones(500, dtype=np.float32)))
+        await asyncio.sleep(0.01)
+    finally:
+        play_mod._registry.remove(other)
     assert fsd.reinit == ["terminate", "initialize"]
     assert fsd.calls == 2
+    assert devices.generation == 1
+    assert other._stream is None
     stream = fsd.streams[-1]
     await pump(stream, 1)
     await task
+
+
+@pytest.mark.asyncio
+async def test_close_stream_keeps_playing_and_reopens_on_next_play(fake_sd):
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+    await asyncio.sleep(0.01)
+    stream1 = fake_sd.streams[-1]
+    p.close_stream()                    # device switched: drop the old stream
+    stream1.finished_callback()         # PortAudio reports the stream finished
+    await task                          # in-flight play() returns rather than hangs
+    assert stream1.closed >= 1          # (play()'s inactive-stream path may close it again)
+    assert p._refreshed is False        # consumed by that play()
+    assert p._stopped is False          # not a stop(): playback is still allowed
+
+    task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+    await asyncio.sleep(0.01)
+    assert len(fake_sd.streams) == 2    # next play() opened a fresh stream
+    await pump(fake_sd.streams[-1], 2)
+    await task
+
+
+@pytest.mark.asyncio
+async def test_registered_players_close_streams_on_refresh_hook(fake_sd):
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    play_mod.register_for_refresh(p)
+    play_mod.register_for_refresh(p)    # idempotent
+    try:
+        task = asyncio.create_task(p.play(np.ones(1024, dtype=np.float32)))
+        await asyncio.sleep(0.01)
+        play_mod.close_registered_streams()
+        assert fake_sd.streams[-1].closed == 1
+        assert p._stream is None and p._stopped is False
+        fake_sd.streams[-1].finished_callback()
+        await task
+    finally:
+        play_mod._registry.remove(p)
+
+
+def test_close_stream_without_stream_is_noop(fake_sd):
+    p = play_mod.Player()
+    p.close_stream()
+    assert fake_sd.streams == []
+
+
+@pytest.mark.asyncio
+async def test_interruption_by_device_refresh_logs_info_not_warning(fake_sd, caplog):
+    import logging
+
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    with caplog.at_level(logging.INFO, logger="veronica.audio.play"):
+        task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+        await asyncio.sleep(0.01)
+        p.close_stream()
+        fake_sd.streams[-1].finished_callback()
+        await task
+    recs = [r for r in caplog.records if r.name == "veronica.audio.play"]
+    assert [r.levelno for r in recs] == [logging.INFO]
+    assert "device refresh" in recs[0].getMessage()
+
+    # a stream that dies on its own is still a WARNING
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="veronica.audio.play"):
+        task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+        await asyncio.sleep(0.01)
+        fake_sd.streams[-1].stop()
+        fake_sd.streams[-1].finished_callback()
+        await task
+    assert [r.levelno for r in caplog.records if r.name == "veronica.audio.play"] == [logging.WARNING]
+
+
+async def test_stream_open_retry_does_not_reinit_while_capture_in_flight(monkeypatch, caplog):
+    """Pa_Terminate under a Recorder's blocking read would be a use-after-
+    free: with devices.busy() True the retry is skipped and the open error
+    propagates (the chime fails; nothing is terminated)."""
+    import logging
+
+    class SD:
+        PortAudioError = play_mod._PortAudioError
+
+        def __init__(self):
+            self.calls = 0
+            self.reinit = []
+
+        def _terminate(self):
+            self.reinit.append("terminate")
+
+        def _initialize(self):
+            self.reinit.append("initialize")
+
+        def OutputStream(self, **kwargs):
+            self.calls += 1
+            raise play_mod._PortAudioError("Internal PortAudio error", -9986)
+
+    fsd = SD()
+    monkeypatch.setattr(play_mod, "sd", fsd)
+    monkeypatch.setattr(devices, "sd", fsd)
+    devices.register_busy(lambda: True)
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    with caplog.at_level(logging.WARNING, logger="veronica.audio.play"), pytest.raises(play_mod._PortAudioError):
+        await p.play(np.ones(500, dtype=np.float32))
+    assert fsd.reinit == [] and fsd.calls == 1
+    assert devices.generation == 0
+    assert "not re-initialising PortAudio: capture in flight" in caplog.text
+    assert p._stream is None
+
+
+@pytest.mark.asyncio
+async def test_refreshed_flag_cleared_by_successful_open(fake_sd, caplog):
+    """A refresh explains only the stream it closed: after the next play()
+    opens a fresh stream, that stream dying on its own is a WARNING again."""
+    import logging
+
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    task = asyncio.create_task(p.play(np.ones(1024, dtype=np.float32)))
+    await asyncio.sleep(0.01)
+    p.close_stream()
+    assert p._refreshed is True
+    fake_sd.streams[-1].finished_callback()
+    await task                                   # consumed here (INFO)
+    p.close_stream()                             # no stream: must not re-arm the flag
+    assert p._refreshed is False
+
+    p._refreshed = True                          # stale flag, e.g. close_stream() with no play() in between
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="veronica.audio.play"):
+        task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32)))
+        await asyncio.sleep(0.01)
+        assert p._refreshed is False             # cleared by the successful open
+        fake_sd.streams[-1].stop()
+        fake_sd.streams[-1].finished_callback()
+        await task
+    assert [r.levelno for r in caplog.records if r.name == "veronica.audio.play"] == [logging.WARNING]

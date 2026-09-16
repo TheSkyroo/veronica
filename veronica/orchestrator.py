@@ -11,6 +11,7 @@ import numpy as np
 
 from veronica import prefs
 from veronica import proactive as proactive_mod
+from veronica import version
 from veronica.audio.chime import tone
 from veronica.brain import quick
 from veronica.brain.intents import (
@@ -23,6 +24,9 @@ from veronica.brain.intents import (
     match_note_intent,
     match_proactive_intent,
     match_screen_intent,
+    match_settings_intent,
+    match_update_intent,
+    match_version_intent,
     match_voice_intent,
     normalize,
 )
@@ -35,6 +39,7 @@ from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
 from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
+from veronica.updater import UpdateInProgress
 
 log = logging.getLogger("veronica.orchestrator")
 
@@ -53,16 +58,39 @@ class Orchestrator:
     # No bare "ha": whisper writes laughter as "ha ha", which must never
     # approve a tool. Devanagari forms are for pinned Hindi mode, where
     # whisper emits the script rather than romanized Hindi.
-    CONFIRM_WORDS = frozenset({
-        "yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure",
-        "haan", "ji", "haanji", "ji haan", "theek hai", "karo",
-        "हाँ", "हां", "जी", "जी हाँ", "ठीक है", "करो",
+    #
+    # Two classes (controller ruling, batch D): STRONG confirms count
+    # wherever they are (last decisive wins); FILLER confirms ("okay",
+    # "sure", "theek hai"…) are how people start a question too ("okay so
+    # what will it delete"), so they only count when the whole utterance is
+    # nothing but confirm phrases.
+    STRONG_CONFIRMS = frozenset({
+        "yes", "yeah", "yep", "yup", "do it", "go ahead", "confirm", "absolutely", "please do", "go for it",
+        "haan", "ji", "haanji", "ji haan", "karo", "bilkul", "kar do",
+        "हाँ", "हां", "जी", "जी हाँ", "करो", "बिल्कुल", "कर दो",
     })
+    FILLER_CONFIRMS = frozenset({
+        "ok", "okay", "alright", "fine", "correct", "of course", "sure",
+        "theek hai", "ठीक है", "ठीक",
+    })
+    CONFIRM_WORDS = STRONG_CONFIRMS | FILLER_CONFIRMS
     DENY_WORDS = frozenset({
         "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
         "nahi", "nahin", "mat", "rehne",
         "नहीं", "नही", "मत", "रहने",
     })
+    # A question or hesitation after the last confirm phrase ("yes what?",
+    # "ok wait", "alright hold on") means the answer isn't a yes.
+    QUESTION_WORDS = frozenset({
+        "what", "which", "how", "why", "wait", "hold",
+        # apostrophes are stripped before tokenising, so contractions arrive
+        # as "whats"/"hows"/"whys"/"wheres"
+        "whats", "hows", "whys", "wheres", "when", "where",
+        "kya", "kaun", "kaunsa", "kaunsi", "kyun", "kab", "ruko", "रुको", "क्या", "कौन", "क्यों", "कब",
+    })
+    # A confirm phrase directly after one of these is negated ("not okay",
+    # "don't do it", "mat karo") rather than counted as a yes.
+    _NEGATORS = frozenset({"not", "dont", "never", "no", "nahi", "nahin", "mat", "नहीं", "नही", "मत"})
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
     # Word characters for is_confirmation: Latin letters plus the Devanagari
     # block (U+0900-U+097F, which includes the vowel signs and chandrabindu).
@@ -74,17 +102,51 @@ class Orchestrator:
 
     @staticmethod
     def is_confirmation(heard: str) -> bool:
+        """True only if a confirm phrase is the *last decisive* thing said.
+
+        Scans left to right: a deny word anywhere after the last confirm
+        phrase wins ("yes… actually no" → False), but a deny before a later
+        confirm does not ("no no, I said yes, do it" → True). A confirm
+        phrase immediately preceded by a negator ("not okay", "don't do
+        it") is not a confirm. A question/hesitation word after the last
+        confirm phrase ("yes what?", "ok wait") is decisive-negative.
+        Filler confirms ("okay", "sure", "fine"…) count only when the
+        utterance consists solely of confirm phrases ("okay", "okay do it",
+        "alright yes" — not "okay so what will it delete", "is that
+        correct"). With no confirm phrase at all the answer is always
+        False — never default to yes."""
         no_apostrophes = heard.lower().replace("'", "").replace("’", "")
         words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
-        if any(w in Orchestrator.DENY_WORDS for w in words):
+        if not words:
             return False
-        for phrase in Orchestrator.CONFIRM_WORDS:
-            phrase_words = phrase.split()
-            n = len(phrase_words)
-            for i in range(len(words) - n + 1):
-                if words[i:i + n] == phrase_words:
-                    return True
-        return False
+        last_deny = max((i for i, w in enumerate(words) if w in Orchestrator.DENY_WORDS), default=-1)
+
+        def matches(phrases):
+            """(start, end) of every non-negated occurrence of any phrase."""
+            found = []
+            for phrase in phrases:
+                pw = phrase.split()
+                n = len(pw)
+                for i in range(len(words) - n + 1):
+                    if words[i:i + n] == pw and not (i > 0 and words[i - 1] in Orchestrator._NEGATORS):
+                        found.append((i, i + n - 1))
+            return found
+
+        strong = matches(Orchestrator.STRONG_CONFIRMS)
+        filler = matches(Orchestrator.FILLER_CONFIRMS)
+        if not strong and not filler:
+            return False
+        last_confirm = max(end for _, end in strong + filler)
+        if any(w in Orchestrator.QUESTION_WORDS for w in words[last_confirm + 1:]):
+            return False
+        last_strong = max((end for _, end in strong), default=-1)
+        if last_strong >= 0 and last_strong > last_deny:
+            return True
+        # Fillers only: every word must belong to some confirm phrase.
+        covered = set()
+        for start, end in strong + filler:
+            covered.update(range(start, end + 1))
+        return len(covered) == len(words)
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  partial_stt=None, store=None,
@@ -93,8 +155,27 @@ class Orchestrator:
                  on_quit: Callable[[], None] | None = None,
                  proactive=None,
                  stt_factory: Callable[[str, str | None], Any] | None = None,
-                 language: str = "en") -> None:
+                 language: str = "en",
+                 updater_check: Callable[[], Any] | None = None,
+                 updater_update: Callable[[Any], str] | None = None,
+                 relaunch: Callable[[], bool] | None = None,
+                 can_relaunch: Callable[[], bool] | None = None,
+                 version_describe: Callable[[], str] | None = None) -> None:
         self.s = settings
+        # Self-update (D3): `updater_check()` -> UpdateStatus, `updater_update(
+        # status)` -> log text, `relaunch()` restarts the app (and quits this
+        # process). All three are injected by the menu bar app; None (tests,
+        # --text mode) means "update yourself" just says it can't here.
+        # `can_relaunch()` says up front whether relaunch() will reopen a
+        # bundle (vs. just quit a dev run) so the "restart me" hint can be
+        # spoken BEFORE the quit is scheduled; None = unknown.
+        self.updater_check = updater_check
+        self.updater_update = updater_update
+        self.relaunch = relaunch
+        self.can_relaunch = can_relaunch
+        # "What version are you": the menu bar passes a cached describe();
+        # the default asks git, so it runs on a thread, off the loop.
+        self.version_describe = version_describe
         # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
         # Started once by run_forever; its schedule is what the "brief me"
         # / "turn on nudges" intents edit. None in --text mode.
@@ -485,7 +566,13 @@ class Orchestrator:
                 self.tts.hindi_voice = vid
                 prefs.save({"tts_hindi_voice": vid})
                 self._emit("tool", {"summary": f"Voice: {voices.display_name(vid)}", "decision": "auto"})
-                await self.say("Theek hai, ab main aise bolungi.", lang="hi")
+                await self.say("ठीक है, अब मैं ऐसे बोलूँगी।", lang="hi")
+                if getattr(self, "language", "en") == "en":
+                    # Picking a Hindi voice while pinned to English is a
+                    # strong hint they want to *speak* Hindi too — the
+                    # English-only whisper can't hear it, so open up to
+                    # both languages.
+                    await self._language_turn("auto")
                 return
             self.tts.voice = vid
             prefs.save({"tts_voice": vid})
@@ -516,14 +603,14 @@ class Orchestrator:
 
     # -- language mode (C2) ---------------------------------------------------------
     _LANG_LOADING = {
-        "hi": "Ek minute, Hindi load kar rahi hoon.",
+        "hi": "एक मिनट, हिंदी load कर रही हूँ।",
         "en": "One moment, switching to English.",
         "auto": "Ek minute.",
     }
     _LANG_CONFIRM = {
-        "hi": "Ab Hindi mein baat karte hain.",
+        "hi": "अब हिंदी में बात करते हैं।",
         "en": "Okay, English it is.",
-        "auto": "Theek hai, dono chalega.",
+        "auto": "ठीक है, दोनों चलेगा।",
     }
 
     def _stt_spec(self, mode: str) -> tuple[str, str | None, str]:
@@ -559,7 +646,7 @@ class Orchestrator:
             except Exception:
                 log.exception("language switch failed")
                 if mode == "hi":
-                    await self.say("Hindi load nahi ho paayi, baad mein try karo.", lang="hi")
+                    await self.say("हिंदी load नहीं हो पाई, बाद में try करो।", lang="hi")
                 else:
                     await self.say("Couldn't switch language, check the log.")
                 return
@@ -801,7 +888,7 @@ class Orchestrator:
         only carries the language; the value is read here."""
         kind, reply = hit
         # A Hinglish/Devanagari phrase gets a Hindi reply even in English
-        # mode ("shukriya" -> "Koi baat nahi."), so voice it in Hindi too.
+        # mode ("shukriya" -> "कोई बात नहीं।"), so voice it in Hindi too.
         lang = reply if kind in ("battery", "volume") else quick.reply_lang(heard, self._utterance_lang)
         if kind == "battery":
             percent, state = await asyncio.to_thread(mac_tools.read_battery)
@@ -817,6 +904,79 @@ class Orchestrator:
         await self.say(reply, lang=lang)
         if self.store is not None and self.s.memory_enabled:
             self.store.add_turn(heard, reply)
+
+    # -- settings window / self-update (Batch D) ---------------------------------
+    async def _settings_turn(self, tab: str, heard: str) -> None:
+        """Local fast path for "open settings" / "show history": ask the
+        menu bar (which owns the window) to show it on the given tab, and
+        confirm. A Hindi/Hinglish utterance gets the Hindi confirmation."""
+        self._emit("settings", {"open": True, "tab": tab})
+        hindi = self._utterance_lang == "hi" or has_devanagari(heard) or quick.is_hinglish_phrase(heard)
+        if hindi:
+            await self.say("यह लीजिए।", lang="hi")
+        else:
+            await self.say("Here you go.")
+
+    async def _describe_version(self) -> str:
+        if self.version_describe is not None:
+            return self.version_describe()
+        return await asyncio.to_thread(version.describe)
+
+    async def _update_turn(self) -> None:
+        """Local fast path for "update yourself" / "check for updates":
+        check on a thread, and if something newer exists, pull/build (also
+        on a thread) and relaunch — this IS the in-progress turn, so the
+        settings bridge's idle rule doesn't apply. It runs outside the
+        barge race so the build can't be orphaned mid-way; the app's
+        `updater_update` hook holds the bridge's single update slot and
+        raises UpdateInProgress when one is already running. Nothing is
+        injected in --text mode/tests."""
+        if self.updater_check is None or self.updater_update is None:
+            await self.say("Updates aren't available in this mode.")
+            return
+        self._set("thinking")
+        try:
+            status = await asyncio.to_thread(self.updater_check)
+        except Exception:
+            log.warning("update check failed", exc_info=True)
+            await self.say("Couldn't check for updates, check the log.")
+            return
+        if not status.available:
+            await self.say("You're already on the latest.")
+            return
+        # Start the work first: the hook claims the bridge's update slot
+        # (or refuses at once), so give it a beat before announcing.
+        work = asyncio.ensure_future(asyncio.to_thread(self.updater_update, status))
+        await asyncio.wait({work}, timeout=0.05)
+        if work.done() and isinstance(work.exception(), UpdateInProgress):
+            await self.say("An update is already running.")
+            return
+        await self.say("Updating, back in a moment.")
+        self._emit("tool", {"summary": "Update Veronica", "decision": "auto"})
+        self._set("thinking")
+        try:
+            log.info("update: %s", await work)
+        except UpdateInProgress:
+            await self.say("An update is already running.")
+            return
+        except Exception:
+            log.exception("update failed")
+            await self.say("The update failed, check the log.")
+            return
+        hint = "Update installed. Restart me from the terminal."
+        if self.relaunch is None:
+            await self.say(hint)
+            return
+        if self.can_relaunch is not None and not self.can_relaunch():
+            # Dev run: relaunch() will only quit — say so first, so the
+            # speech isn't torn down by the quit it schedules.
+            await self.say(hint)
+            self.relaunch()
+            return
+        if not self.relaunch():
+            # relaunch() quits when it could schedule the reopen (or has no
+            # bundle to reopen); still here means neither happened.
+            await self.say(hint)
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -1118,19 +1278,35 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
                 else match_language_intent(text)
             )
-            proactive_action = (
+            settings_tab = (
                 None
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None)
+                else match_settings_intent(text)
+            )
+            version_intent = (
+                False
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or settings_tab is not None)
+                else match_version_intent(text)
+            )
+            update_intent = (
+                False
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or settings_tab is not None or version_intent)
+                else match_update_intent(text)
+            )
+            local_hit = settings_tab is not None or version_intent or update_intent
+            proactive_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit)
                 else match_proactive_intent(text)
             )
             quick_hit = (
                 None
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None)
                 else quick.match_quick(text, lang=self._utterance_lang)
             )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None or quick_hit is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -1177,6 +1353,17 @@ class Orchestrator:
             elif lang_mode is not None:
                 self.player.reset()
                 await self._language_turn(lang_mode)
+            elif settings_tab is not None:
+                self.player.reset()
+                await self._settings_turn(settings_tab, text)
+            elif version_intent:
+                self.player.reset()
+                await self.say(await self._describe_version())
+            elif update_intent:
+                # Deliberately NOT under _run_with_barge: a barge would
+                # cancel the turn and orphan a half-done pull/build.
+                self.player.reset()
+                await self._update_turn()
             elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
                 self.player.reset()
                 barged = await self._run_with_barge(self._brief_now_turn())

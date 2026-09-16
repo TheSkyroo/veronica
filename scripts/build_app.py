@@ -10,6 +10,11 @@ Phase 6):
                                  lives), cd <repo>, exec <repo>/.venv/bin/python -m veronica "$@"
         Info.plist              CFBundleIdentifier io.manik.veronica, LSUIElement, mic/automation usage strings
         Resources/Veronica.icns copied from assets/Veronica.icns (built by scripts/make_icon.py)
+        Resources/build.json    {sha, built_at, dirty, source} from git at build time; the launcher
+                                 exports VERONICA_BUNDLE_BUILD pointing here so veronica.version reports
+                                 the built commit rather than whatever the repo has moved on to;
+                                 it also exports VERONICA_APP_BUNDLE (the .app path) so relaunch /
+                                 Start at Login know where the bundle is (argv[0] is __main__.py)
         PkgInfo                 "APPL????"
 
 The build resolves `claude` via `shutil.which("claude")` in the build shell and fails with a clear error
@@ -26,6 +31,7 @@ Idempotent: removes any existing dist/Veronica.app first. Run directly:
 from __future__ import annotations
 
 import argparse
+import json
 import plistlib
 import shutil
 import stat
@@ -34,11 +40,13 @@ import sys
 import tomllib
 from pathlib import Path
 
+from veronica import version as version_mod
+
 REPO = Path(__file__).resolve().parent.parent
 BUNDLE_ID = "io.manik.veronica"
 APP_NAME = "Veronica"
 
-def _launcher_script(repo: Path, python: Path, claude_dir: str) -> str:
+def _launcher_script(repo: Path, python: Path, claude_dir: str, build_json: Path, app: Path) -> str:
     # Plain (non-f) strings for the lines containing shell variable
     # expansions ($PATH, ${LANG:-...}) so Python's str.format/f-string
     # brace parsing never sees them.
@@ -46,6 +54,8 @@ def _launcher_script(repo: Path, python: Path, claude_dir: str) -> str:
         "#!/bin/zsh\n"
         f'export PATH="{claude_dir}:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"\n'
         'export LANG="${LANG:-en_US.UTF-8}"\n'
+        f'export VERONICA_BUNDLE_BUILD="{build_json}"\n'
+        f'export VERONICA_APP_BUNDLE="{app}"\n'
         f'cd "{repo}"\n'
         f'exec "{python}" -m veronica "$@"\n'
     )
@@ -86,12 +96,14 @@ def build_app(
     venv_python: Path | None = None,
     codesign_enabled: bool = True,
     claude_bin: Path | str | None = None,
+    run=subprocess.run,
 ) -> Path:
     """Build dist/Veronica.app (or dist_dir/Veronica.app) and return its path.
 
     `claude_bin` overrides where the `claude` CLI is resolved from (for
     tests); by default it's `shutil.which("claude")` in the build shell, and
-    the build fails loudly if that comes back empty.
+    the build fails loudly if that comes back empty. `run` is the subprocess
+    runner used to ask git for the build sha (injectable for tests).
     """
     dist_dir = dist_dir or (repo / "dist")
     venv_python = venv_python or (repo / ".venv" / "bin" / "python")
@@ -116,9 +128,13 @@ def build_app(
     macos_dir.mkdir(parents=True)
     resources_dir.mkdir(parents=True)
 
+    # build.json: which commit this bundle was built from
+    build_json = resources_dir / "build.json"
+    build_json.write_text(json.dumps(version_mod.build_info(run=run, env={}, repo=repo), indent=2) + "\n")
+
     # launcher
     launcher = macos_dir / APP_NAME
-    launcher.write_text(_launcher_script(repo, venv_python, claude_dir))
+    launcher.write_text(_launcher_script(repo, venv_python, claude_dir, build_json, app.resolve()))
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     # Info.plist

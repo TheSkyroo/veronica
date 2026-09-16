@@ -4,9 +4,11 @@ import threading
 from collections.abc import Callable, Iterator
 
 import numpy as np
-import sounddevice as sd
 from openwakeword.model import Model
 
+from veronica.audio.devices import InputWatch
+from veronica.audio.mic import mic_frames
+from veronica.audio.play import close_registered_streams
 from veronica.config import Settings
 
 CHUNK = 1280  # 80 ms @ 16 kHz, openwakeword's native chunk
@@ -56,12 +58,7 @@ class WakeWord:
         self._stop = threading.Event()
 
     def _mic_frames(self) -> Iterator[bytes]:
-        # Relies on CPython refcounting to close the stream (via __exit__) as soon as
-        # this generator is garbage-collected when _wait returns/breaks out of the loop.
-        with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK) as stream:
-            while True:
-                data, _ = stream.read(CHUNK)
-                yield bytes(data)
+        return mic_frames(self.s, CHUNK, "wake", watch=InputWatch(), before_refresh=close_registered_streams)
 
     def stop(self) -> None:
         """Request that the in-flight (or next) wait() stop. Thread-safe, one-shot: a

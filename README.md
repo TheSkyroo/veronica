@@ -175,7 +175,8 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 
 - **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
   (Sarah, Bella, Nicole, Sky, Adam, Michael, Emma, Isabella, George, Lewis), picked by name or by descriptor
-  (british/american, male/female), plus the four Hindi voices (see *Hindi & Hinglish*); "use the default voice"
+  (british/american, male/female), plus the four Hindi voices (see *Hindi & Hinglish*) — picking a Hindi voice while she's in English mode also switches her to
+  "understand both" so she can hear Hindi; "use the default voice"
   goes back to the configured one. "Change your voice" /
   "different voice" cycles to the next one. She confirms in the new voice ("Okay, this is George.") so you hear it
   straight away; an unknown name gets the list back.
@@ -208,13 +209,14 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 
 - **Switch** — "speak hindi" / "hindi mein bolo" pins her to Hindi; "speak english" / "english mein bolo" goes
   back; "understand both" / "dono bhasha" lets whisper detect the language per utterance. She confirms in the new
-  language ("Ab Hindi mein baat karte hain." / "Okay, English it is." / "Theek hai, dono chalega."), and the mode
+  language ("अब हिंदी में बात करते हैं।" / "Okay, English it is." / "ठीक है, दोनों चलेगा।"), and the mode
   persists in `~/.veronica/prefs.json`. In pinned Hindi mode everything you say is treated as Hindi and spoken with
   the Hindi voice; say "understand both" / "dono bhasha" if you mix English and Hindi.
 - **What to expect** — Hindi and auto mode swap the English-only whisper models for the multilingual ones; the
-  first switch downloads them (~500 MB) after an "Ek minute, Hindi load kar rahi hoon." Replies follow your
-  language: Hinglish in, Hinglish out (Latin letters); pure Hindi in, Devanagari out; English in, English out.
-  Hindi replies are spoken with a Hindi voice; timers, briefings and other announcements keep the English voice
+  first switch downloads them (~500 MB) after an "एक मिनट, हिंदी load कर रही हूँ।" Replies follow your
+  language: Hindi or Hinglish in → Hindi out in Devanagari (Kokoro's Hindi voice needs Devanagari to sound
+  natural — romanized Hinglish gets read like English); English in, English out. Hindi replies are spoken with a
+  Hindi voice; timers, briefings and other announcements keep the English voice
   unless they contain Devanagari.
 - **Hinglish commands** — the local intents understand romanized Hindi too: "bas karo" / "chup" ends the turn,
   "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "ji" / "nahi" answer a
@@ -222,7 +224,7 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
   common ones are understood in script as well ("बस करो", "हाँ" / "नहीं", "समय क्या है").
 - **Hindi voices** — Alpha, Beta (female), Omega, Psi (male). "Use a hindi voice" / "use the omega voice" picks
   the voice Hindi replies use (the English voice is untouched, so both show a checkmark in the **Voice** menu),
-  confirmed with "Theek hai, ab main aise bolungi." Prefetch the models without switching:
+  confirmed with "ठीक है, अब मैं ऐसे बोलूँगी।" Prefetch the models without switching:
   `uv run python scripts/download_models.py --hindi`.
 
 ## Briefings & nudges
@@ -239,6 +241,56 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 
 Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
 fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
+
+## Settings window
+
+A normal macOS window (tabs: General, Voice, Listening, Briefings, Brain, History, About) for everything that
+used to need an environment variable or a voice command.
+
+- **Open it** — say "open settings" / "settings" / "preferences" / "settings kholo", pick "Settings…" from the menu
+  bar, or click the HUD orb and choose "Settings…". "Show history" / "what did I ask you" / "history dikhao" opens
+  it straight on the History tab.
+- **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
+  spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
+  utterance limits, briefing/nudge schedule, start at login, push-to-talk.
+- **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
+  brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
+  Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a
+  terminal it quits and says "Restart me from the terminal.").
+
+Values you set here override the environment/`.env` defaults (they're stored in `~/.veronica/prefs.json`).
+
+## History
+
+The History tab lists past turns (what you said, what she replied) from the local memory database, with a search
+box. Each row has a Forget button; "Clear all" (with a confirm step) removes them all. Facts you asked her to
+remember are separate (see Memory) and aren't touched by clearing history. With memory disabled the tab just says
+so.
+
+## Version & updates
+
+- **"What version are you"** / "version" / "kaunsa version hai" — says e.g. "Veronica 0.1.0 (a517483, 17 Sep)":
+  the package version plus the commit that's actually running (from the bundle's `build.json` when launched as
+  the app, else live from git). The same line sits at the top of the menu bar menu ("About Veronica — …") and on
+  the About tab.
+- **"Update yourself"** / "update now" / "check for updates" / "apna update karo" — checks the repo: if
+  `origin` has newer commits it says "Updating, back in a moment.", runs `git pull --ff-only`, `uv sync`
+  and rebuilds `dist/Veronica.app`, then relaunches. If there's no remote (or nothing new upstream) but the running
+  build is behind the checked-out code, "update" just rebuilds and restarts you onto the latest local code. Already
+  current: "You're already on the latest." Couldn't reach the remote: "Couldn't check for updates, check the log."
+  Anything failing mid-update: "The update failed, check the log." Only one update runs at a time — a second
+  "update yourself" (or the window/menu) while one is running gets "An update is already running." / "Busy, try
+  again in a moment.". From a terminal run (no app bundle to reopen) it finishes with "Update installed. Restart me
+  from the terminal."
+- **Menu bar** — "Check for Updates…" runs the same check and posts a notification (when running from a terminal
+  there's no notification center, so she says the result instead, next time she's idle); when something newer exists
+  the item below it becomes "Update available — Restart to update" (click to install). Veronica also checks quietly
+  once an hour and only flips that item, no notification. The About tab has "Check now", "Update & restart",
+  "Restart" and "Open log".
+
+Updates are refused while a conversation is in progress from the window/menu ("Busy, try again in a moment."); the
+spoken "update yourself" is itself the turn, so it just runs. There are no API keys involved — updating is a git
+pull plus rebuild of the local checkout.
 
 ## Permissions
 
@@ -288,6 +340,20 @@ a real bundle path to point the LaunchAgent at.
 Logs: `~/.veronica/logs/veronica.log` (the app's own log; when running from the bundle, stdout isn't a TTY, so
 only the file handler is attached — nothing is lost, it's just not duplicated to a terminal) and
 `~/.veronica/logs/launchd.log` (stdout/stderr captured by launchd when started via "Start at Login").
+
+## Troubleshooting
+
+**She only wakes when I lean into the mic.** The wake check ignores audio quieter than the "Wake sensitivity
+(min level)" gate (`wake_min_rms`, default 0.003). Lower it in Settings to hear you from across the room (you
+may get more false wakes; raise it if she wakes on noise). "Wake window" and "Wake hop" (`wake_window_s`,
+`wake_hop_s`) control how much audio each check sees and how often it runs. Run with
+`VERONICA_LOG_LEVEL=DEBUG` and watch `~/.veronica/logs/veronica.log` for `wake hop rms=... gate=...` lines
+to see how loud your voice actually lands at the mic.
+
+**AirPods / USB mic / headphones.** Mic switching is automatic: Veronica polls macOS's default input device
+every couple of seconds and reopens the mic on the new device (`input device changed (...); reopening mic` in
+the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
+in-flight recording finishes.
 
 ## Test
     uv run pytest            # unit

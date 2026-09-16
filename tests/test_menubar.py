@@ -19,6 +19,9 @@ class FakeMenuItem:
     def add(self, item):
         self.children.append(item)
 
+    def set_callback(self, callback, key=None):
+        self.callback = callback
+
 
 class FakeTimer:
     def __init__(self, callback, interval):
@@ -45,9 +48,16 @@ class FakeRumps:
 
     def __init__(self):
         self.quit_called = False
+        self.notifications = []
+        self.notification_error = None   # set to an exception to mimic no CFBundleIdentifier
 
     def quit_application(self):
         self.quit_called = True
+
+    def notification(self, title, subtitle, message, **kw):
+        if self.notification_error is not None:
+            raise self.notification_error
+        self.notifications.append((title, subtitle, message))
 
 
 class FakePlayer:
@@ -101,6 +111,13 @@ class FakeOrch:
         self.player = FakePlayer()
         self._on_state = on_state
         self.started = threading.Event()
+        self.announced = []
+        self.state = "idle"
+        from veronica.config import Settings
+        self.s = Settings()          # bridge.get_state() reads the live settings off the orchestrator
+
+    async def announce(self, text, expires_at=None):
+        self.announced.append(text)
 
     async def warmup(self):
         # mirrors the real Orchestrator.warmup(), which ends by emitting
@@ -114,6 +131,29 @@ class FakeOrch:
     async def run_forever(self):
         self.started.set()
         await asyncio.Event().wait()
+
+
+class FakeSettingsWindow:
+    """Stand-in for veronica.ui.settings.SettingsWindow: no WKWebView, just
+    records show()/hide() calls and the bridge it was given."""
+
+    def __init__(self, settings, bridge, **_k):
+        self.s = settings
+        self.bridge = bridge
+        self.available = True
+        self.shown = []
+        self.hidden = 0
+        bridge.on_state_changed = self.push_state
+        self.states = []
+
+    def push_state(self, state):
+        self.states.append(state)
+
+    def show(self, tab="general"):
+        self.shown.append(tab)
+
+    def hide(self):
+        self.hidden += 1
 
 
 class FakeHotkeyMonitor:
@@ -174,9 +214,10 @@ def fake_env(monkeypatch, tmp_home, request):
     # build_orchestrator actually ran) is awaited.
     orch_holder = {"ready": threading.Event()}
 
-    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
+    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True, on_quit=None, **kw):
         orch = FakeOrch(on_state=on_state)
         orch.on_quit = on_quit
+        orch.build_kwargs = kw
         orch_holder["orch"] = orch
         # VeronicaApp() (on the main thread) can return before the
         # background thread it starts has run build_orchestrator and
@@ -190,6 +231,13 @@ def fake_env(monkeypatch, tmp_home, request):
     FakeHotkeyMonitor.instances = []
     FakeHotkeyMonitor.available_on_start = True
     monkeypatch.setattr(menubar, "HotkeyMonitor", FakeHotkeyMonitor)
+    monkeypatch.setattr(menubar, "SettingsWindow", FakeSettingsWindow)
+    # No AppKit main thread under test: run marshalled callbacks inline.
+    monkeypatch.setattr(menubar, "_main_thread", lambda fn: fn())
+    # Never shell out to git for the About item / update check.
+    monkeypatch.setattr(menubar.version, "build_info", lambda *a, **k: {
+        "sha": "abc1234", "built_at": "2026-09-17T10:00:00+05:30", "dirty": False, "source": "git",
+    })
     return menubar, fake_rumps, orch_holder
 
 
@@ -215,13 +263,13 @@ def test_state_is_warming_during_build_orchestrator(fake_env, monkeypatch):
     seen = {}
     original = menubar.build_orchestrator
 
-    def wrapped(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
+    def wrapped(s, on_state=None, on_event=None, *, audio=True, on_quit=None, **kw):
         # on_state is the VeronicaApp instance's bound _on_state method, so
         # __self__ recovers the app without racing its constructor's
         # `app = VeronicaApp()` assignment on the main thread.
         app = on_state.__self__
         seen["state"] = app._state
-        return original(s, on_state=on_state, on_event=on_event, audio=audio, on_quit=on_quit)
+        return original(s, on_state=on_state, on_event=on_event, audio=audio, on_quit=on_quit, **kw)
 
     monkeypatch.setattr(menubar, "build_orchestrator", wrapped)
     app, orch = _make_app(menubar, orch_holder)
@@ -278,7 +326,7 @@ def test_toggle_mute(fake_env):
     menubar, fake_rumps, orch_holder = fake_env
     app, orch = _make_app(menubar, orch_holder)
     try:
-        mute_item = app.menu[0]
+        mute_item = app._mute_item
 
         app.toggle_mute(mute_item)
         assert app._muted is True
@@ -603,14 +651,16 @@ def test_build_popup_menu_fallback_has_five_titles_and_actions(fake_env, monkeyp
         menu = app._build_popup_menu()
 
         assert [i.title for i in menu.items] == [
+            "About Veronica — Veronica 0.1.0 (abc1234, 17 Sep)", "Settings…", "-",
             "Mute", "HUD: Full", "Voice", "Start at Login (build the app first)", "Quit",
         ]
         assert [i.action for i in menu.items] == [
-            "onMute:", "onToggleHud:", None, "onToggleLogin:", "onQuit:",
+            None, "onSettings:", None, "onMute:", "onToggleHud:", None, "onToggleLogin:", "onQuit:",
         ]
         assert all(i.target is not None for i in menu.items if i.action is not None)
+        assert menu.items[0].enabled is False
         # login item is disabled (no callback) when not running from a bundle
-        assert menu.items[3].enabled is False
+        assert menu.items[6].enabled is False
     finally:
         _quit_and_join(app)
 
@@ -619,11 +669,11 @@ def test_build_popup_menu_reflects_mute_state(fake_env, monkeypatch):
     menubar, fake_rumps, orch_holder = fake_env
     app, orch = _make_app(menubar, orch_holder)
     try:
-        app.toggle_mute(app.menu[0])
+        app.toggle_mute(app._mute_item)
         fake_appkit, _ = _fake_appkit_for_menu()
         monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
         menu = app._build_popup_menu()
-        assert menu.items[0].state == 1
+        assert menu.items[3].state == 1
     finally:
         _quit_and_join(app)
 
@@ -809,8 +859,7 @@ def test_popup_menu_voice_submenu_mirrors_menu_bar(fake_env, monkeypatch):
         fake_appkit, _ = _fake_appkit_for_menu()
         monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
         menu = app._build_popup_menu()
-        voice_item = menu.items[2]
-        assert voice_item.title == "Voice"
+        voice_item = next(i for i in menu.items if i.title == "Voice")
         sub = voice_item.submenu
         assert sub.title == "Voice"
         titles = [i.title for i in sub.items]
@@ -994,4 +1043,366 @@ def test_refresh_voice_menu_tolerates_tts_without_hindi_voice(fake_env):
         checked = [n for n, i in app._voice_items.items() if i.state == 1]
         assert checked == ["Sky"]
     finally:
+        _quit_and_join(app)
+
+
+# -- Batch D: About / Settings… / Check for Updates… / settings event -----------
+
+def _titles(app):
+    return [None if i is None else i.title for i in app.menu]
+
+
+def _status(kind):
+    from veronica.updater import UpdateStatus
+    return UpdateStatus(available=kind != "none", kind=kind, detail=f"{kind} detail",
+                        running_sha="abc1234", head_sha="def5678", remote_sha=None)
+
+
+def test_menu_starts_with_about_settings_and_updates(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert _titles(app)[:6] == [
+            "About Veronica — Veronica 0.1.0 (abc1234, 17 Sep)", "Settings…", "Check for Updates…",
+            menubar.UPDATE_UNCHECKED_TITLE, None, "Mute",
+        ]
+        assert app.menu[0].callback is None                      # About is a label
+        assert app.menu[1].callback == app.open_settings
+        assert app.menu[2].callback == app.check_for_updates
+        assert app._update_item.callback is None                 # nothing to install yet
+        assert app.menu[5] is app._mute_item
+    finally:
+        _quit_and_join(app)
+
+
+def test_settings_item_shows_window_on_general(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app.open_settings(app.menu[1])
+        assert app._settings.shown == ["general"]
+    finally:
+        _quit_and_join(app)
+
+
+def test_settings_event_shows_window_on_tab(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._events.put(("settings", {"open": True, "tab": "history"}))
+        app._events.put(("settings", {"open": True}))
+        app._events.put(("settings", "garbage"))
+        app._drain(None)
+        assert app._settings.shown == ["history", "general", "general"]
+        # not forwarded to the HUD as a transcript event
+        assert not any(e["kind"] == "settings" for e in app._hud.pushed)
+    finally:
+        _quit_and_join(app)
+
+
+def test_bridge_and_window_wired(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        bridge = app._bridge
+        assert app._settings.bridge is bridge
+        assert bridge._get_orch() is orch
+        assert bridge._run_on_loop == app._schedule
+        assert bridge._repo == menubar.version.REPO
+        assert bridge._bundle_path == menubar.login_item.bundle_app_path()
+        calls = []
+        monkeypatch.setattr(menubar, "relaunch", lambda bundle, quit: calls.append((bundle, quit)) or True)
+        assert bridge._relaunch() is True
+        assert calls == [(app._bundle_path, app._schedule_quit)]
+    finally:
+        _quit_and_join(app)
+
+
+def test_store_is_late_bound_to_orchestrator(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        # FakeOrch has no store: history reads fail politely instead of crashing
+        res = app._bridge.handle("history", {})
+        assert res["ok"] is False and res["message"] == "Memory is off."
+
+        class Store:
+            def turns(self, limit=200, offset=0, query=""):
+                return [{"id": 1, "heard": "hi", "reply": "hello", "limit": limit, "query": query}]
+
+            def delete_turn(self, id):
+                return id == 1
+
+            def clear_turns(self):
+                return 3
+
+            def close(self):
+                pass
+
+        orch.store = Store()
+        res = app._bridge.handle("history", {"limit": 5, "query": "h"})
+        assert res["ok"] is True and res["items"][0]["limit"] == 5 and res["items"][0]["query"] == "h"
+        assert app._bridge.handle("forget_turn", {"id": 1})["ok"] is True
+        assert app._bridge.handle("clear_history", {})["count"] == 3
+    finally:
+        _quit_and_join(app)
+
+
+def test_store_before_orchestrator_exists_is_none(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = None
+        assert app._bridge._history_store() is None
+        assert app._bridge.handle("history", {})["message"] == "Memory is off."
+    finally:
+        _quit_and_join(app)
+
+
+def test_build_orchestrator_receives_updater_hooks(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        kw = orch.build_kwargs
+        assert set(kw) == {"updater_check", "updater_update", "relaunch", "can_relaunch", "version_describe"}
+        assert kw["can_relaunch"]() == (app._bundle_path is not None)
+        assert kw["version_describe"]() == menubar.version.describe(app._build_info)
+        seen = []
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: seen.append(("check", repo, info)) or _status("none"))
+        monkeypatch.setattr(menubar.updater, "update", lambda repo, st, **k: seen.append(("update", repo, st)) or "log")
+        st = kw["updater_check"]()
+        assert st.kind == "none"
+        assert kw["updater_update"](st) == "log"
+        assert seen[0][0] == "check" and seen[0][1] == menubar.version.REPO and seen[0][2]["sha"] == "abc1234"
+        assert seen[1] == ("update", menubar.version.REPO, st)
+        assert kw["relaunch"] == app._relaunch
+        assert app._bridge.get_state()["about"]["updating"] is False   # slot released after success
+    finally:
+        _quit_and_join(app)
+
+
+def test_voice_update_hook_owns_the_bridge_update_slot(fake_env, monkeypatch):
+    from veronica.updater import UpdateInProgress
+    from veronica.ui.settings import bridge as bridge_mod
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        hook = orch.build_kwargs["updater_update"]
+        st = _status("remote")
+        seen = []
+
+        def slow_update(repo, status, **k):
+            # while the voice update runs, nothing else may start one
+            seen.append(app._bridge.get_state()["about"]["updating"])
+            assert app._bridge.begin_update() is False
+            assert app._bridge.update_now() == {"ok": False, "message": bridge_mod.BUSY}
+            with pytest.raises(UpdateInProgress):
+                hook(status)
+            assert app._update_item.title == menubar.UPDATE_UPDATING_TITLE
+            return "log"
+
+        monkeypatch.setattr(menubar.updater, "update", slow_update)
+        assert hook(st) == "log"
+        assert seen == [True]
+        assert app._bridge.get_state()["about"]["updating"] is False
+
+        def boom(repo, status, **k):
+            raise RuntimeError("build exploded")
+
+        monkeypatch.setattr(menubar.updater, "update", boom)
+        with pytest.raises(RuntimeError, match="build exploded"):
+            hook(st)
+        assert app._bridge.get_state()["about"]["updating"] is False
+        assert app._bridge.get_state()["about"]["update"]["detail"] == bridge_mod.UPDATE_FAILED
+        assert app._update_item.title == menubar.UPDATE_FAILED_TITLE
+    finally:
+        _quit_and_join(app)
+
+
+def test_check_for_updates_available_enables_item_and_notifies(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: _status("remote"))
+        app._bridge.run_thread = lambda fn: fn()
+        app.check_for_updates(app.menu[2])
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE
+        assert app._update_item.callback == app.update_now
+        assert fake_rumps.notifications == [("Veronica", "Update available", "remote detail")]
+    finally:
+        _quit_and_join(app)
+
+
+def test_check_for_updates_latest_and_failure(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._bridge.run_thread = lambda fn: fn()
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: _status("none"))
+        app.check_for_updates(app.menu[2])
+        assert app._update_item.title == menubar.UPDATE_LATEST_TITLE
+        assert app._update_item.callback is None
+        assert fake_rumps.notifications[-1] == ("Veronica", "Up to date", "none detail")
+
+        def boom(repo, run=None, info=None):
+            raise RuntimeError("offline")
+
+        monkeypatch.setattr(menubar.updater, "check", boom)
+        app.check_for_updates(app.menu[2])
+        assert app._update_item.title == menubar.UPDATE_CHECK_FAILED_TITLE
+        assert app._update_item.callback is None
+        assert fake_rumps.notifications[-1] == ("Veronica", "Couldn't check for updates", "Couldn't check: offline")
+    finally:
+        _quit_and_join(app)
+
+
+def test_check_for_updates_runs_on_bridge_thread_and_dedupes(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        queued = []
+        app._bridge.run_thread = lambda fn: queued.append(fn)
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: _status("local"))
+        app.check_for_updates(app.menu[2])
+        app.check_for_updates(app.menu[2])      # already checking: not queued twice
+        assert len(queued) == 1
+        assert app._update_item.title == menubar.UPDATE_UNCHECKED_TITLE
+        queued[0]()
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE
+        app.check_for_updates(app.menu[2])      # a later click checks again
+        assert len(queued) == 2
+    finally:
+        _quit_and_join(app)
+
+
+def test_hourly_update_timer_checks_silently(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        timer = app._update_timer
+        assert isinstance(timer, FakeTimer)
+        assert timer.interval == 3600
+        assert timer.callback == app._hourly_update_check
+        app._bridge.run_thread = lambda fn: fn()
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: _status("remote"))
+        timer.callback(timer)
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE
+        assert app._update_item.callback == app.update_now
+        assert fake_rumps.notifications == []
+    finally:
+        _quit_and_join(app)
+
+
+def test_update_item_click_runs_bridge_update_now(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        calls = []
+        monkeypatch.setattr(app._bridge, "update_now", lambda: calls.append("update_now") or {"ok": True, "message": "Updating, back in a moment."})
+        app.update_now(app._update_item)
+        assert calls == ["update_now"]
+        assert app._update_item.title == menubar.UPDATE_UPDATING_TITLE
+        assert app._update_item.callback is None
+
+        monkeypatch.setattr(app._bridge, "update_now", lambda: {"ok": False, "message": "Busy, try again in a moment."})
+        app._update_item.title = menubar.UPDATE_AVAILABLE_TITLE
+        app._update_item.set_callback(app.update_now)
+        app.update_now(app._update_item)
+        assert fake_rumps.notifications[-1] == ("Veronica", "", "Busy, try again in a moment.")
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE   # still installable
+    finally:
+        _quit_and_join(app)
+
+
+def test_update_failure_pushed_from_bridge_resets_item(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        from veronica.ui.settings import bridge as bridge_mod
+        def push(update, updating=False):
+            app._bridge.on_state_changed({"about": {"update": update, "updating": updating}})
+
+        push({"available": True, "detail": "remote detail"}, updating=True)
+        assert app._update_item.title == menubar.UPDATE_UPDATING_TITLE     # in progress wins
+        assert app._update_item.callback is None
+        push({"available": True, "detail": bridge_mod.UPDATE_FAILED})
+        assert app._update_item.title == menubar.UPDATE_FAILED_TITLE
+        assert app._update_item.callback is None
+        # the window still gets the state
+        assert app._settings.states[-1]["about"]["update"]["detail"] == bridge_mod.UPDATE_FAILED
+        # a check from the settings window's "Check now" reflects in the menu too
+        push({"available": True, "detail": "remote detail"})
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE
+        assert app._update_item.callback == app.update_now
+        push({"available": False, "detail": "none detail"})
+        assert app._update_item.title == menubar.UPDATE_LATEST_TITLE
+        # a real bridge push (nothing checked yet) leaves the item alone
+        app._update_item.title = menubar.UPDATE_UNCHECKED_TITLE
+        app._bridge.on_state_changed(app._bridge.get_state())
+        assert app._update_item.title == menubar.UPDATE_UNCHECKED_TITLE
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_handler_forwards_settings(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    handler_cls = menubar._make_menu_handler_class()
+    handler = handler_cls.alloc().initWithApp_(app)
+    try:
+        handler.onSettings_(None)
+        assert app._settings.shown == ["general"]
+    finally:
+        _quit_and_join(app)
+
+
+def test_quit_hides_settings_window(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    _quit_and_join(app)
+    assert app._settings.hidden == 1
+
+
+def _wait_for(cond, timeout=2.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.01)
+
+
+def test_notify_falls_back_to_spoken_announce_when_notification_center_unavailable(fake_env, monkeypatch, caplog):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        fake_rumps.notification_error = RuntimeError('Failed to setup the notification center: missing "CFBundleIdentifier"')
+        app._bridge.run_thread = lambda fn: fn()
+        monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: _status("remote"))
+        with caplog.at_level(logging.INFO, logger="veronica.ui"):
+            app.check_for_updates(app.menu[2])          # must not raise
+        assert app._update_item.title == menubar.UPDATE_AVAILABLE_TITLE
+        assert fake_rumps.notifications == []
+        _wait_for(lambda: len(orch.announced) == 1)        # announce() ran on the background loop
+        assert orch.announced == ["An update is ready. Say update yourself, or use the Settings window."]
+        assert "remote detail" in caplog.text
+
+        monkeypatch.setattr(app._bridge, "update_now", lambda: {"ok": False, "message": "Busy, try again in a moment."})
+        app.update_now(app._update_item)                # must not raise either
+        _wait_for(lambda: len(orch.announced) == 2)
+        assert orch.announced[-1] == "Busy, try again in a moment."
+    finally:
+        _quit_and_join(app)
+
+
+def test_notify_without_orchestrator_only_logs(fake_env, caplog):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        fake_rumps.notification_error = RuntimeError("no bundle")
+        app._orch = None
+        with caplog.at_level(logging.INFO, logger="veronica.ui"):
+            app._notify("Up to date", "none detail", spoken="You're already on the latest.")
+        assert "none detail" in caplog.text
+    finally:
+        app._orch = orch
         _quit_and_join(app)

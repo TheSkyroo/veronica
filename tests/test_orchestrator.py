@@ -150,6 +150,41 @@ async def test_confirming_state_emitted():
     assert "confirming" in states
 
 
+async def test_dead_mic_reader_hits_wake_backoff_with_whisper_engine(monkeypatch, caplog):
+    """The whisper engine iterates mic_frames(); when the reader dies the
+    generator now raises, so wait() raises and run_forever takes the
+    'wake listener failed; retrying' backoff instead of spinning on reopen."""
+    import logging
+
+    from veronica.audio.wake_whisper import WhisperWake
+    from tests.test_wake_whisper import scripted_model_cls
+
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls([""]))
+    o, states = build()
+    attempts = {"n": 0}
+
+    def broken_frames():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("no input device")   # what mic_frames re-raises from its reader
+        raise asyncio.CancelledError            # second wait(): end the test
+
+    o.wake = WhisperWake(Settings(), frames=broken_frames)
+    sleeps = []
+
+    async def nosleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(asyncio, "sleep", nosleep)
+    with caplog.at_level(logging.ERROR, logger="veronica.orchestrator"):
+        with pytest.raises(asyncio.CancelledError):
+            await o.run_forever()
+    assert "wake listener failed; retrying in" in caplog.text
+    assert "no input device" in caplog.text
+    assert states[-2:] == ["error", "idle"]
+    assert o.s.wake_retry_s in sleeps
+
+
 async def test_wake_retry_returns_to_idle(monkeypatch):
     o, states = build()
 
@@ -198,7 +233,9 @@ async def test_full_turn():
         ("yes please", True),
         ("go ahead please", True),
         ("sure", True),
-        ("sure thing", True),
+        # "sure" is a filler-class confirm: it only counts when the whole
+        # utterance is confirm phrases (controller ruling, batch D final wave)
+        ("sure thing", False),
         ("not sure", False),
         ("go away", False),
         ("go", False),
@@ -707,7 +744,7 @@ async def test_suppress_stays_active_for_wake_window_after_playback():
     await o.say("I am Veronica.")
     assert o._now_speaking == ""
 
-    # still within wake_window_s (1.6) + wake_hop_s (0.6) = 2.2 s of playback ending
+    # still within wake_window_s (1.2) + wake_hop_s (0.25) = 1.45 s of playback ending
     now[0] += 1.0
     assert "veronica" in o._suppress_text().lower()
 
@@ -1377,8 +1414,8 @@ async def test_followup_window_default_is_four_seconds():
     assert Settings().followup_window_s == 4
 
 
-async def test_vad_silence_ms_default_is_600():
-    assert Settings().vad_silence_ms == 600
+async def test_vad_silence_ms_default_is_1200():
+    assert Settings().vad_silence_ms == 1200
 
 
 # -- announce() ---------------------------------------------------------------
@@ -2992,7 +3029,7 @@ async def test_quick_battery_failure_copy(monkeypatch):
     monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (None, None))
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery kitni hai"])
     await o.one_turn()
-    assert o.tts.said == ["Battery level nahi mil paaya."]
+    assert o.tts.said == ["Battery level नहीं मिल पाया।"]
 
 
 async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
@@ -3002,7 +3039,7 @@ async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
     assert o.tts.said[-1] == "Battery is at 98 percent."
     o, *_ = build_lang(["battery kitni hai"], langs=["en"], mode="en")
     await o.one_turn()
-    assert o.tts.said[-1] == "Battery 98 percent hai."
+    assert o.tts.said[-1] == "Battery 98 percent है।"
 
 
 async def test_quick_volume_uses_mac_tool(monkeypatch):
@@ -3020,7 +3057,7 @@ async def test_quick_volume_error_copy(monkeypatch):
     monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["volume kitna hai"])
     await o.one_turn()
-    assert o.tts.said == ["Volume nahi mil paaya."]
+    assert o.tts.said == ["Volume नहीं मिल पाया।"]
 
 
 async def test_quick_uses_utterance_lang_for_english_phrase():
@@ -3030,7 +3067,7 @@ async def test_quick_uses_utterance_lang_for_english_phrase():
     await o.one_turn()
     assert o._utterance_lang == "hi"
     import datetime as _dt
-    assert o.tts.said == [f"Aaj {_dt.datetime.now().strftime('%A')} hai."]
+    assert o.tts.said == [f"आज {_dt.datetime.now().strftime('%A')} है।"]
 
 
 async def test_quick_does_not_shadow_local_intents_or_brain():
@@ -3136,7 +3173,7 @@ async def test_utterance_lang_from_detection_and_script():
 async def test_hinglish_phrase_in_auto_mode_counts_as_hindi():
     o, *_ = build_lang(["shukriya"], langs=["en"], mode="auto")
     await o.one_turn()
-    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+    assert o.tts.said[-1] in {"कोई बात नहीं।", "हमेशा।"} and o.tts.langs[-1][1] == "hi"
 
 
 async def test_hinglish_phrase_in_english_mode_stays_english():
@@ -3144,7 +3181,7 @@ async def test_hinglish_phrase_in_english_mode_stays_english():
     await o.one_turn()
     assert o._utterance_lang == "en"
     # ...but the Hindi reply to a Hinglish phrase is still voiced in Hindi
-    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+    assert o.tts.said[-1] in {"कोई बात नहीं।", "हमेशा।"} and o.tts.langs[-1][1] == "hi"
 
 
 async def test_english_quick_reply_in_english_mode_is_voiced_in_english():
@@ -3160,8 +3197,8 @@ async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
     assert made[-2:] == [("small", "hi"), ("tiny", "hi")]     # main + partial
     assert o.stt.model_name == "small" and o.partial_stt.model_name == "tiny"
     assert {"language": "hi"} in saved
-    assert o.tts.said[:2] == ["Ek minute, Hindi load kar rahi hoon.", "Ab Hindi mein baat karte hain."]
-    assert o.tts.langs[:2] == [("Ek minute, Hindi load kar rahi hoon.", "hi"), ("Ab Hindi mein baat karte hain.", "hi")]
+    assert o.tts.said[:2] == ["एक मिनट, हिंदी load कर रही हूँ।", "अब हिंदी में बात करते हैं।"]
+    assert o.tts.langs[:2] == [("एक मिनट, हिंदी load कर रही हूँ।", "hi"), ("अब हिंदी में बात करते हैं।", "hi")]
     assert ("tool", {"summary": "Language: hi", "decision": "auto"}) in ev
     assert o.brain.asked == []
 
@@ -3174,7 +3211,7 @@ async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
     o.stt = STT2(["dono bhasha"]); o.recorder = Rec([np.zeros(1, np.int16), None])
     await o.one_turn()
     assert o.language == "auto" and made[-2:] == [("small", None), ("tiny", None)]
-    assert o.tts.said[-1] == "Theek hai, dono chalega."
+    assert o.tts.said[-1] == "ठीक है, दोनों चलेगा।"
 
 
 async def test_language_switch_same_model_only_sets_language(monkeypatch):
@@ -3182,7 +3219,7 @@ async def test_language_switch_same_model_only_sets_language(monkeypatch):
     o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
     await o.one_turn()
     assert made == [] and o.stt.language == "hi" and o.partial_stt.language == "hi"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
     assert {"language": "hi"} in saved
 
 
@@ -3192,7 +3229,7 @@ async def test_language_switch_already_active_just_confirms(monkeypatch):
     o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"; o.partial_stt.language = "hi"
     await o.one_turn()
     assert made == [] and o.language == "hi"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
 
 
 async def test_language_switch_without_factory_only_sets_language(monkeypatch):
@@ -3205,7 +3242,7 @@ async def test_language_switch_without_factory_only_sets_language(monkeypatch):
     )
     await o.one_turn()
     assert o.language == "hi" and o.stt.language == "hi" and o.stt.model_name == "small.en"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
 
 
 async def test_stt_without_detailed_api_defaults_to_english():
@@ -3226,7 +3263,7 @@ async def test_hindi_voice_request_sets_hindi_voice(monkeypatch):
     await o.one_turn()
     assert o.tts.voice == "af_sarah" and o.tts.hindi_voice == "hf_alpha"
     assert {"tts_hindi_voice": "hf_alpha"} in saved
-    assert o.tts.langs[-1] == ("Theek hai, ab main aise bolungi.", "hi")
+    assert ("ठीक है, अब मैं ऐसे बोलूँगी।", "hi") in o.tts.langs
 
     o.stt = STT2(["use the omega voice"]); o.recorder = Rec([np.zeros(1, np.int16), None])
     await o.one_turn()
@@ -3250,7 +3287,7 @@ async def test_language_switch_load_failure_leaves_everything_untouched(monkeypa
     assert o.stt is original_stt and o.stt.model_name == "small.en" and o.stt.language == "en"
     assert o.partial_stt is None
     assert o.language == "en" and saved == []
-    assert o.tts.said == ["Ek minute, Hindi load kar rahi hoon.", "Hindi load nahi ho paayi, baad mein try karo."]
+    assert o.tts.said == ["एक मिनट, हिंदी load कर रही हूँ।", "हिंदी load नहीं हो पाई, बाद में try करो।"]
     assert o.tts.langs[-1][1] == "hi"
     assert o.brain.asked == []
 
@@ -3264,3 +3301,298 @@ async def test_language_switch_load_failure_english_line(monkeypatch):
     await o.one_turn()
     assert o.language == "hi" and saved == [] and o.stt.model_name == "small"
     assert o.tts.said[-1] == "Couldn't switch language, check the log."
+
+
+async def test_hindi_voice_pick_in_english_mode_switches_to_auto(monkeypatch):
+    o, saved, made, _ = build_lang(["use a hindi voice"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hf_alpha"
+    assert o.language == "auto"
+    assert made[-2:] == [("small", None), ("tiny", None)]
+    assert {"language": "auto"} in saved
+
+
+async def test_hindi_voice_pick_in_auto_mode_keeps_mode(monkeypatch):
+    o, saved, made, _ = build_lang(["use a hindi male voice"], mode="auto", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hm_omega" and o.language == "auto" and made == []
+
+
+@pytest.mark.parametrize("heard,ok", [
+    # last decisive phrase wins
+    ("no no, I said yes, do it", True), ("yes… actually no", False), ("not now", False),
+    ("yes", True), ("no", False), ("", False), ("maybe", False),
+    # negated confirms
+    ("not okay", False), ("don't do it", False), ("mat karo", False), ("that's not fine", False),
+    # new affirmatives
+    ("ok", True), ("okay", True), ("yup", True), ("yeah yeah", True), ("alright", True), ("fine", True),
+    ("absolutely", True), ("please do", True), ("go for it", True), ("of course", True), ("correct", True),
+    ("bilkul", True), ("haan haan", True), ("kar do", True), ("ठीक", True), ("बिल्कुल", True), ("कर दो", True),
+    # still never on laughter / stop
+    ("ha ha", False), ("stop", False), ("okay stop", False), ("cancel that, yes", True),
+])
+def test_is_confirmation_last_decisive_wins(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
+
+
+@pytest.mark.parametrize("heard,ok", [
+    # fillers (ok/okay/alright/fine/correct/of course/sure/theek hai/ठीक है/ठीक)
+    # only count when the utterance is nothing but confirm phrases
+    ("okay", True), ("okay do it", True), ("alright yes", True), ("sure", True),
+    ("okay okay", True), ("theek hai", True), ("ठीक है", True), ("ठीक", True), ("fine, okay", True),
+    ("okay so what will it delete", False), ("okay what does it do", False), ("is that correct", False),
+    ("sure, but which files", False), ("okay then", False), ("fine I guess", False), ("of course not", False),
+    ("theek hai lekin kaunsi", False), ("ठीक है लेकिन", False),
+    # a question/hesitation word after the last confirm phrase is decisive-negative
+    ("ok wait", False), ("alright hold on", False), ("yes what", False), ("yes, which one", False),
+    ("do it, how", False), ("haan kya", False), ("karo ruko", False), ("हाँ रुको", False), ("हाँ क्या", False),
+    ("haan kaun", False), ("yes why", False),
+    # ...but before a strong confirm it doesn't matter
+    ("wait, yes", True), ("what? yes do it", True), ("kya? haan karo", True),
+    # strong confirms keep last-decisive-wins
+    ("yes", True), ("yes please", True), ("go ahead please", True), ("cancel that, yes", True),
+    ("no no, I said yes, do it", True), ("yes… actually no", False), ("okay stop", False),
+])
+def test_is_confirmation_fillers_and_questions(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
+
+
+# -- Batch D: settings / version / update turns ---------------------------------
+
+from veronica import version as version_mod
+from veronica.updater import UpdateStatus
+
+
+def _status(kind):
+    return UpdateStatus(available=kind != "none", kind=kind, detail=f"{kind} detail",
+                        running_sha="aaa", head_sha="bbb", remote_sha=None)
+
+
+def build_d(stt_texts, langs=(), mode="en", **kw):
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(stt_texts, langs),
+        brain=Brain(), tts=TTS3(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), language=mode, **kw,
+    )
+    return o, states, events
+
+
+async def test_settings_intent_emits_event_and_skips_brain():
+    o, _, ev = build_d(["open settings"])
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "general"}) in ev
+    assert o.tts.said == ["Here you go."]
+    assert o.tts.langs[-1] == ("Here you go.", None)
+    assert o.brain.asked == []
+    assert o.player.resets >= 1
+
+
+async def test_history_intent_opens_history_tab():
+    o, _, ev = build_d(["show my history"])
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "history"}) in ev
+    assert o.tts.said == ["Here you go."]
+
+
+async def test_settings_intent_in_hindi_replies_in_hindi():
+    o, _, ev = build_d(["settings kholo"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "general"}) in ev
+    assert o.tts.langs[-1] == ("यह लीजिए।", "hi")
+
+
+async def test_version_intent_speaks_describe(monkeypatch):
+    monkeypatch.setattr(version_mod, "describe", lambda info=None: "Veronica 9.9.9 (abc1234, 1 Jan)")
+    o, _, _ = build_d(["what version are you"])
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 9.9.9 (abc1234, 1 Jan)"]
+    assert o.brain.asked == []
+
+
+async def test_version_intent_uses_injected_describe_off_loop(monkeypatch):
+    import threading
+
+    calls = []
+
+    def boom(info=None):
+        raise AssertionError("module describe must not be used when one is injected")
+
+    monkeypatch.setattr(version_mod, "describe", boom)
+    o, _, _ = build_d(["version"], version_describe=lambda: calls.append(threading.current_thread()) or "Veronica 1.2.3 (cafe123, 2 Feb)")
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 1.2.3 (cafe123, 2 Feb)"]
+    assert len(calls) == 1
+
+
+async def test_version_intent_default_describe_runs_in_thread(monkeypatch):
+    import threading
+
+    main = threading.current_thread()
+    seen = []
+
+    def describe(info=None):
+        seen.append(threading.current_thread())
+        return "Veronica 9.9.9 (abc1234, 1 Jan)"
+
+    monkeypatch.setattr(version_mod, "describe", describe)
+    o, _, _ = build_d(["what version are you"])
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 9.9.9 (abc1234, 1 Jan)"]
+    assert seen and seen[0] is not main   # git runs off the event loop
+
+
+async def test_update_intent_unavailable_in_text_mode():
+    o, _, _ = build_d(["update yourself"])
+    await o.one_turn()
+    assert o.tts.said == ["Updates aren't available in this mode."]
+    assert o.brain.asked == []
+
+
+async def test_update_intent_already_latest():
+    calls = []
+    o, _, ev = build_d(
+        ["check for updates"], updater_check=lambda: _status("none"),
+        updater_update=lambda st: calls.append(st) or "log", relaunch=lambda: calls.append("relaunch") or True,
+    )
+    await o.one_turn()
+    assert o.tts.said == ["You're already on the latest."]
+    assert calls == []
+    assert not any(k == "tool" for k, _ in ev)
+
+
+@pytest.mark.parametrize("kind", ["remote", "local"])
+async def test_update_intent_updates_and_relaunches(kind):
+    calls = []
+    st = _status(kind)
+    o, _, ev = build_d(
+        ["update yourself"], updater_check=lambda: st,
+        updater_update=lambda s: calls.append(("update", s)) or "log",
+        relaunch=lambda: calls.append(("relaunch",)) or True,
+    )
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment."]
+    assert ("tool", {"summary": "Update Veronica", "decision": "auto"}) in ev
+    assert calls == [("update", st), ("relaunch",)]
+
+
+async def test_update_intent_failure_speaks_and_does_not_relaunch(caplog):
+    calls = []
+
+    def boom(_st):
+        raise RuntimeError("git pull exploded")
+
+    o, _, _ = build_d(
+        ["update now"], updater_check=lambda: _status("remote"), updater_update=boom,
+        relaunch=lambda: calls.append("relaunch") or True,
+    )
+    with caplog.at_level("ERROR", logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "The update failed, check the log."]
+    assert calls == []
+    assert "git pull exploded" in caplog.text
+
+
+async def test_update_intent_check_failure_speaks(caplog):
+    def boom():
+        raise RuntimeError("no network")
+
+    o, _, _ = build_d(["update yourself"], updater_check=boom, updater_update=lambda s: "", relaunch=lambda: True)
+    with caplog.at_level("WARNING", logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert o.tts.said == ["Couldn't check for updates, check the log."]
+
+
+async def test_update_phrase_inside_longer_request_goes_to_brain():
+    # "update my calendar" is not the update intent: it goes to the brain
+    o, _, _ = build_d(["update my calendar"])
+    await o.one_turn()
+    assert o.brain.asked == ["update my calendar"]
+
+
+async def test_update_intent_already_running_speaks():
+    from veronica.updater import UpdateInProgress
+
+    def busy(_st):
+        raise UpdateInProgress("Updating already.")
+
+    calls = []
+    o, _, ev = build_d(["update yourself"], updater_check=lambda: _status("remote"), updater_update=busy,
+                       relaunch=lambda: calls.append("relaunch") or True)
+    await o.one_turn()
+    assert o.tts.said == ["An update is already running."]
+    assert calls == []
+    assert not any(k == "tool" for k, _ in ev)
+
+
+async def test_update_intent_is_not_cancelled_by_barge():
+    """The pull/build must never be orphaned by a wake-word barge: the update
+    turn runs outside the barge race, so a wake during it changes nothing
+    and the relaunch still happens."""
+    class BargingWake(Wake):
+        def __init__(self): self.waits = 0
+        async def wait(self, threshold=None, suppress=None):
+            self.waits += 1
+            return True                          # would barge immediately
+
+    class Brain2(Brain):
+        def __init__(self): super().__init__(); self.interrupts = 0
+        async def interrupt(self): self.interrupts += 1
+
+    calls = []
+
+    def slow_update(st):
+        import time
+        time.sleep(0.05)
+        calls.append(("update", st))
+        return "log"
+
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("remote"), updater_update=slow_update,
+                      relaunch=lambda: calls.append(("relaunch",)) or True)
+    o.wake = BargingWake(); o.brain = Brain2()
+    await o.one_turn()
+    assert [c[0] for c in calls] == ["update", "relaunch"]
+    assert o.brain.interrupts == 0
+    assert o.wake.waits == 0                     # no barge listener ran during the update
+
+
+async def test_update_intent_relaunch_not_scheduled_speaks_restart_hint():
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=lambda: False)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "Update installed. Restart me from the terminal."]
+
+
+async def test_update_intent_without_bundle_speaks_before_quitting():
+    """Dev run (no .app to reopen): the hint is spoken BEFORE relaunch()
+    quits the process, so the speech isn't torn down mid-sentence."""
+    order = []
+
+    def relaunch():
+        order.append(("relaunch", list(o.tts.said)))
+        return False
+
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=relaunch, can_relaunch=lambda: False)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "Update installed. Restart me from the terminal."]
+    assert order == [("relaunch", ["Updating, back in a moment.", "Update installed. Restart me from the terminal."])]
+
+
+async def test_update_intent_with_bundle_relaunches_silently():
+    calls = []
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=lambda: calls.append("relaunch") or True, can_relaunch=lambda: True)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment."]
+    assert calls == ["relaunch"]
+
+
+@pytest.mark.parametrize("heard,ok", [
+    ("yes what's that", False), ("yes what's it going to delete", False), ("yes how's that work", False),
+    ("haan lekin kaunsi files", False), ("yes when", False), ("yes", True), ("yes do it", True),
+])
+def test_is_confirmation_contracted_question_words(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
