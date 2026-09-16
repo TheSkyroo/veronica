@@ -181,3 +181,24 @@ async def test_nudge_expires_at_event_start_and_briefing_never():
     await p.tick()
     assert len(said) == 1 and said[0].startswith("Good morning")
     assert calls["expires"] == [None]
+
+
+async def test_nudges_tolerate_calendar_failure_and_back_off(caplog):
+    p, said, clock, calls = make(pr.Schedule(nudges_enabled=True))
+
+    async def boom(day, days):
+        calls["events"] += 1
+        raise RuntimeError("Not authorized to send Apple events to Calendar")
+
+    p._calendar_events = boom
+    clock.t = dt.datetime(2026, 9, 16, 9, 0)
+    with caplog.at_level("WARNING"):
+        await p.tick()
+        clock.t = dt.datetime(2026, 9, 16, 9, 1)
+        await p.tick()
+    assert said == []
+    assert calls["events"] == 1                      # cached empty result, no re-fetch within EVENTS_CACHE_S
+    assert sum("calendar fetch failed" in r.message for r in caplog.records) == 1
+    clock.t = dt.datetime(2026, 9, 16, 9, 6)
+    await p.tick()
+    assert calls["events"] == 2                      # retried after the cache window

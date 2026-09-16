@@ -146,6 +146,7 @@ class Proactive:
         self._last_briefing_date: dt.date | None = None
         self._nudged: set[tuple[str, dt.datetime]] = set()
         self._events_cache: tuple[dt.datetime, list[Event]] | None = None
+        self._events_error: str | None = None
 
     async def start(self) -> None:
         if self._task is None:
@@ -187,7 +188,18 @@ class Proactive:
             fetched_at, events = self._events_cache
             if (now - fetched_at).total_seconds() < self.EVENTS_CACHE_S and fetched_at.date() == now.date():
                 return events
-        events = parse_events(await self._calendar_events("today", 1), now.date())
+        try:
+            events = parse_events(await self._calendar_events("today", 1), now.date())
+        except Exception as e:
+            # Calendar unavailable (Automation denied, timeout): don't hammer
+            # it every tick, and don't let the ticker log a traceback a
+            # minute — cache "no events" for the usual window and log once.
+            if self._events_error is None or self._events_error != str(e):
+                log.warning("nudges: calendar fetch failed, retrying in %ss: %s", self.EVENTS_CACHE_S, e)
+                self._events_error = str(e)
+            events = []
+        else:
+            self._events_error = None
         self._events_cache = (now, events)
         return events
 
