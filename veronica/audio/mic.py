@@ -31,7 +31,9 @@ def mic_frames(
     drop audio — chopping the wake word in half. The reader thread keeps
     draining the device no matter how long a transcription takes, so the
     loop only ever falls behind, never loses frames. Closing this generator
-    stops the thread and the stream.
+    stops the thread and the stream. If the reader dies (the device can't be
+    opened, or reopened after a refresh) the generator raises that exception
+    to its consumer.
 
     `watch` (an InputWatch) is checked at start and per frame; when the
     default input device differs from the one PortAudio was initialised for
@@ -44,7 +46,12 @@ def mic_frames(
     number of queued frames when the reader starts, and one returning 0
     when it stops.
     """
-    q: queue.Queue[bytes | None] = queue.Queue()
+    # Frames, then either None (clean stop) or the exception that killed the
+    # reader (open/refresh failure) — re-raised in the consumer so the wake
+    # engine's wait() fails and the orchestrator's retry backoff applies,
+    # instead of the generator just ending and the loop reopening the mic
+    # in a tight spin.
+    q: queue.Queue[bytes | None | BaseException] = queue.Queue()
     done = threading.Event()
 
     def open_stream():
@@ -57,6 +64,7 @@ def mic_frames(
         stream = None
         opened_gen = -1
         deferred_logged = False
+        failure: BaseException | None = None
 
         def open_fresh():
             nonlocal stream, opened_gen
@@ -122,12 +130,13 @@ def mic_frames(
                     continue
                 watch.check(time.monotonic())
                 refresh_if_pending()
-        except Exception:
+        except Exception as e:
             log.exception("%s mic reader died", log_prefix)
+            failure = e
         finally:
             with devices.refresh_lock:
                 close_current()
-            q.put(None)
+            q.put(failure)
 
     t = threading.Thread(target=reader, name=f"{log_prefix}-mic", daemon=True)
     t.start()
@@ -138,6 +147,8 @@ def mic_frames(
             frame = q.get()
             if frame is None:
                 return
+            if isinstance(frame, BaseException):
+                raise frame
             yield frame
     finally:
         done.set()

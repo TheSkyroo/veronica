@@ -343,3 +343,18 @@ def test_engines_delegate_mic_frames_to_shared_reader(monkeypatch, tmp_home):
     chunk, prefix, kw = calls[-1]
     assert (chunk, prefix) == (CHUNK, "wake")
     assert isinstance(kw["watch"], InputWatch) and kw["before_refresh"] is close_registered_streams
+
+
+@pytest.mark.asyncio
+async def test_wait_raises_when_frames_raise(monkeypatch):
+    """A dead mic reader (mic_frames raising) must surface from wait() so
+    the orchestrator's 'wake listener failed; retrying' backoff applies."""
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls([""]))
+
+    def broken_frames():
+        yield b"\x00\x00" * 1280
+        raise OSError("no input device")
+
+    w = WhisperWake(Settings(), frames=broken_frames)
+    with pytest.raises(OSError, match="no input device"):
+        await _wait_for(w.wait(), 2)

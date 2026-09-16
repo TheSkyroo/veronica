@@ -150,6 +150,41 @@ async def test_confirming_state_emitted():
     assert "confirming" in states
 
 
+async def test_dead_mic_reader_hits_wake_backoff_with_whisper_engine(monkeypatch, caplog):
+    """The whisper engine iterates mic_frames(); when the reader dies the
+    generator now raises, so wait() raises and run_forever takes the
+    'wake listener failed; retrying' backoff instead of spinning on reopen."""
+    import logging
+
+    from veronica.audio.wake_whisper import WhisperWake
+    from tests.test_wake_whisper import scripted_model_cls
+
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls([""]))
+    o, states = build()
+    attempts = {"n": 0}
+
+    def broken_frames():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("no input device")   # what mic_frames re-raises from its reader
+        raise asyncio.CancelledError            # second wait(): end the test
+
+    o.wake = WhisperWake(Settings(), frames=broken_frames)
+    sleeps = []
+
+    async def nosleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(asyncio, "sleep", nosleep)
+    with caplog.at_level(logging.ERROR, logger="veronica.orchestrator"):
+        with pytest.raises(asyncio.CancelledError):
+            await o.run_forever()
+    assert "wake listener failed; retrying in" in caplog.text
+    assert "no input device" in caplog.text
+    assert states[-2:] == ["error", "idle"]
+    assert o.s.wake_retry_s in sleeps
+
+
 async def test_wake_retry_returns_to_idle(monkeypatch):
     o, states = build()
 

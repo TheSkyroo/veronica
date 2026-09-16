@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+import pytest
+
 from veronica.audio import devices
 
 
@@ -72,8 +74,8 @@ def test_refresh_portaudio_without_before(monkeypatch):
     assert sd.calls == ["terminate", "initialize"]
 
 
-def test_refresh_portaudio_swallows_errors(monkeypatch, caplog):
-    sd = FakeSD(fail={"terminate", "initialize"})
+def test_refresh_portaudio_swallows_before_and_terminate_errors(monkeypatch, caplog):
+    sd = FakeSD(fail={"terminate"})
     monkeypatch.setattr(devices, "sd", sd)
 
     def bad_before():
@@ -82,7 +84,25 @@ def test_refresh_portaudio_swallows_errors(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="veronica.audio"):
         devices.refresh_portaudio(before=bad_before)
     assert sd.calls == ["terminate", "initialize"]  # every step still attempted
-    assert "player exploded" in caplog.text or "init failed" in caplog.text
+    assert "player exploded" in caplog.text
+    assert "already terminated" in caplog.text
+
+
+def test_refresh_portaudio_raises_when_initialize_fails(monkeypatch, caplog):
+    """PortAudio failing to come back is fatal for audio: log at ERROR and
+    raise so the caller (mic reader -> wake.wait -> orchestrator backoff)
+    can surface it, instead of silently carrying on with no PortAudio."""
+    sd = FakeSD(fail={"initialize"})
+    monkeypatch.setattr(devices, "sd", sd)
+    devices.observe(5)
+    devices.observe(7)
+    with caplog.at_level(logging.ERROR, logger="veronica.audio"):
+        with pytest.raises(RuntimeError, match="init failed"):
+            devices.refresh_portaudio()
+    assert sd.calls == ["terminate", "initialize"]
+    assert any(r.levelno == logging.ERROR and "PortAudio initialize failed" in r.message for r in caplog.records)
+    # state still moves on: the streams are dead either way (Pa_Terminate ran)
+    assert devices.generation == 1
 
 
 def test_refresh_portaudio_waits_for_stream_opens_to_finish(monkeypatch):
@@ -107,10 +127,55 @@ def test_input_watch_fires_once_per_change_not_on_first_observation():
     changes = []
     w = devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids), on_change=lambda a, b: changes.append((a, b)))
     results = [w.check(now=float(i)) for i in range(8)]
-    assert changes == [(5, 7), (7, None), (None, 5)]
-    assert results == [False, False, True, False, False, True, False, True]
+    # None after a valid baseline is "unknown, keep last", not a change
+    assert changes == [(5, 7), (7, 5)]
+    assert results == [False, False, True, False, False, False, False, True]
     assert w.last == 5
     assert devices.initialised_for == 5 and devices.pending is False   # back on the baseline device
+
+
+def test_observe_none_after_valid_baseline_keeps_last():
+    assert devices.observe(5) is False
+    assert devices.observe(7) is True and devices.pending is True
+    assert devices.observe(None) is False
+    assert devices.last_input_id == 7 and devices.pending is True     # refresh still owed
+    assert devices.observe(7) is False
+    assert devices.observe(None) is False and devices.last_input_id == 7
+
+
+def test_observe_none_baseline_then_real_id_is_a_change():
+    # CoreAudio unavailable at first (None baseline): a later real id counts
+    assert devices.observe(None) is False
+    assert devices.observe(5) is True and devices.pending is True
+
+
+def test_snapshot_baseline_at_import(monkeypatch):
+    """The baseline is taken at import (right after sounddevice initialised
+    PortAudio) so a device change during warmup — before any mic reader
+    runs — is still seen by the first InputWatch."""
+    devices._snapshot_baseline(lambda: 9)
+    assert devices._baselined is True and devices.initialised_for == 9 and devices.pending is False
+    assert devices.InputWatch(poll_s=0.0, get_id=lambda: 11).check(now=0.0) is True
+    assert devices.pending is True
+
+
+def test_snapshot_baseline_is_guarded():
+    def boom():
+        raise RuntimeError("no CoreAudio")
+
+    devices._snapshot_baseline(boom)          # must not raise
+    assert devices._baselined is False        # nothing observed; first poll baselines instead
+
+
+def test_module_import_snapshots_baseline():
+    # Verified in a fresh interpreter (reloading the module in-process would
+    # re-create InputWatch and break isinstance checks elsewhere).
+    import subprocess
+    import sys
+
+    code = "from veronica.audio import devices; print(devices._baselined)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "True"
 
 
 def test_pending_tracks_difference_from_initialised_device():

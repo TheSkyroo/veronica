@@ -81,11 +81,15 @@ def observe(current: int | None) -> bool:
     """Record a polled default input id. The first observation is the
     baseline PortAudio was initialised for. Returns True when the id differs
     from the previous observation; `pending` says whether a refresh is owed
-    (it clears itself if the device switches back)."""
+    (it clears itself if the device switches back). A None poll after a
+    valid baseline means "couldn't read it" (a transient CoreAudio hiccup),
+    not "no device": the last id is kept and nothing changes."""
     global last_input_id, initialised_for, pending, _baselined
     if not _baselined:
         _baselined = True
         last_input_id = initialised_for = current
+        return False
+    if current is None and last_input_id is not None:
         return False
     changed = current != last_input_id
     last_input_id = current
@@ -140,8 +144,9 @@ def default_input_id(get: Callable | None = None) -> int | None:
 def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
     """Re-initialise PortAudio so it re-reads the device list. `before` runs
     first (used to close the persistent Player output stream — PortAudio
-    must not be terminated under an open stream). Every step is attempted;
-    errors are logged, never raised."""
+    must not be terminated under an open stream). `before`/terminate
+    failures are logged and skipped; an initialize failure is logged at
+    ERROR and re-raised — the caller has no working audio to fall back to."""
     global initialised_for, pending, generation
     with refresh_lock:
         if before is not None:
@@ -153,13 +158,36 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
             sd._terminate()
         except Exception:
             log.warning("PortAudio terminate failed", exc_info=True)
-        try:
-            sd._initialize()
-        except Exception:
-            log.warning("PortAudio initialize failed", exc_info=True)
+        # Whether or not init succeeds, every stream opened before is dead
+        # (Pa_Terminate ran) and the device table is whatever it is now.
         generation += 1
         initialised_for = last_input_id
         pending = False
+        try:
+            sd._initialize()
+        except Exception:
+            # Without PortAudio there is no audio at all: surface it (the
+            # mic reader dies, wake.wait() raises, the orchestrator backs
+            # off and retries) rather than carrying on silently.
+            log.error("PortAudio initialize failed", exc_info=True)
+            raise
+
+
+def _snapshot_baseline(get: Callable[[], int | None] = default_input_id) -> None:
+    """Take the baseline at import time — right after `import sounddevice`
+    initialised PortAudio — so a default-input change during warmup (model
+    loads take seconds; AirPods connect meanwhile) is already a change by the
+    time the first mic reader's InputWatch polls, instead of becoming the
+    baseline. Guarded: never raises, and only baselines if nothing has yet."""
+    if _baselined:
+        return
+    try:
+        observe(get())
+    except Exception:
+        log.debug("could not snapshot default input device at import", exc_info=True)
+
+
+_snapshot_baseline()
 
 
 class InputWatch:

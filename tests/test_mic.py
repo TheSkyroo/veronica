@@ -122,11 +122,29 @@ def test_mic_frames_ends_when_reopen_fails(fake_sd, caplog):
         return real(**kw)
 
     fake_sd.RawInputStream = flaky
+    frames = []
     with caplog.at_level(logging.ERROR, logger="veronica.audio"):
         gen = mic.mic_frames(Settings(), 1280, "wake", watch=watch)
-        frames = list(gen)  # generator ends (reader died) instead of hanging
+        # the reader's death is re-raised to the consumer (so the wake
+        # engine's wait() fails and the orchestrator backs off) rather than
+        # the generator quietly ending
+        with pytest.raises(RuntimeError, match="device gone"):
+            for f in gen:
+                frames.append(f)
     assert len(frames) >= 1
     assert "wake mic reader died" in caplog.text
+
+
+def test_mic_frames_raises_when_first_open_fails(fake_sd):
+    def broken(**kw):
+        raise OSError("no input device")
+
+    fake_sd.RawInputStream = broken
+    gen = mic.mic_frames(Settings(), 1280, "wake")
+    with pytest.raises(OSError, match="no input device"):
+        next(gen)
+    time.sleep(0.02)
+    assert not any(t.name == "wake-mic" and t.is_alive() for t in threading.enumerate())
 
 
 def test_mic_frames_reports_backlog(fake_sd):
