@@ -32,6 +32,27 @@ def _real_webview(s: Settings):
     return web
 
 
+def _make_nav_delegate_class():
+    """Lazily build the WKNavigationDelegate PyObjC class. Defined here (in
+    the module) rather than at import time so this file can still be
+    imported — and its tests run — on machines without PyObjC installed."""
+    import objc
+    from Foundation import NSObject
+
+    class _HudNavDelegate(NSObject):
+        def initWithHudWindow_(self, hud_window):
+            self = objc.super(_HudNavDelegate, self).init()
+            if self is None:
+                return None
+            self._hud_window = hud_window
+            return self
+
+        def webView_didFinishNavigation_(self, webView, nav):
+            self._hud_window._on_loaded()
+
+    return _HudNavDelegate
+
+
 def _real_panel(s: Settings, web):
     import AppKit
     import Foundation
@@ -80,6 +101,9 @@ class HudWindow:
         self._closed = False
         self._fade_gen = 0
         self.available = False
+        self._loaded = False
+        self._pending_js: list[str] = []
+        self._nav_delegate = None
 
         saved: dict = {}
         try:
@@ -97,6 +121,7 @@ class HudWindow:
             if isinstance(pos, (list, tuple)) and len(pos) == 2:
                 self._pos[m] = (float(pos[0]), float(pos[1]))
 
+        is_real_webview = webview_factory is None
         try:
             self._web = (webview_factory or _real_webview)(settings)
             self._panel = (panel_factory or _real_panel)(settings, self._web)
@@ -104,6 +129,14 @@ class HudWindow:
         except Exception:
             log.warning("HUD unavailable; continuing without it", exc_info=True)
             self._web = self._panel = None
+
+        if self.available and is_real_webview:
+            try:
+                delegate_cls = _make_nav_delegate_class()
+                self._nav_delegate = delegate_cls.alloc().initWithHudWindow_(self)
+                self._web.setNavigationDelegate_(self._nav_delegate)
+            except Exception:
+                log.warning("failed to set HUD navigation delegate", exc_info=True)
 
         # Only reposition/resize on construction if the saved state actually
         # differs from what the factories already built (full size, top
@@ -124,6 +157,38 @@ class HudWindow:
             self._prefs_save({"hud_mode": self._mode})
         except Exception:
             log.warning("failed to save HUD mode pref", exc_info=True)
+
+    # -- JS dispatch / page load -------------------------------------------------
+    def _js(self, js: str) -> None:
+        """Route a JS call through the load gate: queued until the page has
+        actually finished loading (index.html), otherwise it's lost — e.g. a
+        setMode('mini')/push() fired right after construction, before WebKit
+        finishes navigation."""
+        if not self._loaded:
+            self._pending_js.append(js)
+            return
+        self._web.evaluateJavaScript_completionHandler_(js, None)
+
+    def mark_loaded(self) -> None:
+        """Public hook for the navigation delegate (and for tests, whose fake
+        web views never fire a real navigation callback) to signal that
+        index.html has finished loading."""
+        self._on_loaded()
+
+    def _on_loaded(self) -> None:
+        self._loaded = True
+        if self._closed:
+            # close() already discarded the queue; nothing left to do.
+            self._pending_js = []
+            return
+        # Re-apply the current mode first (whatever was queued during
+        # construction may be stale/duplicated after this), then flush
+        # everything else queued while the page was still loading, in order.
+        self._web.evaluateJavaScript_completionHandler_(
+            "window.hud.setMode(" + json.dumps(self._mode) + ")", None)
+        pending, self._pending_js = self._pending_js, []
+        for js in pending:
+            self._web.evaluateJavaScript_completionHandler_(js, None)
 
     def _geometry(self) -> tuple[int, int]:
         if self._mode == "mini":
@@ -191,8 +256,7 @@ class HudWindow:
                 self._panel.setFrame_display_animate_(frame, True, True)
             except Exception:
                 log.warning("failed to resize/reposition HUD panel", exc_info=True)
-            self._web.evaluateJavaScript_completionHandler_(
-                "window.hud.setMode(" + json.dumps(mode) + ")", None)
+            self._js("window.hud.setMode(" + json.dumps(mode) + ")")
         self._main(_do)
 
     def _save_position(self) -> None:
@@ -216,7 +280,7 @@ class HudWindow:
         if not self.available or self._closed:
             return
         js = "window.hud.push(" + json.dumps(event, ensure_ascii=False) + ")"
-        self._main(lambda: self._web.evaluateJavaScript_completionHandler_(js, None))
+        self._main(lambda: self._js(js))
 
     def on_state(self, state: str) -> None:
         if not self.available or self._closed:
@@ -255,7 +319,7 @@ class HudWindow:
         self._fade_gen += 1
 
         def _do():
-            self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(true)", None)
+            self._js("window.hud.setVisible(true)")
             self._panel.orderFrontRegardless()
             self._fade(1.0)
         self._main(_do)
@@ -270,12 +334,15 @@ class HudWindow:
 
         def _do():
             if not self._closed:
-                self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(false)", None)
+                self._js("window.hud.setVisible(false)")
             self._save_position()
             self._fade(0.0, then=_on_faded)
         self._main(_do)
 
     def close(self) -> None:
         self._closed = True
+        # Discard anything still queued for a page that may never finish
+        # loading now (or already has, in which case this is a no-op).
+        self._pending_js = []
         if self.available:
             self.hide()

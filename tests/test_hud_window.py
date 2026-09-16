@@ -45,7 +45,7 @@ def _noop_prefs_save(_prefs):
     pass
 
 
-def make(t=[0.0], **settings_over):
+def make(t=[0.0], mark_loaded=True, **settings_over):
     web, panel = FakeWeb(), FakePanel()
     h = HudWindow(
         Settings(hud_hide_after_s=3.0, **settings_over),
@@ -53,6 +53,12 @@ def make(t=[0.0], **settings_over):
         clock=lambda: t[0], main=lambda fn: fn(),
         prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
     )
+    if mark_loaded:
+        # Simulate the page having already finished loading, and clear the
+        # replay JS mark_loaded() produces, so tests assert only their own
+        # calls — most of this file's tests aren't about the load gate.
+        h.mark_loaded()
+        web.js = []
     return h, web, panel, t
 
 
@@ -429,3 +435,52 @@ def test_panel_factory_sets_up_draggable_non_activating_panel(monkeypatch):
     panel = _real_panel(Settings(), object())
     assert panel.ignores_mouse is False
     assert panel.movable_by_bg is True
+
+
+# -- commit: defer HUD JS until the page has loaded ---------------------------
+
+def test_js_before_loaded_is_queued_not_evaluated():
+    h, web, _, _ = make(mark_loaded=False)
+    h.push({"kind": "mic", "payload": 0.5})
+    assert web.js == []
+
+
+def test_mark_loaded_replays_mode_first_then_flushes_queued_pushes_in_order():
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "mini"}, prefs_save=_noop_prefs_save,
+    )
+    # Constructing with a persisted mini mode already queued a setMode call
+    # (via _apply_geometry) before the page has loaded.
+    h.push({"kind": "mic", "payload": 0.2})
+    h.push({"kind": "mic", "payload": 0.4})
+    assert web.js == []
+
+    h.mark_loaded()
+
+    assert web.js[0] == 'window.hud.setMode("mini")'
+    push_calls = [j for j in web.js if j.startswith("window.hud.push(")]
+    assert push_calls == [
+        "window.hud.push(" + json.dumps({"kind": "mic", "payload": 0.2}, ensure_ascii=False) + ")",
+        "window.hud.push(" + json.dumps({"kind": "mic", "payload": 0.4}, ensure_ascii=False) + ")",
+    ]
+
+
+def test_push_after_loaded_evaluates_immediately():
+    h, web, _, _ = make(mark_loaded=True)
+    h.push({"kind": "mic", "payload": 0.9})
+    assert web.js == [
+        "window.hud.push(" + json.dumps({"kind": "mic", "payload": 0.9}, ensure_ascii=False) + ")",
+    ]
+
+
+def test_close_before_load_discards_pending_queue():
+    h, web, _, _ = make(mark_loaded=False)
+    h.push({"kind": "mic", "payload": 0.1})
+    assert web.js == []
+
+    h.close()
+    h.mark_loaded()
+
+    assert web.js == []
