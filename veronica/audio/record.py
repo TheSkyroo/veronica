@@ -51,12 +51,16 @@ class Recorder:
         if self._capturing:
             self._stop.set()
 
-    async def capture(self, max_s: int | None = None) -> np.ndarray | None:
+    async def capture(self, max_s: int | None = None, preroll: np.ndarray | None = None) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
 
         Args:
             max_s: seconds to wait for speech to begin; None = wait forever.
                    Utterance length is always capped by settings.max_utterance_s.
+            preroll: audio captured just before this call started (e.g. the
+                     wake engine's tail buffer) — replayed through the VAD
+                     ahead of live frames so a command spoken in the same
+                     breath as the wake word isn't lost.
 
         Returns:
             int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
@@ -66,9 +70,32 @@ class Recorder:
         # own "capturing" bookkeeping (e.g. Orchestrator._confirm_capturing)
         # and the worker thread actually starting is not a no-op.
         self._capturing = True
-        return await asyncio.to_thread(self._capture, max_s)
+        return await asyncio.to_thread(self._capture, max_s, preroll)
 
-    def _capture(self, max_s: int | None) -> np.ndarray | None:
+    def _frame_bytes(self) -> int:
+        return self.s.sample_rate * self.s.frame_ms // 1000
+
+    def _preroll_frames(self, preroll: np.ndarray | None) -> Iterator[bytes]:
+        if preroll is None or preroll.size == 0:
+            return
+        n = self._frame_bytes()
+        usable = preroll.size - (preroll.size % n)
+        for i in range(0, usable, n):
+            yield preroll[i:i + n].tobytes()
+
+    def has_speech(self, pcm: np.ndarray | None) -> bool:
+        """True if any 30 ms frame of `pcm` is VAD speech. Used to decide
+        whether the wake chime should still play given wake-word pre-roll."""
+        if pcm is None or pcm.size == 0:
+            return False
+        n = self._frame_bytes()
+        usable = pcm.size - (pcm.size % n)
+        for i in range(0, usable, n):
+            if self._vad.is_speech(pcm[i:i + n].tobytes(), self.s.sample_rate):
+                return True
+        return False
+
+    def _capture(self, max_s: int | None, preroll: np.ndarray | None = None) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
         min_speech_frames = self.s.min_speech_ms // fm
@@ -81,8 +108,12 @@ class Recorder:
         started = False
         waited = 0
 
+        def _all_frames():
+            yield from self._preroll_frames(preroll)
+            yield from self._frames()
+
         try:
-            for frame in self._frames():
+            for frame in _all_frames():
                 if self._stop.is_set():
                     self._stop.clear()
                     return None

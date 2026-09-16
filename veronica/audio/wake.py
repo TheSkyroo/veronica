@@ -68,6 +68,11 @@ class WakeWord:
         pending stop is consumed by the next wait() even if issued before it starts."""
         self._stop.set()
 
+    def take_preroll(self) -> np.ndarray:
+        """Interface parity with WhisperWake: openwakeword has no equivalent
+        pre-roll buffer, so this always returns an empty array."""
+        return np.zeros(0, dtype=np.int16)
+
     async def wait(self, threshold: float | None = None, suppress: Callable[[], str] | None = None) -> bool:
         """Block until the wake word is detected (True) or stop() is called (False).
         Only one wait() should be in flight per WakeWord instance at a time.

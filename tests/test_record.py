@@ -108,3 +108,34 @@ async def test_on_level_called_per_frame(monkeypatch):
     await r.capture()
     assert len(levels) >= 7 and all(0.0 <= v <= 1.0 for v in levels)
     assert max(levels) > 0.0            # speech frames are non-zero
+
+
+# -- pre-roll handoff (item 1) -------------------------------------------------
+
+async def test_preroll_speech_captured_then_endpointed_by_live_silence(monkeypatch):
+    r = make("", monkeypatch)  # live frames: pure silence forever
+    preroll = np.full(FRAME * 6, 1000, dtype=np.int16)
+    pcm = await r.capture(preroll=preroll)
+    assert pcm is not None
+    # 6 preroll speech frames + 3 live silence frames to endpoint (90 ms / 30 ms)
+    assert len(pcm) == FRAME * 9
+    assert np.all(pcm[: FRAME * 6] == 1000)
+
+
+async def test_preroll_all_silence_then_live_speech_works_as_before(monkeypatch):
+    r = make("....ssssss.........", monkeypatch)
+    preroll = np.zeros(FRAME * 5, dtype=np.int16)
+    pcm = await r.capture(preroll=preroll)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9  # same result as without any preroll at all
+
+
+def test_has_speech(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings()
+    r = Recorder(s, frames=lambda: iter([]))
+    assert r.has_speech(np.full(FRAME * 3, 1000, dtype=np.int16)) is True
+    assert r.has_speech(np.zeros(FRAME * 3, dtype=np.int16)) is False
+    assert r.has_speech(np.zeros(0, dtype=np.int16)) is False
+    assert r.has_speech(None) is False
+

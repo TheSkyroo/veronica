@@ -364,11 +364,20 @@ class Orchestrator:
                     await turn
 
     # -- one interaction ------------------------------------------------------
+    async def _listen_after_wake(self) -> np.ndarray | None:
+        """Chime (unless the wake engine's pre-roll already contains speech,
+        i.e. the user spoke the command in the same breath as the wake
+        word) and capture, handing that pre-roll to the recorder so it
+        isn't lost."""
+        self._set("listening")
+        pre = self.wake.take_preroll()
+        if not self.recorder.has_speech(pre):
+            await self.chime(self.s.chime_wake_hz, 120)
+        return await self.recorder.capture(max_s=self.s.listen_wait_s, preroll=pre)
+
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
-        self._set("listening")
-        await self.chime(self.s.chime_wake_hz, 120)
-        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+        pcm = await self._listen_after_wake()
         if pcm is None:
             self._set("idle")
             return
@@ -382,9 +391,7 @@ class Orchestrator:
             else:
                 barged = await self._run_with_barge(self.handle_text(text))
                 if barged:
-                    self._set("listening")
-                    await self.chime(self.s.chime_wake_hz, 120)
-                    pcm = await self.recorder.capture(max_s=self.s.listen_wait_s)
+                    pcm = await self._listen_after_wake()
                     if pcm is None:
                         break
                     continue

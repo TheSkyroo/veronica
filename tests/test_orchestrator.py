@@ -10,10 +10,17 @@ from veronica.orchestrator import Orchestrator
 class Wake:
     async def wait(self, threshold=None, suppress=None): pass
     def stop(self): pass
+    def take_preroll(self): return np.zeros(0, dtype=np.int16)
 
 class Rec:
-    def __init__(self, pcms): self.pcms = list(pcms)
-    async def capture(self, max_s=None): return self.pcms.pop(0) if self.pcms else None
+    def __init__(self, pcms, has_speech=False):
+        self.pcms = list(pcms)
+        self._has_speech = has_speech
+        self.preroll_calls = []
+    async def capture(self, max_s=None, preroll=None):
+        self.preroll_calls.append(preroll)
+        return self.pcms.pop(0) if self.pcms else None
+    def has_speech(self, pcm): return self._has_speech
 
 class STT:
     def __init__(self, texts): self.texts = list(texts)
@@ -63,6 +70,35 @@ async def test_chime_after_wake_and_on_followup():
     await o.one_turn()
     # chime samples go through player.play like speech; count plays: wake chime + 2 sentences + followup chime
     assert o.player.played == 4
+
+
+async def test_wake_chime_skipped_when_preroll_has_speech():
+    o, _ = build()
+    o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=True)
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    # wake chime skipped (preroll already has speech), so: 2 sentences + followup chime
+    assert o.player.played == 3
+
+
+async def test_wake_chime_played_when_preroll_has_no_speech():
+    o, _ = build()
+    o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=False)
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    # wake chime + 2 sentences + followup chime
+    assert o.player.played == 4
+
+
+async def test_preroll_is_handed_to_recorder_capture():
+    rec = Rec([np.zeros(1, np.int16), None])
+    o, _ = build()
+    o.recorder = rec
+    o.wake = Wake()
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    assert len(rec.preroll_calls) >= 1
+    assert isinstance(rec.preroll_calls[0], np.ndarray)  # the wake-triggered listen gets the wake engine's preroll
 
 
 async def test_chime_skipped_when_muted():
@@ -194,6 +230,9 @@ async def test_run_forever_survives_reporting_failure():
         def stop(self):
             self._barge_ev.set()
 
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
+
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
         wake=WakeOnceThenCancel(),
@@ -292,9 +331,11 @@ class RecArgs:
         self.pcms = list(pcms)
         self.max_s_calls = []
 
-    async def capture(self, max_s=None):
+    async def capture(self, max_s=None, preroll=None):
         self.max_s_calls.append(max_s)
         return self.pcms.pop(0) if self.pcms else None
+
+    def has_speech(self, pcm): return False
 
 
 async def test_first_capture_uses_listen_wait_s_and_no_speech_goes_idle():
@@ -357,6 +398,9 @@ async def test_wake_failure_retries_and_continues_into_a_turn(monkeypatch):
         def stop(self):
             self._barge_ev.set()
 
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
+
     states = []
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -397,6 +441,9 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
 
         def stop(self):
             self._barge_ev.set()
+
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
 
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -581,6 +628,7 @@ class BargeWake:
         await self._ev.wait(); self._ev.clear(); return False
     def stop(self):
         self.stops += 1; self._ev.set()
+    def take_preroll(self): return np.zeros(0, dtype=np.int16)
 
 
 async def test_barge_listener_receives_suppress_callback():
@@ -668,11 +716,11 @@ async def test_barge_in_stops_speech_and_relistens():
             super().__init__(pcms)
             self.n = 0
 
-        async def capture(self, max_s=None):
+        async def capture(self, max_s=None, preroll=None):
             self.n += 1
             if self.n > 1:
                 events.append("capture")
-            return await super().capture(max_s=max_s)
+            return await super().capture(max_s=max_s, preroll=preroll)
 
     class LoggingSlowBrain(SlowBrain):
         async def interrupt(self):
@@ -707,7 +755,10 @@ class StoppableRec:
         self.stops += 1
         self._ev.set()
 
-    async def capture(self, max_s=None):
+    def has_speech(self, pcm):
+        return False
+
+    async def capture(self, max_s=None, preroll=None):
         item = self.pcms.pop(0) if self.pcms else None
         if item is self.BLOCK:
             await self._ev.wait()
@@ -784,9 +835,12 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
             self.pcms = list(pcms)
             self.captures = 0
 
-        async def capture(self, max_s=None):
+        async def capture(self, max_s=None, preroll=None):
             self.captures += 1
             return self.pcms.pop(0) if self.pcms else None
+
+        def has_speech(self, pcm):
+            return False
 
         def stop(self):
             pass   # never reached: confirm() bails before it would capture
@@ -893,6 +947,8 @@ async def test_barge_listener_failure_does_not_cancel_good_turn(caplog):
             raise RuntimeError("mic hiccup")
         def stop(self):
             self.stops += 1
+        def take_preroll(self):
+            return np.zeros(0, dtype=np.int16)
 
     o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
     o.wake = RaisingWake()
