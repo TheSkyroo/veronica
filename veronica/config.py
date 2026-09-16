@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     max_utterance_s: int = 15
     min_speech_ms: int = 300
     followup_window_s: int = 4
+    followup_skip_ms: int = 300
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
 
@@ -52,13 +53,14 @@ class Settings(BaseSettings):
     brain_timeout_s: int = 60
     interrupt_drain_s: int = 3
     effort: str = "low"
-    max_turns: int = 8
+    max_turns: int | None = None
+    brain_cwd: Path = Field(default_factory=Path.home)
 
     # HUD
     hud_enabled: bool = True
     hud_hide_after_s: float = 3.0
-    hud_width: int = 400
-    hud_height: int = 230
+    hud_width: int = 540
+    hud_height: int = 300
     hud_margin: int = 24
 
     @property

@@ -108,19 +108,23 @@ class Brain:
         return PermissionResultDeny(message="user declined")
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
+        kwargs = {}
+        if self.s.max_turns is not None:
+            kwargs["max_turns"] = self.s.max_turns
         return ClaudeAgentOptions(
             system_prompt=system_prompt(dt.date.today()),
             effort=self.s.effort,
-            max_turns=self.s.max_turns,
             permission_mode="default",
             can_use_tool=self._can_use_tool,
             resume=resume,
             mcp_servers={"mac": mac_server},
+            cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool
             # Only our confirmation gate may allow tools; ignore any
             # ~/.claude/settings.json (or project/local) permissions.allow
             # rules that would otherwise bypass can_use_tool entirely.
             setting_sources=[],
+            **kwargs,
         )
 
     async def _ensure_client(self):
@@ -186,10 +190,37 @@ class Brain:
                 elif isinstance(msg, ResultMessage):
                     self._in_flight = False   # turn ended, error or not
                     if getattr(msg, "is_error", False):
+                        errors = getattr(msg, "errors", None)
+                        error_text = " ".join(
+                            str(part) for part in (msg.result, errors) if part
+                        ).lower()
+                        # Substring heuristic, not a structured error code from the
+                        # SDK — a false positive here just resets the session
+                        # (loses conversation history) rather than mis-handling
+                        # a genuinely different error, so it's a safe bias.
+                        if any(
+                            marker in error_text
+                            for marker in (
+                                "context",
+                                "compact",
+                                "too long",
+                                "prompt is too long",
+                                "max_tokens",
+                            )
+                        ):
+                            old_sid = self._load_session()
+                            log.warning(
+                                "brain context overflow (session %s): %s %s",
+                                old_sid, msg.result, errors,
+                            )
+                            self._clear_session()
+                            await self.close()
+                            yield "My memory got full, starting a fresh conversation."
+                            return
                         log.error(
                             "brain error result: %s %s",
                             msg.result,
-                            getattr(msg, "errors", None),
+                            errors,
                         )
                         await self.close()
                         yield "Claude returned an error, check the log."

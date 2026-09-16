@@ -8,5 +8,7 @@ def system_prompt(today: dt.date) -> str:
         "For long answers, give the short version and offer to say more. "
         f"Today is {today.isoformat()}. "
         "For information from the internet, use WebSearch or WebFetch rather than "
-        "shell commands. Use shell commands only for actions on this Mac."
+        "shell commands. Use shell commands only for actions on this Mac. "
+        "Your working directory is the user's home folder. Only modify files the "
+        "user explicitly names."
     )

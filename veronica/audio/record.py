@@ -61,6 +61,7 @@ class Recorder:
         max_s: int | None = None,
         preroll: np.ndarray | None = None,
         partial: bool = False,
+        skip_ms: int = 0,
     ) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
 
@@ -76,6 +77,11 @@ class Recorder:
                      as a live partial (e.g. confirm()'s yes/no capture) —
                      otherwise a stray partial could overwrite the HUD's
                      "You" row with the wrong turn's text.
+            skip_ms: discard this many milliseconds of *live* mic frames
+                     before the VAD even looks at them (preroll is
+                     unaffected). Used by the follow-up capture to drop the
+                     tail/echo of Veronica's own just-spoken audio, which
+                     would otherwise get endpointed as a false speech onset.
 
         Returns:
             int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
@@ -85,7 +91,7 @@ class Recorder:
         # own "capturing" bookkeeping (e.g. Orchestrator._confirm_capturing)
         # and the worker thread actually starting is not a no-op.
         self._capturing = True
-        return await asyncio.to_thread(self._capture, max_s, preroll, partial)
+        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms)
 
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000
@@ -124,7 +130,11 @@ class Recorder:
         return False
 
     def _capture(
-        self, max_s: int | None, preroll: np.ndarray | None = None, partial: bool = False
+        self,
+        max_s: int | None,
+        preroll: np.ndarray | None = None,
+        partial: bool = False,
+        skip_ms: int = 0,
     ) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
@@ -132,6 +142,7 @@ class Recorder:
         max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
         hop_frames = max(1, int(self.s.partial_hop_s * 1000 / fm))
+        skip_frames = skip_ms // fm
 
         n = self._frame_bytes()
         preroll_frame_total = 0
@@ -144,16 +155,33 @@ class Recorder:
         started = False
         onset_from_preroll = False
         waited = 0
+        elapsed = 0
         frames_since_partial = 0
         frame_idx = -1
 
         def _all_frames():
             yield from self._preroll_frames(preroll)
-            yield from self._frames()
+            live = self._frames()
+            for _ in range(skip_frames):
+                # Discarded before the VAD ever sees them — not "silence",
+                # just not consulted at all.
+                if next(live, None) is None:
+                    return
+            yield from live
 
         try:
             for frame in _all_frames():
                 frame_idx += 1
+                if frame_idx >= preroll_frame_total:
+                    # Hard cap on live-frame time, independent of started/
+                    # reset state: repeated false onsets (e.g. a bursty noise
+                    # source) each get their own wait budget via the reset
+                    # below, which can otherwise inflate the *real* wall-clock
+                    # wait far past max_s. elapsed counts every live frame no
+                    # matter what state we're in, so this always fires.
+                    elapsed += 1
+                    if wait_frames is not None and elapsed >= wait_frames + max_frames:
+                        return None
                 if self._stop.is_set():
                     self._stop.clear()
                     return None
@@ -193,11 +221,17 @@ class Recorder:
                 else:
                     silence_run += 1
                 if silence_run >= silence_frames_needed or len(buf) >= max_frames:
-                    if onset_from_preroll and speech_frames < min_speech_frames:
-                        # The only "speech" was the tail of the wake word
-                        # caught in the pre-roll (e.g. VAD noise at the
-                        # boundary), not a real command — keep waiting for a
-                        # genuine live onset instead of giving up.
+                    has_wait_budget_left = wait_frames is not None and waited < wait_frames
+                    if speech_frames < min_speech_frames and (onset_from_preroll or has_wait_budget_left):
+                        # Too little real speech to count as an utterance —
+                        # either it was just the tail of the wake word caught
+                        # in the pre-roll, or a brief false onset (e.g. the
+                        # echo/tail of Veronica's own voice during a
+                        # follow-up capture). Either way, keep waiting for a
+                        # genuine onset instead of giving up, as long as
+                        # there's still wait budget left (max_s is None means
+                        # no budget at all: fall through to the old
+                        # behavior and return None below).
                         started = False
                         onset_from_preroll = False
                         buf = []

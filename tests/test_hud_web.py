@@ -12,7 +12,7 @@ def test_hud_dom_and_canvas_react():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         # Ensure at least one animation frame has rendered before grabbing the
@@ -43,7 +43,7 @@ def test_hud_robust_to_bad_events_and_clear():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -91,7 +91,7 @@ def test_long_reply_and_followup_stay_in_card():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -109,10 +109,11 @@ def test_long_reply_and_followup_stay_in_card():
         )
         page.wait_for_timeout(2000)  # let the typewriter catch up
 
-        tool_box = page.eval_on_selector("#tool", "el => el.getBoundingClientRect()")
+        card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        reply_box = page.eval_on_selector("#reply", "el => el.getBoundingClientRect()")
         heard_box = page.eval_on_selector("#heard", "el => el.getBoundingClientRect()")
-        assert tool_box["bottom"] <= 220
-        assert heard_box["top"] >= 0
+        assert reply_box["bottom"] <= card_box["bottom"]
+        assert heard_box["top"] >= card_box["top"]
 
         # A second 'heard' (a follow-up) must clear the previous reply text
         # immediately, before any new sentences arrive.
@@ -128,7 +129,7 @@ def test_confirm_hint_appears_and_clears():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -154,7 +155,7 @@ def test_confirm_hint_appears_and_clears():
         )
         assert page.inner_text("#prompt .msg") == 'Fetch weather from wttr.in?'
         assert page.inner_text("#status .label") == 'Say yes or no'
-        assert page.inner_text("#hint .msg") == ""  # no duplicate "say yes or no" text
+        assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
         assert page.inner_text("#tool .detail") == 'Bash: curl -s https://wttr.in'
         assert page.inner_text("#reply .msg") == 'Something before.'
 
@@ -176,7 +177,7 @@ def test_orb_screenshot():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240}, device_scale_factor=2)
+        page = browser.new_page(viewport={"width": 540, "height": 300}, device_scale_factor=2)
         page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
@@ -201,7 +202,7 @@ def test_hud_setvisible_does_not_double_schedule_raf():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -243,7 +244,7 @@ def test_status_label_per_state():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         errors = []
         page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
@@ -279,7 +280,7 @@ def test_level_bar_grows_with_mic_while_listening():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         errors = []
         page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
@@ -309,7 +310,7 @@ def test_heard_clamp_keeps_card_in_bounds():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         errors = []
         page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
@@ -323,7 +324,7 @@ def test_heard_clamp_keeps_card_in_bounds():
         card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
         heard_box = page.eval_on_selector("#heard", "el => el.getBoundingClientRect()")
         assert heard_box["bottom"] <= card_box["bottom"]
-        assert card_box["width"] == 400 and card_box["height"] == 230
+        assert card_box["width"] == 540 and card_box["height"] == 300
 
         assert not errors, f"page errors: {errors}"
         browser.close()
@@ -335,7 +336,7 @@ def test_partial_transcript_then_final():
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page = browser.new_page(viewport={"width": 540, "height": 300})
         errors = []
         page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
@@ -356,6 +357,72 @@ def test_partial_transcript_then_final():
         page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
         assert page.inner_text("#heard .msg") == ""
         assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+def _rects_intersect(a, b):
+    return not (a["right"] <= b["left"] or b["right"] <= a["left"]
+                or a["bottom"] <= b["top"] or b["bottom"] <= a["top"])
+
+
+@pytest.mark.live
+def test_no_overlap_v3():
+    from playwright.sync_api import sync_playwright
+
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300}, device_scale_factor=2)
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        long_heard = "word " * 60  # ~300 chars
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
+        page.evaluate("window.hud.push({kind:'heard', payload:" + repr(long_heard) + "})")
+
+        sentences = [
+            "This is a long first sentence about the weather that goes on for quite a while indeed.",
+            "This is a long second sentence about the weather that goes on for quite a while indeed.",
+            "This is a long third sentence about the weather that goes on for quite a while indeed.",
+        ]
+        for s in sentences:
+            page.evaluate("window.hud.push({kind:'sentence', payload:" + repr(s) + "})")
+        page.wait_for_timeout(2500)  # let the typewriter catch up
+
+        page.evaluate(
+            "window.hud.push({kind:'prompt', payload:'Fetch weather from wttr.in?'})"
+        )
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Fetch weather from wttr.in', "
+            "detail:'Bash: curl -s https://wttr.in', decision:'ask', timeout_ms:8000}})"
+        )
+        page.wait_for_timeout(100)
+
+        card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        boxes = {
+            sel: page.eval_on_selector(sel, "el => el.getBoundingClientRect()")
+            for sel in ("#status", "#heard", "#reply", "#action")
+        }
+
+        for sel, box in boxes.items():
+            assert box["left"] >= card_box["left"] - 0.5, (sel, box, card_box)
+            assert box["top"] >= card_box["top"] - 0.5, (sel, box, card_box)
+            assert box["right"] <= card_box["right"] + 0.5, (sel, box, card_box)
+            assert box["bottom"] <= card_box["bottom"] + 0.5, (sel, box, card_box)
+
+        names = list(boxes)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = boxes[names[i]], boxes[names[j]]
+                assert not _rects_intersect(a, b), (names[i], names[j], a, b)
+
+        page.locator("#card").screenshot(path=str(SCREENSHOT_DIR / "hud-v3.png"))
 
         assert not errors, f"page errors: {errors}"
         browser.close()

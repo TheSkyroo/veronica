@@ -223,3 +223,68 @@ async def test_on_audio_hop_counts_only_speech_frames(monkeypatch):
     r.on_audio = calls.append
     await r.capture(partial=True)
     assert calls == []
+
+
+# -- follow-up window: a brief false onset (e.g. Veronica's own audio tail) --
+
+async def test_short_live_speech_then_real_speech_within_wait_budget(monkeypatch):
+    """A brief false onset (2 speech frames, below min_speech_frames) that
+    endpoints on silence must not give up — with wait budget left, it should
+    keep waiting for a real onset, here arriving ~1.5s in."""
+    pattern = "ss" + "." * 48 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=120, max_utterance_s=5)
+    pcm = await r.capture(max_s=4)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9   # 6 real speech frames + 3 silence to endpoint
+    assert np.all(pcm[: FRAME * 6] == 1000)
+
+
+async def test_short_live_speech_with_no_wait_budget_returns_none(monkeypatch):
+    """Same pattern, but with no wait budget (max_s=None): old behavior —
+    give up and return None once the brief false onset endpoints."""
+    pattern = "ss" + "." * 48 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=120, max_utterance_s=5)
+    pcm = await r.capture(max_s=None)
+    assert pcm is None
+
+
+async def test_skip_ms_drops_leading_live_frames(monkeypatch):
+    """skip_ms discards the first skip_ms of *live* frames before the VAD
+    ever sees them — speech in those frames is ignored entirely."""
+    # 10 frames (300 ms) of speech, then silence, then real speech.
+    pattern = "s" * 10 + "." * 5 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=60, max_utterance_s=5)
+    pcm = await r.capture(max_s=4, skip_ms=300)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9   # only the real speech (6) + 3 silence to endpoint
+    assert np.all(pcm[: FRAME * 6] == 1000)
+
+
+async def test_repeated_false_onsets_bounded_by_hard_wait_cap(monkeypatch):
+    """Repeated false onsets (e.g. a bursty noise source alternating short
+    speech bursts with gaps) must not let the reset-and-keep-waiting logic
+    inflate the real wait far past max_s: a hard cap on total live-frame
+    elapsed time (wait_frames + max_frames) always wins, regardless of
+    started/reset state."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(
+        vad_silence_ms=90, min_speech_ms=150, max_utterance_s=1,
+    )
+    fm = s.frame_ms
+    wait_frames = 1000 // fm       # max_s=1
+    max_frames = s.max_utterance_s * 1000 // fm
+    consumed = []
+
+    def infinite_burst_gap():
+        while True:
+            for _ in range(2):
+                consumed.append(1)
+                yield np.full(FRAME, 1000, dtype=np.int16).tobytes()
+            for _ in range(4):
+                consumed.append(1)
+                yield np.zeros(FRAME, dtype=np.int16).tobytes()
+
+    r = Recorder(s, frames=infinite_burst_gap)
+    pcm = await r.capture(max_s=1)
+    assert pcm is None
+    assert len(consumed) <= wait_frames + max_frames + 1
