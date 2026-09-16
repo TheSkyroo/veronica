@@ -58,17 +58,32 @@ class Orchestrator:
     # No bare "ha": whisper writes laughter as "ha ha", which must never
     # approve a tool. Devanagari forms are for pinned Hindi mode, where
     # whisper emits the script rather than romanized Hindi.
-    CONFIRM_WORDS = frozenset({
-        "yes", "yeah", "yep", "yup", "do it", "go ahead", "confirm", "sure",
-        "ok", "okay", "alright", "fine", "absolutely", "please do", "go for it",
-        "of course", "correct",
-        "haan", "ji", "haanji", "ji haan", "theek hai", "karo", "bilkul", "kar do",
-        "हाँ", "हां", "जी", "जी हाँ", "ठीक है", "ठीक", "करो", "बिल्कुल", "कर दो",
+    #
+    # Two classes (controller ruling, batch D): STRONG confirms count
+    # wherever they are (last decisive wins); FILLER confirms ("okay",
+    # "sure", "theek hai"…) are how people start a question too ("okay so
+    # what will it delete"), so they only count when the whole utterance is
+    # nothing but confirm phrases.
+    STRONG_CONFIRMS = frozenset({
+        "yes", "yeah", "yep", "yup", "do it", "go ahead", "confirm", "absolutely", "please do", "go for it",
+        "haan", "ji", "haanji", "ji haan", "karo", "bilkul", "kar do",
+        "हाँ", "हां", "जी", "जी हाँ", "करो", "बिल्कुल", "कर दो",
     })
+    FILLER_CONFIRMS = frozenset({
+        "ok", "okay", "alright", "fine", "correct", "of course", "sure",
+        "theek hai", "ठीक है", "ठीक",
+    })
+    CONFIRM_WORDS = STRONG_CONFIRMS | FILLER_CONFIRMS
     DENY_WORDS = frozenset({
         "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
         "nahi", "nahin", "mat", "rehne",
         "नहीं", "नही", "मत", "रहने",
+    })
+    # A question or hesitation after the last confirm phrase ("yes what?",
+    # "ok wait", "alright hold on") means the answer isn't a yes.
+    QUESTION_WORDS = frozenset({
+        "what", "which", "how", "why", "wait", "hold",
+        "kya", "kaun", "ruko", "रुको", "क्या",
     })
     # A confirm phrase directly after one of these is negated ("not okay",
     # "don't do it", "mat karo") rather than counted as a yes.
@@ -90,24 +105,45 @@ class Orchestrator:
         phrase wins ("yes… actually no" → False), but a deny before a later
         confirm does not ("no no, I said yes, do it" → True). A confirm
         phrase immediately preceded by a negator ("not okay", "don't do
-        it") is not a confirm. With no confirm phrase at all the answer is
-        always False — never default to yes."""
+        it") is not a confirm. A question/hesitation word after the last
+        confirm phrase ("yes what?", "ok wait") is decisive-negative.
+        Filler confirms ("okay", "sure", "fine"…) count only when the
+        utterance consists solely of confirm phrases ("okay", "okay do it",
+        "alright yes" — not "okay so what will it delete", "is that
+        correct"). With no confirm phrase at all the answer is always
+        False — never default to yes."""
         no_apostrophes = heard.lower().replace("'", "").replace("’", "")
         words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
-        last_confirm = -1
-        last_deny = -1
-        for idx, w in enumerate(words):
-            if w in Orchestrator.DENY_WORDS:
-                last_deny = idx
-        for phrase in Orchestrator.CONFIRM_WORDS:
-            phrase_words = phrase.split()
-            n = len(phrase_words)
-            for i in range(len(words) - n + 1):
-                if words[i:i + n] == phrase_words:
-                    if i > 0 and words[i - 1] in Orchestrator._NEGATORS:
-                        continue
-                    last_confirm = max(last_confirm, i + n - 1)
-        return last_confirm >= 0 and last_confirm > last_deny
+        if not words:
+            return False
+        last_deny = max((i for i, w in enumerate(words) if w in Orchestrator.DENY_WORDS), default=-1)
+
+        def matches(phrases):
+            """(start, end) of every non-negated occurrence of any phrase."""
+            found = []
+            for phrase in phrases:
+                pw = phrase.split()
+                n = len(pw)
+                for i in range(len(words) - n + 1):
+                    if words[i:i + n] == pw and not (i > 0 and words[i - 1] in Orchestrator._NEGATORS):
+                        found.append((i, i + n - 1))
+            return found
+
+        strong = matches(Orchestrator.STRONG_CONFIRMS)
+        filler = matches(Orchestrator.FILLER_CONFIRMS)
+        if not strong and not filler:
+            return False
+        last_confirm = max(end for _, end in strong + filler)
+        if any(w in Orchestrator.QUESTION_WORDS for w in words[last_confirm + 1:]):
+            return False
+        last_strong = max((end for _, end in strong), default=-1)
+        if last_strong >= 0 and last_strong > last_deny:
+            return True
+        # Fillers only: every word must belong to some confirm phrase.
+        covered = set()
+        for start, end in strong + filler:
+            covered.update(range(start, end + 1))
+        return len(covered) == len(words)
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  partial_stt=None, store=None,

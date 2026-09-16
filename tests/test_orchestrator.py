@@ -198,7 +198,9 @@ async def test_full_turn():
         ("yes please", True),
         ("go ahead please", True),
         ("sure", True),
-        ("sure thing", True),
+        # "sure" is a filler-class confirm: it only counts when the whole
+        # utterance is confirm phrases (controller ruling, batch D final wave)
+        ("sure thing", False),
         ("not sure", False),
         ("go away", False),
         ("go", False),
@@ -3296,6 +3298,28 @@ async def test_hindi_voice_pick_in_auto_mode_keeps_mode(monkeypatch):
     ("ha ha", False), ("stop", False), ("okay stop", False), ("cancel that, yes", True),
 ])
 def test_is_confirmation_last_decisive_wins(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
+
+
+@pytest.mark.parametrize("heard,ok", [
+    # fillers (ok/okay/alright/fine/correct/of course/sure/theek hai/ठीक है/ठीक)
+    # only count when the utterance is nothing but confirm phrases
+    ("okay", True), ("okay do it", True), ("alright yes", True), ("sure", True),
+    ("okay okay", True), ("theek hai", True), ("ठीक है", True), ("ठीक", True), ("fine, okay", True),
+    ("okay so what will it delete", False), ("okay what does it do", False), ("is that correct", False),
+    ("sure, but which files", False), ("okay then", False), ("fine I guess", False), ("of course not", False),
+    ("theek hai lekin kaunsi", False), ("ठीक है लेकिन", False),
+    # a question/hesitation word after the last confirm phrase is decisive-negative
+    ("ok wait", False), ("alright hold on", False), ("yes what", False), ("yes, which one", False),
+    ("do it, how", False), ("haan kya", False), ("karo ruko", False), ("हाँ रुको", False), ("हाँ क्या", False),
+    ("haan kaun", False), ("yes why", False),
+    # ...but before a strong confirm it doesn't matter
+    ("wait, yes", True), ("what? yes do it", True), ("kya? haan karo", True),
+    # strong confirms keep last-decisive-wins
+    ("yes", True), ("yes please", True), ("go ahead please", True), ("cancel that, yes", True),
+    ("no no, I said yes, do it", True), ("yes… actually no", False), ("okay stop", False),
+])
+def test_is_confirmation_fillers_and_questions(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok
 
 
