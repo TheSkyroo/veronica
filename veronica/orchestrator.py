@@ -535,9 +535,25 @@ class Orchestrator:
         if needs_load:
             await self.say(self._LANG_LOADING[mode], lang=spoken_lang)
             self._set("thinking")
-            self.stt = await asyncio.to_thread(self.stt_factory, main_model, lang)
+            # Load both into locals and swap only once both succeeded: a
+            # failed download (offline, disk full) must never leave the main
+            # transcriber pinned to Hindi with the partial still English, or
+            # the mode/prefs out of step with the models actually loaded.
+            try:
+                new_stt = await asyncio.to_thread(self.stt_factory, main_model, lang)
+                new_partial = (
+                    await asyncio.to_thread(self.stt_factory, partial_model, lang) if want_partial else None
+                )
+            except Exception:
+                log.exception("language switch failed")
+                if mode == "hi":
+                    await self.say("Hindi load nahi ho paayi, baad mein try karo.", lang="hi")
+                else:
+                    await self.say("Couldn't switch language, check the log.")
+                return
+            self.stt = new_stt
             if want_partial:
-                self.partial_stt = await asyncio.to_thread(self.stt_factory, partial_model, lang)
+                self.partial_stt = new_partial
                 if self.recorder is not None:
                     # first partial transcriber (none was loaded at startup):
                     # hook the recorder's audio hops up as __init__ would have.

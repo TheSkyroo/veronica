@@ -207,7 +207,8 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 - **Switch** — "speak hindi" / "hindi mein bolo" pins her to Hindi; "speak english" / "english mein bolo" goes
   back; "understand both" / "dono bhasha" lets whisper detect the language per utterance. She confirms in the new
   language ("Ab Hindi mein baat karte hain." / "Okay, English it is." / "Theek hai, dono chalega."), and the mode
-  persists in `~/.veronica/prefs.json`.
+  persists in `~/.veronica/prefs.json`. In pinned Hindi mode everything you say is treated as Hindi and spoken with
+  the Hindi voice; say "understand both" / "dono bhasha" if you mix English and Hindi.
 - **What to expect** — Hindi and auto mode swap the English-only whisper models for the multilingual ones; the
   first switch downloads them (~500 MB) after an "Ek minute, Hindi load kar rahi hoon." Replies follow your
   language: Hinglish in, Hinglish out (Latin letters); pure Hindi in, Devanagari out; English in, English out.

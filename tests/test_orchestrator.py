@@ -3204,3 +3204,34 @@ async def test_hindi_voice_request_sets_hindi_voice(monkeypatch):
     assert o.tts.hindi_voice == "hm_omega" and o.tts.voice == "af_sarah"
     assert {"tts_hindi_voice": "hm_omega"} in saved
     assert ("tool", {"summary": "Voice: Omega", "decision": "auto"}) in ev
+
+
+async def test_language_switch_load_failure_leaves_everything_untouched(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="en", monkeypatch=monkeypatch)
+    original_stt = o.stt
+    calls = []
+    def factory(model, language):
+        calls.append((model, language))
+        if len(calls) == 2:
+            raise RuntimeError("offline")   # main loaded, partial download failed
+        s = STT2([]); s.model_name = model; s.language = language; return s
+    o.stt_factory = factory
+    await o.one_turn()
+    assert calls == [("small", "hi"), ("tiny", "hi")]
+    assert o.stt is original_stt and o.stt.model_name == "small.en" and o.stt.language == "en"
+    assert o.partial_stt is None
+    assert o.language == "en" and saved == []
+    assert o.tts.said == ["Ek minute, Hindi load kar rahi hoon.", "Hindi load nahi ho paayi, baad mein try karo."]
+    assert o.tts.langs[-1][1] == "hi"
+    assert o.brain.asked == []
+
+
+async def test_language_switch_load_failure_english_line(monkeypatch):
+    o, saved, made, _ = build_lang(["speak english"], mode="hi", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"
+    def factory(model, language):
+        raise RuntimeError("disk full")
+    o.stt_factory = factory
+    await o.one_turn()
+    assert o.language == "hi" and saved == [] and o.stt.model_name == "small"
+    assert o.tts.said[-1] == "Couldn't switch language, check the log."
