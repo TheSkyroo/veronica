@@ -15,6 +15,7 @@ def test_system_prompt_has_date_and_rules():
     assert "You are Veronica" in p
     assert "2026-09-15" in p
     assert "one to three spoken sentences" in p
+    assert "For information from the internet, use WebSearch or WebFetch rather than shell commands. Use shell commands only for actions on this Mac." in p
 
 
 def test_summarize_tool():

@@ -14,6 +14,11 @@ SAFE_BASH = frozenset({
 # any of these anywhere in a Bash command → confirm (covers $(…), pipes, chains, redirects)
 FORBIDDEN = "|&;><`$\n"
 
+CURL_SAFE_NO_ARG = frozenset({"-s", "-S", "-L", "--silent", "--location", "--compressed"})
+CURL_SAFE_WITH_ARG = frozenset({
+    "--max-time", "-m", "-H", "--header", "-A", "--user-agent",
+})
+
 MAC_TOOL_RISK: dict[str, Decision] = {
     "open_app": "allow",
     "open_url": "allow",
@@ -28,6 +33,30 @@ MAC_TOOL_RISK: dict[str, Decision] = {
 MAC_PREFIX = "mcp__mac__"
 
 
+def _curl_is_safe(argv: list[str]) -> bool:
+    urls = 0
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok.startswith(("http://", "https://")):
+            urls += 1
+            i += 1
+            continue
+        if tok in CURL_SAFE_NO_ARG:
+            i += 1
+            continue
+        if tok in CURL_SAFE_WITH_ARG:
+            if i + 1 >= len(argv):
+                return False
+            i += 2  # consumes this flag's argument, whatever it is
+            continue
+        if "=" in tok and tok.split("=", 1)[0] in CURL_SAFE_WITH_ARG:
+            i += 1
+            continue
+        return False
+    return urls == 1
+
+
 def _bash_is_safe(command: str) -> bool:
     if not command or any(ch in command for ch in FORBIDDEN):
         return False
@@ -38,6 +67,8 @@ def _bash_is_safe(command: str) -> bool:
     if not argv:
         return False
     head = argv[0]
+    if head == "curl":
+        return _curl_is_safe(argv)
     if head == "open":
         if len(argv) == 3 and argv[1] == "-a":
             app_name = argv[2]
