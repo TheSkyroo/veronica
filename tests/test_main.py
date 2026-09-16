@@ -383,3 +383,31 @@ def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):
     assert ok is False
     out = capsys.readouterr().out
     assert "[tool] Bash: rm x -> declined" in out
+
+
+async def test_proactive_adapters_raise_on_pim_error(monkeypatch, tmp_home):
+    """A Calendar/Reminders failure (timeout, Automation denied) must reach
+    Proactive as an exception, not as 'Nothing on your calendar today.'"""
+    from veronica.tools import pim as pim_tools
+
+    async def boom(args):
+        return {"content": [{"type": "text", "text": "boom"}], "is_error": True}
+
+    async def count():
+        return 0
+
+    monkeypatch.setattr(pim_tools.calendar_events, "handler", boom)
+    monkeypatch.setattr(pim_tools.reminders_due, "handler", boom)
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
+
+    pro = (await _build_audio_orch(monkeypatch)).proactive
+    with pytest.raises(RuntimeError, match="boom"):
+        await pro._calendar_events("today", 1)
+    with pytest.raises(RuntimeError, match="boom"):
+        await pro._reminders_due(1)
+
+    text = await pro.build_briefing()
+    assert "Nothing on your calendar" not in text
+    assert "Reminders due" not in text
+    assert text.startswith("Good ")
+    memory_tools.bind(None)

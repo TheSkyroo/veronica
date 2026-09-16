@@ -609,8 +609,12 @@ class Orchestrator:
     # -- proactive briefings & nudges (B2) ---------------------------------------
     @staticmethod
     def _time_spoken(hhmm: str) -> str:
-        """"07:30" -> "7:30" (how the confirmation reads it back)."""
-        return f"{int(hhmm[:2])}:{hhmm[3:]}"
+        """"07:30" -> "7:30 am", "18:00" -> "6 pm", "00:15" -> "12:15 am"
+        (how the confirmation reads a 24h HH:MM back)."""
+        hour, minute = int(hhmm[:2]), int(hhmm[3:5])
+        suffix = "am" if hour < 12 else "pm"
+        h12 = hour % 12 or 12
+        return f"{h12} {suffix}" if minute == 0 else f"{h12}:{minute:02d} {suffix}"
 
     async def _proactive_turn(self, action: tuple[str, object]) -> None:
         """Local fast path for the briefing/nudge intents: "brief me" speaks
@@ -622,8 +626,9 @@ class Orchestrator:
             return
         sched = self.proactive.schedule
         if kind == "brief_now":
-            self._emit("tool", {"summary": "Briefing", "decision": "auto"})
-            await self.say(await self.proactive.build_briefing())
+            # Dispatched through _run_with_barge by one_turn (see
+            # _brief_now_turn), so a long briefing can be cut off.
+            await self._brief_now_turn()
             return
         if kind == "briefing_on":
             sched.briefing_enabled = True
@@ -644,6 +649,15 @@ class Orchestrator:
         proactive_mod.save_schedule(sched)
         self._emit("tool", {"summary": "Update briefing schedule", "decision": "auto"})
         await self.say(reply)
+
+    async def _brief_now_turn(self) -> None:
+        """"brief me": fetch (Calendar/Mail/Reminders can take a few seconds,
+        so show "thinking") and speak the briefing."""
+        self._emit("tool", {"summary": "Briefing", "decision": "auto"})
+        self._set("thinking")
+        text = await self.proactive.build_briefing()
+        self._set("speaking")
+        await self.say(text)
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -990,6 +1004,15 @@ class Orchestrator:
             elif voice_action is not None:
                 self.player.reset()
                 await self._voice_turn(voice_action)
+            elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
+                self.player.reset()
+                barged = await self._run_with_barge(self._brief_now_turn())
+                if barged:
+                    pcm = await self._relisten(barged)
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
             elif proactive_action is not None:
                 self.player.reset()
                 await self._proactive_turn(proactive_action)
@@ -1055,13 +1078,19 @@ class Orchestrator:
             await self.say("I'm back.")
 
     # -- announcements ----------------------------------------------------------
-    async def announce(self, text: str) -> None:
+    async def announce(self, text: str, *, expires_at: dt.datetime | None = None) -> None:
         """Queue `text` to be spoken next time we're idle (e.g. a timer
         firing): never interrupts an in-flight turn. Safe to call from any
-        task (e.g. TimerService's on_fire callback)."""
-        await self._announce_queue.put(text)
+        task (e.g. TimerService's on_fire callback). An announcement with
+        `expires_at` in the past by the time it's delivered (a "starts in 5
+        minutes" nudge that sat behind a long turn) is dropped, not spoken."""
+        await self._announce_queue.put((text, expires_at))
 
-    async def _deliver_announcement(self, text: str) -> None:
+    async def _deliver_announcement(self, item: tuple[str, dt.datetime | None]) -> None:
+        text, expires_at = item
+        if expires_at is not None and expires_at < dt.datetime.now():
+            log.info("announcement expired: %r", text)
+            return
         self._set("speaking")
         self.player.reset()
         await self.chime(self.s.chime_wake_hz, 120)

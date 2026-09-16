@@ -46,9 +46,11 @@ class Clock:
 
 def make(schedule, events="No events.", mail=0, reminders="No reminders due.", now=None):
     said = []
-    calls = {"events": 0}
+    calls = {"events": 0, "expires": []}
 
-    async def announce(t): said.append(t)
+    async def announce(t, expires_at=None):
+        said.append(t)
+        calls["expires"].append(expires_at)
     async def cal(day, days):
         calls["events"] += 1
         return events
@@ -165,3 +167,17 @@ async def test_start_stop_runs_tick_loop():
     await asyncio.sleep(0.05)
     p.stop()
     assert len(said) == 1
+
+
+async def test_nudge_expires_at_event_start_and_briefing_never():
+    ev = "09:30–10:00  Standup (Work)"
+    p, said, clock, calls = make(pr.Schedule(nudges_enabled=True, nudge_minutes=5), events=ev)
+    clock.t = dt.datetime(2026, 9, 16, 9, 26)
+    await p.tick()
+    assert said == ["Heads up, Standup starts in 4 minutes."]
+    assert calls["expires"] == [dt.datetime(2026, 9, 16, 9, 30)]
+
+    p, said, clock, calls = make(pr.Schedule(briefing_enabled=True, briefing_time="08:00"))
+    await p.tick()
+    assert len(said) == 1 and said[0].startswith("Good morning")
+    assert calls["expires"] == [None]

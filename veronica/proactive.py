@@ -1,13 +1,16 @@
 """Proactive announcements: a scheduled daily briefing and "heads up"
 nudges before calendar events. Composes text from the pim tool outputs
 and hands it to Orchestrator.announce(), which only speaks when idle and
-not muted — this module never touches audio itself."""
+not muted — this module never touches audio itself. A nudge carries
+expires_at=<event start> so one that's still queued when the meeting has
+already begun is dropped instead of spoken late."""
 import asyncio
 import datetime as dt
 import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from typing import Protocol
 
 from veronica import prefs
 
@@ -111,6 +114,10 @@ def _clock(t: dt.datetime) -> str:
     return f"{t.hour}:{t.minute:02d}"
 
 
+class Announce(Protocol):
+    def __call__(self, text: str, *, expires_at: dt.datetime | None = None) -> Awaitable[None]: ...
+
+
 # -- the ticker --------------------------------------------------------------
 class Proactive:
     TICK_S = 60
@@ -123,7 +130,7 @@ class Proactive:
     def __init__(
         self,
         schedule: Schedule,
-        announce: Callable[[str], Awaitable[None]],
+        announce: Announce,
         calendar_events: Callable[[str, int], Awaitable[str]],
         mail_unread_count: Callable[[], Awaitable[int]],
         reminders_due: Callable[[int], Awaitable[str]],
@@ -240,4 +247,4 @@ class Proactive:
             self._nudged.add(key)
             mins = max(1, int(round(delta.total_seconds() / 60)))
             when = "in a minute" if mins == 1 else f"in {mins} minutes"
-            await self._announce(f"Heads up, {e.title} starts {when}.")
+            await self._announce(f"Heads up, {e.title} starts {when}.", expires_at=e.start)

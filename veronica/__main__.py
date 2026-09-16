@@ -43,9 +43,17 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
     # (or a mail count) and composes the announcement itself.
+    # A failed fetch (timeout, Automation denied) raises so build_briefing's
+    # guarded fetch logs it and drops the sentence, rather than reading the
+    # error text as "Nothing on your calendar today."
+    def _text_or_raise(res: dict) -> str:
+        text = res["content"][0]["text"]
+        if res.get("is_error"):
+            raise RuntimeError(text)
+        return text
+
     async def _cal(day: str, days: int) -> str:
-        res = await pim.calendar_events.handler({"day": day, "days": days})
-        return res["content"][0]["text"]
+        return _text_or_raise(await pim.calendar_events.handler({"day": day, "days": days}))
 
     async def _mail_count() -> int:
         # Mail's own unread count is the real number; the listing is capped
@@ -58,8 +66,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         return proactive.count_mail(res["content"][0]["text"]) if not res.get("is_error") else 0
 
     async def _rem(days: int) -> str:
-        res = await pim.reminders_due.handler({"days": days})
-        return res["content"][0]["text"]
+        return _text_or_raise(await pim.reminders_due.handler({"days": days}))
 
     pro = None
     if audio:
@@ -68,7 +75,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         # never runs before the orchestrator exists.
         pro = proactive.Proactive(
             proactive.Schedule.from_prefs(saved.get("proactive", {})),
-            announce=lambda t: holder["orch"].announce(t),
+            announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
             calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
         )
     orch = Orchestrator(
