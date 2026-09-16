@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 import logging
+import queue
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -62,14 +63,51 @@ class WhisperWake:
         self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
         self._buf = np.zeros(0, dtype=np.int16)
         self.preroll = np.zeros(0, dtype=np.int16)
+        # Frames still queued by the mic reader thread; _wait skips a hop's
+        # transcription while there's more than a hop of backlog so it
+        # catches up to real time instead of analysing ever-older audio.
+        self._backlog: Callable[[], int] = lambda: 0
 
     def _mic_frames(self) -> Iterator[bytes]:
-        # Relies on CPython refcounting to close the stream (via __exit__) as soon as
-        # this generator is garbage-collected when _wait returns/breaks out of the loop.
-        with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK) as stream:
+        """Mic frames, read on a dedicated thread into a queue.
+
+        The wake loop transcribes a window every hop and tiny.en can take
+        longer than one hop under CPU load; reading the device inline would
+        let PortAudio's ring buffer overflow during that stall and silently
+        drop audio — chopping the wake word in half. The reader thread keeps
+        draining the device no matter how long a transcription takes, so
+        the loop only ever falls behind, never loses frames. Closing this
+        generator (or _wait returning) stops the thread and the stream."""
+        q: queue.Queue[bytes | None] = queue.Queue()
+        done = threading.Event()
+
+        def reader() -> None:
+            try:
+                with sd.RawInputStream(
+                    samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK
+                ) as stream:
+                    while not done.is_set():
+                        data, overflowed = stream.read(CHUNK)
+                        if overflowed:
+                            log.warning("wake mic overflow (reader thread stalled)")
+                        q.put(bytes(data))
+            except Exception:
+                log.exception("wake mic reader died")
+            finally:
+                q.put(None)
+
+        t = threading.Thread(target=reader, name="wake-mic", daemon=True)
+        t.start()
+        self._backlog = q.qsize
+        try:
             while True:
-                data, _ = stream.read(CHUNK)
-                yield bytes(data)
+                frame = q.get()
+                if frame is None:
+                    return
+                yield frame
+        finally:
+            done.set()
+            self._backlog = lambda: 0
 
     def stop(self) -> None:
         """Request that the in-flight (or next) wait() stop. Thread-safe, one-shot: a
@@ -143,6 +181,8 @@ class WhisperWake:
             if since_hop < self._hop_samples:
                 continue
             since_hop = 0
+            if self._backlog() * CHUNK > self._hop_samples:
+                continue  # behind real time: catch up before transcribing again
             if rms(self._buf) < self.s.wake_min_rms:
                 continue
             segments = self._transcribe(self._buf)

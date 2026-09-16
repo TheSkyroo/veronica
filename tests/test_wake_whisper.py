@@ -218,3 +218,72 @@ async def test_own_speech_suppression_is_fuzzy(monkeypatch):
     w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
     suppress_texts = iter(["Veronika's here to help.", ""])
     assert await _wait_for(w.wait(suppress=lambda: next(suppress_texts)), 3) is True
+
+
+def test_mic_frames_buffers_while_consumer_stalls(monkeypatch):
+    """The mic is read on its own thread into a queue, so a slow consumer
+    (whisper taking longer than one hop) never makes PortAudio overflow and
+    drop audio: every frame the device produced is delivered, in order."""
+    import threading
+    import time
+
+    from veronica.audio import wake_whisper as ww
+
+    produced = []
+
+    class FakeStream:
+        def __init__(self, **kw):
+            self.n = 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self, n):
+            self.n += 1
+            time.sleep(0.001)
+            frame = self.n.to_bytes(4, "little") * (n // 4)
+            produced.append(frame)
+            return frame, False
+
+    monkeypatch.setattr(ww.sd, "RawInputStream", FakeStream)
+    w = ww.WhisperWake.__new__(ww.WhisperWake)
+    w.s = ww.Settings()
+    frames = w._mic_frames()
+    got = [next(frames)]
+    time.sleep(0.05)              # consumer stalls; producer keeps reading
+    for _ in range(20):
+        got.append(next(frames))
+    assert got == produced[: len(got)]      # nothing dropped, in order
+    assert len(produced) > len(got)          # producer ran ahead into the queue
+    frames.close()
+    time.sleep(0.02)
+    assert not any(t.name == "wake-mic" and t.is_alive() for t in threading.enumerate())
+
+
+async def test_wait_skips_transcription_while_behind(monkeypatch):
+    """When the mic reader has more than a hop of frames queued, the loop
+    catches up instead of transcribing stale windows."""
+    from veronica.audio import wake_whisper as ww
+
+    calls = []
+
+    class Model:
+        def __init__(self, *a, **k): pass
+        def transcribe(self, audio, **kw):
+            calls.append(len(audio))
+            return iter([]), None
+
+    monkeypatch.setattr(ww.WhisperWake, "_model_cls", Model)
+    loud = (np.ones(ww.CHUNK, dtype=np.int16) * 3000).tobytes()
+    n_frames = 60
+    w = ww.WhisperWake(ww.Settings(), frames=lambda: iter([loud] * n_frames))
+    hops = {"n": 0}
+
+    def backlog():
+        hops["n"] += 1
+        # pretend the reader is 10 frames ahead for the first 10 hops
+        return 10 if hops["n"] <= 10 else 0
+
+    w._backlog = backlog
+    assert await w.wait() is False      # frames exhausted without a match
+    assert 0 < len(calls) <= 2      # only the final, caught-up hop(s) are transcribed
