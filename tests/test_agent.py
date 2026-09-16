@@ -5,7 +5,7 @@ import datetime as dt
 import pytest
 
 from veronica.brain import agent as agent_mod
-from veronica.brain.agent import Brain, summarize_tool
+from veronica.brain.agent import Brain, summarize_detail, summarize_tool
 from veronica.brain.prompts import system_prompt
 from veronica.config import Settings
 
@@ -191,6 +191,32 @@ async def test_stream_exception_closes_client(brain, monkeypatch):
     with pytest.raises(RuntimeError):
         [s async for s in brain.ask("x")]
     assert brain._client is None
+
+
+def test_summarize_tool_prefers_description():
+    inp = {"command": "curl -s https://wttr.in", "description": "Fetch weather from wttr.in"}
+    assert summarize_tool("Bash", inp) == "Fetch weather from wttr.in"
+    assert summarize_detail("Bash", inp) == "Bash: curl -s https://wttr.in"
+
+
+def test_summarize_tool_description_stripped_truncated_no_trailing_period():
+    long_desc = "  " + ("a" * 90) + ".  "
+    inp = {"command": "ls", "description": long_desc}
+    result = summarize_tool("Bash", inp)
+    assert len(result) <= 80
+    assert not result.endswith(".")
+    assert result == "a" * 80
+
+
+def test_summarize_tool_ignores_blank_or_missing_description():
+    assert summarize_tool("Bash", {"command": "ls -la", "description": ""}) == "Bash: ls -la"
+    assert summarize_tool("Bash", {"command": "ls -la", "description": "   "}) == "Bash: ls -la"
+    assert summarize_tool("Bash", {"command": "ls -la"}) == "Bash: ls -la"
+
+
+def test_summarize_detail_always_raw():
+    assert summarize_detail("Write", {"file_path": "/x/notes.txt", "description": "Save notes"}) == "Write file /x/notes.txt"
+    assert summarize_detail("Foo", {"a": 1}) == "Foo"
 
 
 def test_summarize_mac_tools():

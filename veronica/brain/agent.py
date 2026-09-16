@@ -26,6 +26,13 @@ MAC_PREFIX = "mcp__mac__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
+    description = input.get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()[:80].rstrip(".")
+    return summarize_detail(tool_name, input)
+
+
+def summarize_detail(tool_name: str, input: dict) -> str:
     if tool_name.startswith(MAC_PREFIX):
         short = tool_name[len(MAC_PREFIX):]
         if short == "open_app":
