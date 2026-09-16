@@ -188,8 +188,36 @@ async def test_options_wired(brain):
     assert "mac" in o.mcp_servers
     assert "pim" in o.mcp_servers
     assert "memory" in o.mcp_servers
+    assert "screen" in o.mcp_servers
+    assert "music" in o.mcp_servers
     assert not o.allowed_tools
     assert o.cwd == str(Path.home())
+
+
+async def test_ask_with_images_sends_content_block_message(brain):
+    out = [s async for s in brain.ask("what's on my screen", images=[b"\x89PNG-fake"])]
+    assert out == ["Hello there.", "How are you?"]
+    prompt = FakeClient.instances[0].queries[0]
+    # Not a plain string: the SDK's query() accepts str | AsyncIterable[dict]
+    # and treats an AsyncIterable specially, so images must be sent that way.
+    assert not isinstance(prompt, str)
+    messages = [m async for m in prompt]
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg["type"] == "user"
+    content = msg["message"]["content"]
+    assert content[0] == {"type": "text", "text": "what's on my screen"}
+    img = content[1]
+    assert img["type"] == "image"
+    assert img["source"]["type"] == "base64"
+    assert img["source"]["media_type"] == "image/png"
+    import base64
+    assert base64.b64decode(img["source"]["data"]) == b"\x89PNG-fake"
+
+
+async def test_ask_without_images_sends_plain_string(brain):
+    [s async for s in brain.ask("hi")]
+    assert FakeClient.instances[0].queries[0] == "hi"
 
 
 class FakeMemory:
@@ -400,6 +428,18 @@ def test_summarize_tool_ignores_blank_or_missing_description():
 def test_summarize_detail_always_raw():
     assert summarize_detail("Write", {"file_path": "/x/notes.txt", "description": "Save notes"}) == "Write file /x/notes.txt"
     assert summarize_detail("Foo", {"a": 1}) == "Foo"
+
+
+def test_summarize_screen_and_music_tools():
+    assert summarize_detail("mcp__screen__screenshot", {"region": "screen"}) == "Look at screen"
+    assert summarize_tool("mcp__screen__screenshot", {"region": "window"}) == "Look at screen"
+    assert summarize_detail("mcp__music__music_play", {"query": "jazz"}) == "Play jazz"
+    assert summarize_detail("mcp__music__music_play", {}) == "Play music"
+    assert summarize_detail("mcp__music__music_pause", {}) == "Pause music"
+    assert summarize_detail("mcp__music__music_next", {}) == "Next track"
+    assert summarize_detail("mcp__music__music_prev", {}) == "Previous track"
+    assert summarize_detail("mcp__music__music_now_playing", {}) == "What's playing"
+    assert summarize_detail("mcp__music__music_volume", {"level": 50}) == "Set music volume 50"
 
 
 def test_summarize_mac_tools():

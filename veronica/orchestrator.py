@@ -9,8 +9,9 @@ from typing import Any
 import numpy as np
 
 from veronica.audio.chime import tone
-from veronica.brain.intents import match_intent, match_memory_intent, normalize
+from veronica.brain.intents import match_intent, match_memory_intent, match_screen_intent, normalize
 from veronica.config import Settings
+from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
 
 log = logging.getLogger("veronica.orchestrator")
@@ -213,7 +214,7 @@ class Orchestrator:
             self.player.reset()
             await self.player.play(tone(freq_hz, ms))
 
-    async def handle_text(self, text: str) -> list[str]:
+    async def handle_text(self, text: str, images: list[bytes] = ()) -> list[str]:
         """Ask the brain and speak each sentence; synth N+1 overlaps playback of N."""
         self._set("thinking")
         self._barged = False   # fresh turn: any earlier barge no longer applies
@@ -225,7 +226,11 @@ class Orchestrator:
 
         async def producer():
             try:
-                async for sent in self.brain.ask(text):
+                # Only pass `images=` when there actually are any, so test
+                # doubles for Brain.ask(text) that don't accept the kwarg
+                # keep working unchanged.
+                ask_iter = self.brain.ask(text, images=images) if images else self.brain.ask(text)
+                async for sent in ask_iter:
                     spoken.append(sent)
                     # Enqueue at yield time (synth kicked off but not
                     # necessarily finished) so: (a) maxsize=2 bounds how far
@@ -326,6 +331,21 @@ class Orchestrator:
         elif self.store is not None and self.s.memory_enabled:
             self.store.add_turn(text, " ".join(spoken))
         return spoken
+
+    # -- screen awareness -------------------------------------------------------
+    async def _screen_turn(self, text: str) -> list[str]:
+        """Local fast path for "what's on my screen"-style utterances:
+        capture the screen ourselves (no ambiguity about which tool to call,
+        no extra round trip) and hand both the text and the image to the
+        brain in one turn."""
+        self._emit("tool", {"summary": "Look at screen", "decision": "auto"})
+        await self.chime(self.s.chime_wake_hz, 80)
+        result = await asyncio.to_thread(capture_screenshot, "screen")
+        if isinstance(result, str):
+            log.warning("screen capture failed: %s", result)
+            return await self.handle_text(text)
+        data, _path = result
+        return await self.handle_text(text, images=[data])
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
@@ -498,6 +518,7 @@ class Orchestrator:
                 self._set("idle")
                 return
             mem = None if intent is not None else match_memory_intent(text)
+            screen_intent = intent is None and mem is None and match_screen_intent(text)
             if intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
@@ -530,6 +551,14 @@ class Orchestrator:
                     return
                 self.player.reset()
                 await self.say("Sorry, didn't catch that.")
+            elif screen_intent:
+                barged = await self._run_with_barge(self._screen_turn(text))
+                if barged:
+                    pcm = await self._listen_after_wake()
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
             else:
                 barged = await self._run_with_barge(self.handle_text(text))
                 if barged:

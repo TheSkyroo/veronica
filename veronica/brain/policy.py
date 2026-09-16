@@ -60,6 +60,19 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "fact_add": "confirm",
         "fact_delete": "confirm",
     },
+    "screen": {
+        # Read-only and local: no network, no file changes outside our own
+        # scratch dir.
+        "screenshot": "allow",
+    },
+    "music": {
+        "music_play": "allow",
+        "music_pause": "allow",
+        "music_next": "allow",
+        "music_prev": "allow",
+        "music_now_playing": "allow",
+        "music_volume": "allow",
+    },
 }
 
 MCP_PREFIX_FMT = "mcp__{server}__"

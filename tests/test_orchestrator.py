@@ -1722,3 +1722,57 @@ async def test_remember_without_store_still_says_got_it():
     assert o.store is None
     await o.one_turn()
     assert "Got it." in o.tts.said
+
+
+# -- batch A: screen awareness fast path --------------------------------------
+
+import veronica.orchestrator as orchestrator_mod
+
+
+class ImageBrain:
+    def __init__(self):
+        self.asked = []
+
+    async def ask(self, text, images=()):
+        self.asked.append((text, tuple(images)))
+        yield "I see a browser."
+
+
+async def test_screen_intent_captures_and_sends_image(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator_mod, "capture_screenshot", lambda region: (b"PNGDATA", "/tmp/x.png")
+    )
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's on my screen"])
+    o.brain = ImageBrain()
+    await o.one_turn()
+    assert o.brain.asked == [("what's on my screen", (b"PNGDATA",))]
+    assert ("tool", {"summary": "Look at screen", "decision": "auto"}) in ev
+    assert "I see a browser." in o.tts.said
+
+
+async def test_screen_intent_capture_failure_falls_back_to_text_only():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["look at my screen"])
+
+    async def fake_to_thread(fn, *a, **k):
+        return "denied"
+
+    orig_to_thread = asyncio.to_thread
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(asyncio, "to_thread", fake_to_thread)
+        await o.one_turn()
+    assert o.brain.asked == ["look at my screen"]
+
+
+async def test_handle_text_with_images_calls_brain_ask_with_images():
+    o, _ = build()
+    o.brain = ImageBrain()
+    await o.handle_text("describe this", images=[b"abc"])
+    assert o.brain.asked == [("describe this", (b"abc",))]
+
+
+async def test_handle_text_without_images_omits_kwarg():
+    """A Brain.ask(text) fake without an images param must keep working when
+    handle_text is called with no images (the common, non-screen path)."""
+    o, _ = build()
+    await o.handle_text("hi")
+    assert o.brain.asked == ["hi"]

@@ -1,6 +1,6 @@
 import pytest
 
-from veronica.brain.intents import match_intent, match_memory_intent, normalize
+from veronica.brain.intents import match_intent, match_memory_intent, match_screen_intent, normalize
 
 
 @pytest.mark.parametrize(
@@ -126,3 +126,26 @@ def test_normalize_strips_punctuation_and_case():
 )
 def test_match_memory_intent(heard, expected):
     assert match_memory_intent(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("what's on my screen", True),
+        ("what is on my screen", True),
+        ("Veronica, what's on my screen?", True),
+        ("look at my screen", True),
+        ("look at the screen", True),
+        ("summarize this page", True),
+        ("summarize this screen", True),
+        ("summarize my screen", True),
+        ("what does this error say", True),
+        ("what does this say", True),
+        ("can you look at my screen", True),
+        ("what time is it", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_match_screen_intent(heard, expected):
+    assert match_screen_intent(heard) == expected

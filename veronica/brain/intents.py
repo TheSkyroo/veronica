@@ -46,6 +46,17 @@ QUIT_PHRASES = frozenset({
     "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely",
 })
 
+# Screen-awareness fast path: matched exactly like the other local intents
+# (whole-utterance, then clause-by-clause), but kept separate from
+# match_intent's Intent enum since it doesn't end the turn — it feeds the
+# brain a screenshot instead of skipping it.
+SCREEN_PHRASES = frozenset({
+    "whats on my screen", "what is on my screen", "what's on my screen",
+    "look at my screen", "look at the screen",
+    "summarize this page", "summarize this screen", "summarize my screen",
+    "what does this error say", "what does this say",
+})
+
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"
 
@@ -144,6 +155,24 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
                 return None
             return (kind, arg)
     return None
+
+
+def match_screen_intent(text: str) -> bool:
+    """True if `text` (as-spoken) asks Veronica to look at the screen —
+    matched the same way as match_intent (whole utterance, then each
+    clause), against SCREEN_PHRASES."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        if candidate in SCREEN_PHRASES:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in SCREEN_PHRASES:
+                return True
+    return False
 
 
 def match_intent(text: str) -> Intent | None:
