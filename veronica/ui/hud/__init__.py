@@ -14,13 +14,36 @@ NON_IDLE = frozenset({"listening", "thinking", "speaking", "followup", "confirmi
 MODES = frozenset({"full", "mini"})
 
 
+def _webview_class():
+    """Lazily build the draggable WKWebView subclass (imports WebKit here,
+    not at module scope, so this file still imports — and its unit tests
+    still run — on machines without PyObjC/WebKit installed).
+
+    WKWebView returns NO for mouseDownCanMoveWindow by default, so the
+    panel's setMovableByWindowBackground_(True) never fires for a click
+    that lands on the web view — i.e. almost the entire panel. Override it
+    (and acceptsFirstMouse_, so the very first click on this non-activating
+    panel starts a drag instead of just activating/focusing it) to make the
+    HUD draggable through the web view."""
+    import WebKit
+
+    class _DraggableWebView(WebKit.WKWebView):
+        def mouseDownCanMoveWindow(self):
+            return True
+
+        def acceptsFirstMouse_(self, event):
+            return True
+
+    return _DraggableWebView
+
+
 def _real_webview(s: Settings):
     import AppKit
     import Foundation
     import WebKit
 
     cfg = WebKit.WKWebViewConfiguration.alloc().init()
-    web = WebKit.WKWebView.alloc().initWithFrame_configuration_(
+    web = _webview_class().alloc().initWithFrame_configuration_(
         Foundation.NSMakeRect(0, 0, s.hud_width, s.hud_height), cfg)
     web.setValue_forKey_(False, "drawsBackground")
     # Fill whatever size the panel's content view ends up being (mini <->

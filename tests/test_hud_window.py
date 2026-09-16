@@ -475,6 +475,30 @@ def test_push_after_loaded_evaluates_immediately():
     ]
 
 
+def test_webview_class_is_draggable_through_the_page(monkeypatch):
+    """WKWebView returns NO for mouseDownCanMoveWindow by default, so the
+    panel's setMovableByWindowBackground_ never fires for a click landing on
+    the web view. _webview_class() must build a WKWebView subclass that
+    overrides mouseDownCanMoveWindow (and acceptsFirstMouse_, so the first
+    click on the non-activating panel starts a drag rather than just
+    activating it) to True."""
+    import types as _types
+
+    class FakeWKWebView:
+        pass
+
+    fake_webkit = _types.SimpleNamespace(WKWebView=FakeWKWebView)
+    monkeypatch.setitem(sys.modules, "WebKit", fake_webkit)
+
+    from veronica.ui.hud import _webview_class
+
+    cls = _webview_class()
+    assert issubclass(cls, FakeWKWebView)
+    instance = cls.__new__(cls)
+    assert instance.mouseDownCanMoveWindow() is True
+    assert instance.acceptsFirstMouse_(None) is True
+
+
 def test_close_before_load_discards_pending_queue():
     h, web, _, _ = make(mark_loaded=False)
     h.push({"kind": "mic", "payload": 0.1})
