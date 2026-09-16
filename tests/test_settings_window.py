@@ -184,3 +184,25 @@ def test_push_state_never_raises_when_main_fails():
     sw = SettingsWindow(Settings(), bridge, webview_factory=lambda s, o: web,
                         window_factory=lambda s, w, o: win, main=bad_main, activate=lambda: None)
     sw.push_state({"a": 1})                    # swallowed, logged
+
+
+def test_plain_converts_mapping_and_sequence_bodies():
+    from collections import UserDict
+
+    from veronica.ui.settings import _plain
+
+    body = UserDict({"id": 3, "cmd": "set", "args": UserDict({"value": ("a", "b"), "n": 1.5, "ok": True, "none": None})})
+    out = _plain(body)
+    assert out == {"id": 3, "cmd": "set", "args": {"value": ["a", "b"], "n": 1.5, "ok": True, "none": None}}
+    assert type(out) is dict and type(out["args"]) is dict and type(out["args"]["value"]) is list
+    assert _plain(b"bytes") == "bytes"
+
+
+def test_on_message_accepts_userdict_body():
+    from collections import UserDict
+
+    sw, web, _, bridge, _ = make()
+    sw._on_message(UserDict({"id": 4, "cmd": "set", "args": UserDict({"section": "brain", "key": "effort", "value": "low"})}))
+    assert bridge.calls == [("set", {"section": "brain", "key": "effort", "value": "low"})]
+    assert type(bridge.calls[0][1]) is dict
+    assert web.js[0].startswith("window.settings.reply(4, ")

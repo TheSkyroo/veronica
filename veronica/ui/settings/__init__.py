@@ -41,8 +41,10 @@ def _plain(obj):
     (json-able, and what the bridge's coercion expects)."""
     if isinstance(obj, Mapping):
         return {str(k): _plain(v) for k, v in obj.items()}
-    if isinstance(obj, (str, bytes)):
-        return str(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", "replace")
+    if isinstance(obj, str):
+        return str(obj)   # objc.pyobjc_unicode → plain str
     if isinstance(obj, Sequence):
         return [_plain(v) for v in obj]
     return obj

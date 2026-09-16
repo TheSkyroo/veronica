@@ -248,3 +248,97 @@ def test_about_buttons_and_status_line():
         page.keyboard.press("Enter")
         assert page.get_attribute("#pane", "data-tab") == "voice"
         browser.close()
+
+
+@pytest.mark.live
+def test_state_push_keeps_typing_and_focus_without_posting():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('brain')")
+        page.click("#pane input[data-key=brain_cwd]")
+        page.keyboard.press("End")
+        page.keyboard.type("/proj")
+        n = len(sent(page))
+        page.evaluate("s => window.settings.state(s)", fixture_state())
+        assert page.input_value("#pane input[data-key=brain_cwd]") == "/Users/me/proj"
+        assert page.evaluate("document.activeElement === document.querySelector('#pane input[data-key=brain_cwd]')")
+        assert page.evaluate("document.activeElement.selectionStart") == len("/Users/me/proj")
+        assert len(sent(page)) == n                      # the half-typed value was not posted
+        page.keyboard.press("Enter")                     # committing afterwards still works
+        assert sent(page)[-1]["args"] == {"section": "brain", "key": "brain_cwd", "value": "/Users/me/proj"}
+        # a focused select survives a push too
+        page.focus("#pane select[data-key=effort]")
+        page.evaluate("s => window.settings.state(s)", fixture_state())
+        assert page.evaluate("document.activeElement === document.querySelector('#pane select[data-key=effort]')")
+        browser.close()
+
+
+@pytest.mark.live
+def test_every_control_has_an_accessible_name():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        assert page.get_attribute("#tabs", "role") == "tablist"
+        for tab in TABS:
+            page.evaluate(f"window.settings.select({json.dumps(tab)})")
+            assert page.get_attribute(f"#tabs button[data-tab={tab}]", "role") == "tab"
+            assert page.get_attribute(f"#tabs button[data-tab={tab}]", "aria-selected") == "true"
+            assert page.locator("#tabs button[aria-selected=true]").count() == 1
+            unnamed = page.evaluate("""() => {
+              const out = [];
+              for (const c of document.querySelectorAll('#pane input, #pane select, #pane button')) {
+                let name = c.getAttribute('aria-label') || c.textContent.trim();
+                const by = c.getAttribute('aria-labelledby');
+                if (by) name = (document.getElementById(by) || {}).textContent || '';
+                if (!name.trim()) out.push(c.outerHTML.slice(0, 80));
+              }
+              return out;
+            }""")
+            assert unnamed == [], (tab, unnamed)
+        page.evaluate("window.settings.select('listening')")
+        assert page.get_by_label("Wake phrases", exact=False).input_value() == "veronica, hey veronica"
+        assert page.get_by_label("Search history").count() == 0
+        page.evaluate("window.settings.select('history')")
+        assert page.get_by_label("Search history").count() == 1
+        browser.close()
+
+
+@pytest.mark.live
+def test_forget_error_is_shown_and_about_status_resets():
+    from playwright.sync_api import sync_playwright
+
+    items = [{"id": 5, "ts": "2026-09-17T14:05:00", "heard": "hi", "reply": "Hello."}]
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('history')")
+        reply(page, sent(page)[-1]["id"], {"ok": True, "items": items, "message": ""})
+        page.click("#pane .turn button.forget")
+        reply(page, sent(page)[-1]["id"], {"ok": False, "message": "That one's already gone."})
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "history"
+        reply(page, msg["id"], {"ok": True, "items": items, "message": ""})
+        assert page.inner_text("#pane .history .notice") == "That one's already gone."
+        assert page.locator("#pane .history .turn").count() == 1
+        page.click("#pane .turn button.forget")            # next round trip clears the notice
+        reply(page, sent(page)[-1]["id"], {"ok": True, "message": ""})
+        reply(page, sent(page)[-1]["id"], {"ok": True, "items": [], "message": ""})
+        assert page.locator("#pane .history .notice").count() == 0
+
+        page.evaluate("window.settings.select('about')")
+        page.click("#pane button[data-cmd=update_now]")
+        reply(page, sent(page)[-1]["id"], {"ok": True, "message": "Updating, back in a moment."})
+        assert page.inner_text("#pane .about .status") == "Updating, back in a moment."
+        page.evaluate("s => window.settings.state(s)", fixture_state(about={"updating": True}))
+        assert page.inner_text("#pane .about .status") == ""          # the flag flipped: stale text gone
+        page.evaluate("s => window.settings.state(s)",
+                      fixture_state(about={"updating": False, "update": {"available": True, "detail": "The update failed, check the log."}}))
+        assert page.inner_text("#pane .about .status") == "The update failed, check the log."
+        page.click("#pane button[data-cmd=check_update]")
+        assert page.inner_text("#pane .about .status") == "Checking…"
+        page.evaluate("s => window.settings.state(s)",
+                      fixture_state(about={"update": {"available": True, "detail": "The update failed, check the log."}}))
+        assert page.inner_text("#pane .about .status") == "Checking…"  # unchanged detail: reply text stays
+        browser.close()

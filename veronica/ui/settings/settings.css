@@ -86,6 +86,7 @@ button:disabled{opacity:.45}
 .history .confirm{display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:12px;border-radius:9px;
   background:rgba(255,122,122,.10);border:1px solid rgba(255,122,122,.30)}
 .history .confirm .msg{flex:1}
+.history .notice{color:var(--red);padding:6px 0 10px}
 .history .empty,.history .loading{color:var(--dim);padding:24px 0;text-align:center}
 .turn{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:10px 0;border-bottom:1px solid var(--line)}
 .turn .when{grid-column:1;font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}

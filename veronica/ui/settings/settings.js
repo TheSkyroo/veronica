@@ -110,10 +110,12 @@
   function row(sec, key, spec, value) {
     const status = el('span', {class: 'status'});
     const r = el('div', {class: 'row' + (spec.disabled ? ' disabled' : ''), 'data-section': sec, 'data-key': key});
-    const label = el('span', {class: 'label', text: spec.label});
+    const labelId = 'label-' + sec + '-' + key;
+    const helpId = 'help-' + sec + '-' + key;
+    const label = el('span', {class: 'label', id: labelId, text: spec.label});
     if (spec.restart) label.appendChild(el('span', {class: 'restart-tag', text: 'restart'}));
     r.appendChild(label);
-    r.appendChild(el('span', {class: 'help', text: spec.help || ''}));
+    r.appendChild(el('span', {class: 'help', id: helpId, text: spec.help || ''}));
     const control = el('div', {class: 'control'});
     r.appendChild(control);
     r.appendChild(status);
@@ -148,6 +150,7 @@
                            oninput: e => { valueEl.textContent = fmt(e.target.value, spec); },
                            onchange: e => commit(spec.kind === 'int' ? parseInt(e.target.value, 10) : parseFloat(e.target.value))});
       revert = () => { input.value = Number(value); valueEl.textContent = fmt(value, spec); };
+      labelled(input, labelId, spec.help ? helpId : null);
       control.appendChild(input);
       control.appendChild(valueEl);
       return r;
@@ -159,6 +162,7 @@
       input.dataset.committed = shown;
       revert = () => { input.value = shown; input.dataset.committed = shown; };
       const submit = () => {
+        if (input.dataset.detaching) return;   // re-render pulled it out from under the caret
         const raw = input.value;
         if (raw === input.dataset.committed) return;
         input.dataset.committed = raw;
@@ -171,7 +175,13 @@
       input.addEventListener('blur', submit);
     }
     control.appendChild(input);
+    labelled(input, labelId, spec.help ? helpId : null);
     return r;
+  }
+
+  function labelled(input, labelId, helpId) {
+    input.setAttribute('aria-labelledby', labelId);
+    if (helpId) input.setAttribute('aria-describedby', helpId);
   }
 
   function settingRow(sec, key, extra) {
@@ -259,6 +269,11 @@
       const upd = a.update || {};
       const statusEl = el('div', {class: 'status'});
       about.statusEl = statusEl;
+      // A fresh update result / the updating flag flipping supersedes whatever
+      // the last button reply said.
+      const sig = (a.updating ? 'u' : '-') + '|' + (upd.detail || '');
+      if (about.sig !== undefined && about.sig !== sig) { about.text = ''; about.cls = ''; }
+      about.sig = sig;
       if (about.text) { statusEl.textContent = about.text; statusEl.className = 'status ' + (about.cls || ''); }
       else if (upd.detail) statusEl.textContent = upd.detail;
       const setStatus = (text, cls) => { about.text = text || ''; about.cls = cls || ''; statusEl.textContent = about.text; statusEl.className = 'status ' + about.cls; };
@@ -296,7 +311,7 @@
       ])];
     },
   };
-  const about = {text: '', cls: '', statusEl: null};
+  const about = {text: '', cls: '', statusEl: null, sig: undefined};
 
   // ---- history -----------------------------------------------------------------------------
   const history = {
@@ -305,7 +320,7 @@
       const root = el('div', {class: 'history'});
       this.root = root;
       const search = el('input', {type: 'text', class: 'search', placeholder: 'Search what you said or what she answered', value: this.query,
-                                  spellcheck: 'false', autocomplete: 'off'});
+                                  'aria-label': 'Search history', spellcheck: 'false', autocomplete: 'off'});
       search.addEventListener('input', () => {
         this.query = search.value;
         clearTimeout(this.timer);
@@ -320,7 +335,11 @@
           this.confirming = false;
           this.query = '';
           search.value = '';
-          post('clear_history').then(res => { this.message = res.ok === false ? (res.message || '') : ''; this.load(); });
+          post('clear_history').then(res => {
+            this.message = res.ok === false ? (res.message || 'Could not clear history.') : '';
+            this.sticky = !!this.message;
+            this.load();
+          });
           this.draw();
         }}),
         button('No', {class: 'btn no', onclick: () => { this.confirming = false; this.draw(); }}),
@@ -337,7 +356,9 @@
         if (q !== this.query) return;                  // a newer search is in flight
         this.loading = false;
         this.items = Array.isArray(res.items) ? res.items : [];
-        this.message = res.ok === false ? (res.message || '') : '';
+        if (res.ok === false) this.message = res.message || '';
+        else if (!this.sticky) this.message = '';
+        this.sticky = false;
         this.draw();
       });
     },
@@ -347,15 +368,19 @@
       root.querySelector('.confirm').classList.toggle('hidden', !this.confirming);
       const list = root.querySelector('.list');
       list.textContent = '';
-      if (this.message) list.appendChild(el('div', {class: 'empty', text: this.message}));
-      else if (this.loading && !this.items.length) list.appendChild(el('div', {class: 'loading', text: 'Loading…'}));
+      if (this.message) list.appendChild(el('div', {class: 'notice', role: 'alert', text: this.message}));
+      if (this.loading && !this.items.length) list.appendChild(el('div', {class: 'loading', text: 'Loading…'}));
       else if (!this.items.length) list.appendChild(el('div', {class: 'empty', text: this.query ? 'No matches.' : 'Nothing yet.'}));
       for (const t of this.items) {
         list.appendChild(el('div', {class: 'turn', 'data-id': t.id}, [
           el('div', {class: 'when', text: when(t.ts)}),
           el('div', {class: 'you', text: 'You: ' + (t.heard || '')}),
           el('div', {class: 'her', text: 'Veronica: ' + (t.reply || '')}),
-          button('Forget', {class: 'btn forget', onclick: () => post('forget_turn', {id: t.id}).then(() => this.load())}),
+          button('Forget', {class: 'btn forget', onclick: () => post('forget_turn', {id: t.id}).then(res => {
+            this.message = res.ok === false ? (res.message || 'Could not forget that.') : '';
+            this.sticky = !!this.message;
+            this.load();
+          })}),
         ]));
       }
     },
@@ -380,10 +405,14 @@
   function renderTabs() {
     if (tabsEl.childElementCount === 0) {
       for (const [name, label] of TABS) {
-        tabsEl.appendChild(el('button', {type: 'button', 'data-tab': name, text: label, onclick: () => window.settings.select(name)}));
+        tabsEl.appendChild(el('button', {type: 'button', role: 'tab', 'data-tab': name, text: label, onclick: () => window.settings.select(name)}));
       }
     }
-    for (const b of tabsEl.children) b.classList.toggle('active', b.dataset.tab === tab);
+    for (const b of tabsEl.children) {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
   }
 
   function render() {
@@ -401,12 +430,15 @@
       return;   // nothing on this tab renders from state; keep the list and its search box
     }
     paneEl.dataset.tab = tab;
+    // Chromium fires `blur` on a focused input that is removed from the DOM;
+    // flag it first so the text handler doesn't post the half-typed value.
+    if (active && paneEl.contains(active) && active.dataset) active.dataset.detaching = '1';
     paneEl.textContent = '';
     if (!model) { paneEl.appendChild(el('p', {class: 'lead', text: 'Loading…'})); return; }
     const parts = (renderers[tab] || renderers.general)();
     for (const p of parts) if (p) paneEl.appendChild(p);
     if (keep) {
-      const again = paneEl.querySelector('[data-key="' + keep.key + '"]');
+      const again = paneEl.querySelector('.control [data-key="' + keep.key + '"]');
       if (again) {
         if (keep.text != null && keep.text !== keep.committed && again.type === 'text') {
           again.value = keep.text;
