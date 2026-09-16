@@ -1,5 +1,6 @@
 """Typed macOS actions exposed to Claude as in-process MCP tools."""
 import asyncio
+import re
 import subprocess
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -33,6 +34,26 @@ def run(argv: list[str], stdin: str | None = None, ok_text: str | None = None) -
         return _ok(ok_text)
     out = done.stdout.strip()
     return _ok(out or "ok")
+
+
+# -- battery (plain helper, not a tool; used by the orchestrator's quick replies)
+_BATT_RE = re.compile(r"(\d{1,3})%;\s*(charging|discharging|charged|finishing charge|AC attached)", re.IGNORECASE)
+
+
+def read_battery(run=subprocess.run) -> tuple[int | None, str | None]:
+    """(percent, state) from `pmset -g batt`, state in charging|discharging|charged;
+    (None, None) if pmset is missing, times out, or reports no battery."""
+    try:
+        p = run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5)
+        m = _BATT_RE.search(p.stdout or "")
+    except Exception:
+        return None, None
+    if not m:
+        return None, None
+    state = m.group(2).lower()
+    if state in ("finishing charge", "ac attached"):
+        state = "charging"
+    return int(m.group(1)), state
 
 
 def _q(s: str) -> str:

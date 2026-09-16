@@ -12,6 +12,7 @@ import numpy as np
 from veronica import prefs
 from veronica import proactive as proactive_mod
 from veronica.audio.chime import tone
+from veronica.brain import quick
 from veronica.brain.intents import (
     is_stop_dictation,
     match_dictation_intent,
@@ -79,6 +80,9 @@ class Orchestrator:
         self.brain, self.tts, self.player = brain, tts, player
         self.partial_stt = partial_stt
         self.store = store
+        # Language of the current utterance ("en" or "hi"); set per utterance
+        # by the Hindi/Hinglish work, read by the quick replies.
+        self._utterance_lang = "en"
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
         self._on_quit = on_quit or (lambda: None)
@@ -659,6 +663,28 @@ class Orchestrator:
         self._set("speaking")
         await self.say(text)
 
+    # -- quick replies (C1) ------------------------------------------------------
+    async def _quick_turn(self, hit: quick.QuickReply, heard: str) -> None:
+        """Answer a trivial question (time, date, battery, volume, small talk,
+        arithmetic) locally, without the brain. For battery/volume the match
+        only carries the language; the value is read here."""
+        kind, reply = hit
+        lang = reply if kind in ("battery", "volume") else self._utterance_lang
+        if kind == "battery":
+            percent, state = await asyncio.to_thread(mac_tools.read_battery)
+            reply = quick.reply_for("battery", lang, percent=percent, state=state)
+        elif kind == "volume":
+            res = await mac_tools.volume_get.handler({})
+            try:
+                percent = None if res.get("is_error") else int(float(res["content"][0]["text"].strip()))
+            except (ValueError, KeyError, IndexError, TypeError):
+                percent = None
+            reply = quick.reply_for("volume", lang, percent=percent)
+        self._emit("tool", {"summary": "Quick reply", "decision": "auto"})
+        await self.say(reply)
+        if self.store is not None and self.s.memory_enabled:
+            self.store.add_turn(heard, reply)
+
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
         """Local fast path for "take a note: X" / "note that X": create the
@@ -958,9 +984,14 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
                 else match_proactive_intent(text)
             )
+            quick_hit = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None)
+                else quick.match_quick(text, lang=self._utterance_lang)
+            )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -1016,6 +1047,9 @@ class Orchestrator:
             elif proactive_action is not None:
                 self.player.reset()
                 await self._proactive_turn(proactive_action)
+            elif quick_hit is not None:
+                self.player.reset()
+                await self._quick_turn(quick_hit, text)
             elif dictation_intent:
                 barged = await self._run_with_barge(self._dictation_turn())
                 if barged:
