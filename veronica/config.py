@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     frame_ms: int = 30                 # webrtcvad frame size
     vad_aggressiveness: int = 2        # 0-3
-    vad_silence_ms: int = 800
+    vad_silence_ms: int = 600
     max_utterance_s: int = 15
     min_speech_ms: int = 300
-    followup_window_s: int = 8
+    followup_window_s: int = 4
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
 

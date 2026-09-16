@@ -1130,3 +1130,54 @@ async def test_partial_transcription_coalesces_while_one_in_flight():
     release.set()
     await asyncio.sleep(0.01)
 
+
+
+# -- item 4: stop eavesdropping (shorter follow-up, spoken end phrases) --------
+
+async def test_end_phrase_thanks_veronica_says_okay_and_goes_idle():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["thanks veronica"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+    assert "followup" not in states
+
+
+async def test_end_phrase_thank_you_veronica_says_okay():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["Thank you, Veronica!"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert o.brain.asked == []
+
+
+@pytest.mark.parametrize(
+    "heard",
+    ["that's all", "thats all", "that is all", "stop", "goodbye", "never mind", "nevermind"],
+)
+async def test_end_phrase_silent_variants_go_idle_without_speaking(heard):
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[heard])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+
+
+async def test_end_phrase_matches_case_and_punctuation_insensitively():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["Stop."])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+
+
+async def test_non_end_phrase_is_not_treated_as_end():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["stop the timer"])
+    await o.one_turn()
+    assert o.brain.asked == ["stop the timer"]
+
+
+async def test_followup_window_default_is_four_seconds():
+    assert Settings().followup_window_s == 4
+
+
+async def test_vad_silence_ms_default_is_600():
+    assert Settings().vad_silence_ms == 600
