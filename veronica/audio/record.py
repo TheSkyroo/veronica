@@ -139,6 +139,12 @@ class Recorder:
         self._capturing = True
         self._armed = True
 
+    def disarm(self) -> None:
+        """Undo arm() when the capture it was meant for never got scheduled."""
+        self._capturing = False
+        self._armed = False
+        self._hold = False
+
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000
 

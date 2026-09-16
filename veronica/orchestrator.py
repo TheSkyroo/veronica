@@ -489,9 +489,18 @@ class Orchestrator:
         # that gap (a PTT quick tap, a barge from the SDK's confirm task)
         # would otherwise be a silent no-op.
         arm = getattr(self.recorder, "arm", None)
-        if arm is not None:
-            arm(hold=kw.get("hold", False))
-        fut = asyncio.ensure_future(self.recorder.capture(**kw))
+        try:
+            if arm is not None:
+                arm(hold=kw.get("hold", False))
+            fut = asyncio.ensure_future(self.recorder.capture(**kw))
+        except BaseException:
+            # Nothing is capturing, so don't leave the armed flags set for
+            # the *next* capture to inherit (its stop() would be honored
+            # against a thread that never started).
+            if arm is not None:
+                self.recorder.disarm()
+            self._capture_in_flight = False
+            raise
         try:
             return await asyncio.shield(fut)
         except asyncio.CancelledError:

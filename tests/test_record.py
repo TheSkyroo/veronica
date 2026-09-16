@@ -551,3 +551,12 @@ async def test_arm_is_consumed_by_one_capture_and_capture_self_arms(monkeypatch)
     r._finish.set()                  # stale
     pcm = await r.capture()          # self-arms: stale flag cleared
     assert pcm is not None and not r._finish.is_set()
+
+
+def test_disarm_resets_arm_flags(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    rec = Recorder(Settings(), frames=lambda: iter([]))
+    rec.arm(hold=True)
+    assert rec._capturing and rec._armed and rec._hold
+    rec.disarm()
+    assert not rec._capturing and not rec._armed and not rec._hold
