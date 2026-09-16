@@ -89,6 +89,11 @@ class VeronicaApp(rumps.App):
             self.title = f"V {ICONS.get(self._state, '?')}"
 
     def _drain(self, _timer) -> None:
+        # If the backlog has grown past 1000 (the HUD/UI thread falling
+        # behind the producer), drop this batch's mic level rather than
+        # push a stale one: mic is a continuously-refreshed level meter,
+        # so the freshest reading is always about to replace it anyway,
+        # and skipping a push here is strictly cheaper than catching up.
         overflow = self._events.qsize() > 1000
         popped = []
         for _ in range(64):

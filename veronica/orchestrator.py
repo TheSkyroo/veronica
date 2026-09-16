@@ -78,6 +78,9 @@ class Orchestrator:
 
     # -- speaking -------------------------------------------------------------
     async def _say_unlocked(self, text: str) -> None:
+        # Called only while _speech_lock is already held (by say()/confirm()).
+        # Emit right before play so a listener never sees "sentence"/"voice"
+        # for audio that hasn't actually started playing yet.
         samples, sr = await self.tts.asynth(text)
         self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
         self._emit("sentence", text)
@@ -167,9 +170,12 @@ class Orchestrator:
                         self._set("speaking")
                         log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
                     if not self.muted:
-                        self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
-                        self._emit("sentence", sent)
                         async with self._speech_lock:
+                            # Emit right after acquiring the lock, immediately
+                            # before play, so a listener never sees these
+                            # events for audio that hasn't started yet.
+                            self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
+                            self._emit("sentence", sent)
                             await self.player.play(samples)
                 finally:
                     # Accounted for whether this item played cleanly, raised,

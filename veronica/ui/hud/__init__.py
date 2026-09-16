@@ -66,6 +66,7 @@ class HudWindow:
         self._main = main
         self._hide_at: float | None = None
         self._closed = False
+        self._fade_gen = 0
         self.available = False
         try:
             self._web = (webview_factory or _real_webview)(settings)
@@ -102,11 +103,13 @@ class HudWindow:
             try:
                 import AppKit
                 AppKit.NSAnimationContext.beginGrouping()
-                AppKit.NSAnimationContext.currentContext().setDuration_(0.15)
-                if then:
-                    AppKit.NSAnimationContext.currentContext().setCompletionHandler_(then)
-                self._panel.animator().setAlphaValue_(alpha)
-                AppKit.NSAnimationContext.endGrouping()
+                try:
+                    AppKit.NSAnimationContext.currentContext().setDuration_(0.15)
+                    if then:
+                        AppKit.NSAnimationContext.currentContext().setCompletionHandler_(then)
+                    self._panel.animator().setAlphaValue_(alpha)
+                finally:
+                    AppKit.NSAnimationContext.endGrouping()
             except Exception:
                 self._panel.setAlphaValue_(alpha)
                 if then:
@@ -114,6 +117,8 @@ class HudWindow:
         self._main(_do)
 
     def show(self) -> None:
+        self._fade_gen += 1
+
         def _do():
             self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(true)", None)
             self._panel.orderFrontRegardless()
@@ -121,10 +126,17 @@ class HudWindow:
         self._main(_do)
 
     def hide(self) -> None:
+        self._fade_gen += 1
+        gen = self._fade_gen
+
+        def _on_faded():
+            if gen == self._fade_gen:
+                self._panel.orderOut_(None)
+
         def _do():
             if not self._closed:
                 self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(false)", None)
-            self._fade(0.0, then=lambda: self._panel.orderOut_(None))
+            self._fade(0.0, then=_on_faded)
         self._main(_do)
 
     def close(self) -> None:

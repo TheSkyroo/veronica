@@ -85,6 +85,43 @@ def test_hud_robust_to_bad_events_and_clear():
 
 
 @pytest.mark.live
+def test_long_reply_and_followup_stay_in_card():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'heard', payload:'tell me a long story about the weather'})")
+        sentences = [
+            "This is a long first sentence about the weather that goes on for quite a while indeed.",
+            "This is a long second sentence about the weather that goes on for quite a while indeed.",
+            "This is a long third sentence about the weather that goes on for quite a while indeed.",
+        ]
+        for s in sentences:
+            page.evaluate("window.hud.push({kind:'sentence', payload:" + repr(s) + "})")
+        page.wait_for_function(
+            "document.querySelector('#reply .msg').textContent.length > 0", timeout=3000
+        )
+        page.wait_for_timeout(2000)  # let the typewriter catch up
+
+        tool_box = page.eval_on_selector("#tool", "el => el.getBoundingClientRect()")
+        heard_box = page.eval_on_selector("#heard", "el => el.getBoundingClientRect()")
+        assert tool_box["bottom"] <= 220
+        assert heard_box["top"] >= 0
+
+        # A second 'heard' (a follow-up) must clear the previous reply text
+        # immediately, before any new sentences arrive.
+        page.evaluate("window.hud.push({kind:'heard', payload:'and now a follow-up question'})")
+        assert page.inner_text("#reply .msg") == ""
+
+        browser.close()
+
+
+@pytest.mark.live
 def test_hud_setvisible_does_not_double_schedule_raf():
     from playwright.sync_api import sync_playwright
 

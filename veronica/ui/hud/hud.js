@@ -11,7 +11,9 @@
   };
   const model = {state:'idle', heard:'', reply:'', tool:null, mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:0};
+  const MAX_REPLY_LEN = 220;
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
+  let replySentences = [];
 
   const $ = id => document.getElementById(id);
   const heardEl = $('heard').querySelector('.msg');
@@ -24,6 +26,12 @@
     replyQueue = [];
     typing = false;
     if (pendingTimeout !== null) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+  }
+
+  function clearTurn() {
+    model.heard = ''; model.reply = ''; replySentences = []; clearReply();
+    replyEl.textContent = ''; heardEl.textContent = '';
+    model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = '';
   }
 
   function typeNext() {
@@ -56,17 +64,28 @@
         switch (kind) {
           case 'state':
             if (payload === 'listening' && model.state !== 'followup') {
-              model.heard = ''; model.reply = ''; clearReply();
-              replyEl.textContent = ''; heardEl.textContent = '';
-              model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = '';
+              clearTurn();
             }
             if (payload === 'confirming') model.confirmStart = performance.now();
             model.state = payload; break;
-          case 'heard': model.heard = payload || ''; heardEl.textContent = model.heard; break;
+          case 'heard': {
+            // A new user utterance (including a follow-up, which never
+            // passes through 'listening') starts a fresh turn: clear the
+            // previous reply/tool state so it doesn't bleed into this one.
+            clearTurn();
+            model.heard = payload || ''; heardEl.textContent = model.heard;
+            break;
+          }
           case 'sentence': {
             const s = String(payload ?? '');
             if (!s) break;
-            model.reply += (model.reply ? ' ' : '') + s; replyQueue.push(s); typeNext(); break;
+            replySentences.push(s);
+            let joined = replySentences.join(' ');
+            while (joined.length > MAX_REPLY_LEN && replySentences.length > 1) {
+              replySentences.shift();
+              joined = replySentences.join(' ');
+            }
+            model.reply = joined; replyQueue.push(s); typeNext(); break;
           }
           case 'tool': {
             const t = payload && typeof payload === 'object' ? payload : {};

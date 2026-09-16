@@ -122,3 +122,61 @@ def test_hide_waits_for_animation_completion_before_ordering_out(monkeypatch):
 
     FakeNSAnimationContext.ctx.completion()
     assert "out" in panel.orders
+
+
+def test_show_during_fade_prevents_stale_hide_completion_from_ordering_out(monkeypatch):
+    # A hide() begins fading out; before its completion handler fires, a
+    # show() (e.g. a new turn starting) supersedes it. The stale hide
+    # completion must not order the panel out from under the new show.
+    class FakeAnimatorProxy:
+        def __init__(self, panel):
+            self._panel = panel
+
+        def setAlphaValue_(self, a):
+            self._panel.alpha = a
+
+    class FakePanelWithAnimator(FakePanel):
+        def animator(self):
+            return FakeAnimatorProxy(self)
+
+    class FakeContext:
+        def __init__(self):
+            self.completion = None
+
+        def setDuration_(self, d):
+            pass
+
+        def setCompletionHandler_(self, cb):
+            self.completion = cb
+
+    class FakeNSAnimationContext:
+        ctx = FakeContext()
+
+        @classmethod
+        def beginGrouping(cls):
+            pass
+
+        @classmethod
+        def currentContext(cls):
+            return cls.ctx
+
+        @classmethod
+        def endGrouping(cls):
+            pass  # deliberately does NOT invoke the completion handler
+
+    fake_appkit = types.SimpleNamespace(NSAnimationContext=FakeNSAnimationContext)
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+
+    web, panel = FakeWeb(), FakePanelWithAnimator()
+    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn())
+
+    h.hide()
+    stale_completion = FakeNSAnimationContext.ctx.completion
+    assert "out" not in panel.orders
+
+    h.on_state("listening")  # supersedes the pending hide with a show()
+    assert panel.visible
+
+    stale_completion()  # the old hide's fade completion fires late
+    assert panel.visible
+    assert "out" not in panel.orders

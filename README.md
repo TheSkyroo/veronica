@@ -24,3 +24,4 @@ Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is i
 ## Test
     uv run pytest            # unit
     uv run pytest -m live    # needs mic/speaker/models/login
+    uv run playwright install chromium   # once, for the live HUD tests
