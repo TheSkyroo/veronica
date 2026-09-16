@@ -13,7 +13,7 @@
     error:      {speed:0.0, alpha:1.0,  glow:'rgba(255,90,90,.40)',   tint:{front:'#ff5a5a', highlight:'#ffb0b0', back:'#7a1f1f'}},
   };
   const GOLD = {front:'#f2c37a', highlight:'#ffe6b0', back:'#6b4a1c'};
-  const model = {state:'idle', heard:'', reply:'', tool:null, mic:0, ready:true,
+  const model = {state:'idle', heard:'', reply:'', tool:null, prompt:'', mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:0, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
@@ -23,7 +23,9 @@
   const heardEl = $('heard').querySelector('.msg');
   const replyEl = $('reply').querySelector('.msg');
   const toolEl = $('tool').querySelector('.msg');
+  const detailEl = $('tool').querySelector('.detail');
   const badgeEl = $('tool').querySelector('.badge');
+  const promptEl = $('prompt').querySelector('.msg');
   const hintEl = $('hint').querySelector('.msg');
 
   function clearReply() {
@@ -36,7 +38,8 @@
   function clearTurn() {
     model.heard = ''; model.reply = ''; replySentences = []; clearReply();
     replyEl.textContent = ''; heardEl.textContent = '';
-    model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = '';
+    model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = ''; detailEl.textContent = '';
+    model.prompt = ''; promptEl.textContent = '';
     hintEl.textContent = '';
   }
 
@@ -72,7 +75,6 @@
             if (payload === 'listening' && model.state !== 'followup') {
               clearTurn();
             }
-            if (payload === 'confirming') model.confirmStart = performance.now();
             model.state = payload; break;
           case 'heard': {
             // A new user utterance (including a follow-up, which never
@@ -97,15 +99,31 @@
             const t = payload && typeof payload === 'object' ? payload : {};
             const decision = t.decision || '';
             const summary = t.summary || '';
+            const detail = t.detail || '';
             model.tool = t; badgeEl.className = 'badge ' + decision;
             badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
             toolEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
+            detailEl.textContent = detail;
             if (decision === 'ask') {
               hintEl.textContent = 'say "yes" or "no"';
               model.confirmTimeoutMs = (+t.timeout_ms) || 8000;
+              // Countdown starts here (once the question has actually been
+              // spoken and we're about to start listening), not when the
+              // 'confirming' state was entered.
+              model.confirmStart = performance.now();
             } else {
               hintEl.textContent = '';
+              model.prompt = ''; promptEl.textContent = '';
             }
+            break;
+          }
+          case 'prompt': {
+            // The confirmation question, spoken right before we start
+            // listening. Shown immediately, with the hint beneath it; the
+            // countdown arc itself doesn't start until the 'tool' ask event.
+            const s = String(payload ?? '');
+            model.prompt = s; promptEl.textContent = s;
+            hintEl.textContent = s ? 'say "yes" or "no"' : '';
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;

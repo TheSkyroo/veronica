@@ -133,15 +133,33 @@ def test_confirm_hint_appears_and_clears():
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
 
-        page.evaluate(
-            "window.hud.push({kind:'tool', payload:{summary:'Bash: rm x', decision:'ask', timeout_ms:8000}})"
+        page.evaluate("window.hud.push({kind:'sentence', payload:'Something before.'})")
+        page.wait_for_function(
+            "document.querySelector('#reply .msg').textContent === 'Something before.'",
+            timeout=3000,
         )
+
+        # The question is spoken (and rendered) as a 'prompt' event, distinct
+        # from the reply row; the 'tool' ask event (carrying summary/detail
+        # and the countdown timeout) follows once the question has been
+        # spoken.
+        page.evaluate(
+            "window.hud.push({kind:'prompt', payload:'Fetch weather from wttr.in?'})"
+        )
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Fetch weather from wttr.in', "
+            "detail:'Bash: curl -s https://wttr.in', decision:'ask', timeout_ms:8000}})"
+        )
+        assert page.inner_text("#prompt .msg") == 'Fetch weather from wttr.in?'
         assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
+        assert page.inner_text("#tool .detail") == 'Bash: curl -s https://wttr.in'
+        assert page.inner_text("#reply .msg") == 'Something before.'
 
         page.evaluate(
-            "window.hud.push({kind:'tool', payload:{summary:'Bash: rm x', decision:'allowed'}})"
+            "window.hud.push({kind:'tool', payload:{summary:'Fetch weather from wttr.in', decision:'allowed'}})"
         )
         assert page.inner_text("#hint .msg") == ""
+        assert page.inner_text("#prompt .msg") == ""
 
         browser.close()
 

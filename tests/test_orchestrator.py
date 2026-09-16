@@ -880,16 +880,16 @@ async def test_events_full_turn():
 
 async def test_events_confirm_ask_then_allowed_and_declined():
     o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["yes", "no"])
-    assert await o.confirm("Bash: rm x") is True
-    assert await o.confirm("Bash: rm y") is False
+    assert await o.confirm("Bash: rm x", "Bash: rm -rf x") is True
+    assert await o.confirm("Bash: rm y", "Bash: rm -rf y") is False
     tools = [p for k, p in ev if k == "tool"]
     assert tools == [
-        {"summary": "Bash: rm x", "decision": "ask", "timeout_ms": 0},
+        {"summary": "Bash: rm x", "detail": "Bash: rm -rf x", "decision": "ask", "timeout_ms": 0},
         {"summary": "Bash: rm x", "decision": "allowed"},
-        {"summary": "Bash: rm y", "decision": "ask", "timeout_ms": 0},
+        {"summary": "Bash: rm y", "detail": "Bash: rm -rf y", "decision": "ask", "timeout_ms": 0},
         {"summary": "Bash: rm y", "decision": "declined"},
     ]
-    assert ("sentence", "Run Bash: rm x?") in ev
+    assert ("prompt", "Run Bash: rm x?") in ev
 
 
 async def test_events_confirm_no_speech_declined():

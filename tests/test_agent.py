@@ -72,7 +72,7 @@ def brain(tmp_home, monkeypatch):
     monkeypatch.setattr(Brain, "_client_cls", FakeClient)
     FakeClient.instances.clear()
 
-    async def confirm(summary): return summary.startswith("Bash")
+    async def confirm(summary, detail=""): return summary.startswith("Bash")
 
     return Brain(Settings(), confirm=confirm)
 
@@ -231,7 +231,7 @@ def test_summarize_mac_tools():
 async def test_gate_auto_allows_safe_tools_without_confirm(brain):
     calls = []
 
-    async def confirm(summary):
+    async def confirm(summary, detail=""):
         calls.append(summary)
         return False
 

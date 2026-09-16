@@ -91,7 +91,7 @@ class Brain:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
-        if await self._confirm(summary):
+        if await self._confirm(summary, summarize_detail(tool_name, input)):
             return PermissionResultAllow(updated_input=input)
         return PermissionResultDeny(message="user declined")
 

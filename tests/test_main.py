@@ -32,7 +32,7 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
 
     calls = []
 
-    async def fake_confirm(summary):
+    async def fake_confirm(summary, detail=""):
         calls.append(summary)
         return True
 
