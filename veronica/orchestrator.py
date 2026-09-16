@@ -47,8 +47,14 @@ _TRAILING_STOP_DICTATION_RE = re.compile(
 )
 
 class Orchestrator:
-    CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure"})
-    DENY_WORDS = frozenset({"no", "nope", "not", "don't", "dont", "cancel", "stop", "never"})
+    CONFIRM_WORDS = frozenset({
+        "yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure",
+        "haan", "ha", "haanji", "ji haan", "theek hai", "karo",
+    })
+    DENY_WORDS = frozenset({
+        "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
+        "nahi", "nahin", "mat", "rehne",
+    })
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
 
     @staticmethod

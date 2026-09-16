@@ -18,16 +18,23 @@ END_PHRASES = frozenset({
     "that is all", "stop", "goodbye", "never mind", "nevermind",
     "go idle", "turn yourself off", "go to sleep", "sleep", "go away",
     "bye", "dismiss",
+    # Hinglish
+    "bas", "bas karo", "theek hai bas", "chup", "chup raho",
+    "band karo", "ruko", "ruk jao",
 })
 
 HUD_MINI_PHRASES = frozenset({
     "make yourself small", "make yourself smaller", "shrink", "shrink yourself",
     "minimize", "minimise", "mini mode", "small mode", "go small",
+    # Hinglish
+    "chhoti ho jao", "chota karo",
 })
 
 HUD_FULL_PHRASES = frozenset({
     "expand", "expand yourself", "make yourself big", "make yourself bigger",
     "full mode", "show details", "go big",
+    # Hinglish
+    "badi ho jao", "bada karo",
 })
 
 HUD_HIDE_PHRASES = frozenset({
@@ -36,14 +43,20 @@ HUD_HIDE_PHRASES = frozenset({
 
 MUTE_PHRASES = frozenset({
     "mute", "mute yourself", "be quiet", "silence",
+    # Hinglish
+    "mute karo", "awaaz band karo",
 })
 
 UNMUTE_PHRASES = frozenset({
     "unmute", "unmute yourself", "you can talk", "speak again",
+    # Hinglish
+    "unmute karo", "awaaz chalu karo",
 })
 
 QUIT_PHRASES = frozenset({
     "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely",
+    # Hinglish
+    "quit karo", "band ho jao",
 })
 
 # Screen-awareness fast path: matched exactly like the other local intents
@@ -57,11 +70,49 @@ SCREEN_PHRASES = frozenset({
     "what does this error say", "what does this say",
 })
 
+# Language-switch intent (B1-adjacent): "speak hindi" / "switch to
+# english" / "understand both". Carries a payload (the requested
+# LanguageMode) so it has its own function, like match_voice_intent.
+LanguageMode = Literal["en", "hi", "auto"]
+
+_LANG_PHRASES: dict[str, LanguageMode] = {
+    "speak hindi": "hi", "talk in hindi": "hi", "switch to hindi": "hi", "hindi mein bolo": "hi",
+    "hindi me bolo": "hi", "hindi mein baat karo": "hi", "hindi me baat karo": "hi", "speak in hindi": "hi",
+    "speak english": "en", "talk in english": "en", "switch to english": "en", "english mein bolo": "en",
+    "english me bolo": "en", "angrezi mein bolo": "en", "speak in english": "en",
+    "understand both": "auto", "both languages": "auto", "hindi and english": "auto", "hindi aur english": "auto",
+    "auto language": "auto", "dono bhasha": "auto",
+}
+
+# Hinglish keys of _LANG_PHRASES (the rest are English phrasings).
+_LANG_PHRASES_HINGLISH = frozenset({
+    "hindi mein bolo", "hindi me bolo", "hindi mein baat karo", "hindi me baat karo",
+    "english mein bolo", "english me bolo", "angrezi mein bolo",
+    "hindi aur english", "dono bhasha",
+})
+
+
+def match_language_intent(text: str) -> LanguageMode | None:
+    """Match a heard utterance against the language-switch phrase table
+    (see _LANG_PHRASES). Whole-utterance candidates only — no clause
+    split, so e.g. "translate this to hindi" stays with the brain."""
+    for candidate in _candidates_for(normalize(text)):
+        if candidate in _LANG_PHRASES:
+            return _LANG_PHRASES[candidate]
+    return None
+
+
 # Romanized-Hindi (Hinglish) forms of the local intents above. Filled in by
 # the Hinglish intents work; quick.is_hinglish_phrase() unions this with its
 # own phrase tables so a whole-utterance Hinglish command is treated as
 # Hindi even when the transcriber labels it "en".
-HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset()
+HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
+    "bas", "bas karo", "theek hai bas", "chup", "chup raho",
+    "band karo", "ruko", "ruk jao",
+    "mute karo", "awaaz band karo", "unmute karo", "awaaz chalu karo",
+    "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
+    "quit karo", "band ho jao",
+}) | _LANG_PHRASES_HINGLISH
 
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"

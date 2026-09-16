@@ -3052,3 +3052,11 @@ def test_read_battery_parses_pmset():
     assert mac_tools_mod.read_battery(run=run) == (None, None)
     run = lambda *a, **k: (_ for _ in ()).throw(OSError("no pmset"))
     assert mac_tools_mod.read_battery(run=run) == (None, None)
+
+
+@pytest.mark.parametrize("heard,ok", [
+    ("haan", True), ("haanji", True), ("ji haan", True), ("theek hai", True), ("karo", True), ("ha", True),
+    ("nahi", False), ("nahin", False), ("mat karo", False), ("rehne do", False), ("haan nahi", False),
+])
+def test_is_confirmation_hinglish(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
