@@ -172,9 +172,7 @@ class Proactive:
     async def _events_today(self, now: dt.datetime) -> list[Event]:
         if self._events_cache is not None:
             fetched_at, events = self._events_cache
-            fresh_by_age = (now - fetched_at).total_seconds() < self.EVENTS_CACHE_S
-            has_future_event = any(e.start is not None and e.start > now for e in events)
-            if fetched_at.date() == now.date() and (fresh_by_age or has_future_event):
+            if (now - fetched_at).total_seconds() < self.EVENTS_CACHE_S and fetched_at.date() == now.date():
                 return events
         events = parse_events(await self._calendar_events("today", 1), now.date())
         self._events_cache = (now, events)

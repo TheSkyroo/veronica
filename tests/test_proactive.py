@@ -113,13 +113,20 @@ async def test_nudge_fires_once_within_window_and_skips_all_day():
     p, said, clock, calls = make(pr.Schedule(nudges_enabled=True, nudge_minutes=5), events=ev)
     clock.t = dt.datetime(2026, 9, 16, 9, 20)
     await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 9, 23)
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 9, 24)
+    await p.tick(); assert said == []
+    assert calls["events"] == 1                      # 9:20, 9:23, 9:24 all within 5 min of the 9:20 fetch
     clock.t = dt.datetime(2026, 9, 16, 9, 25)
     await p.tick(); assert said == ["Heads up, Standup starts in 5 minutes."]
+    assert calls["events"] == 2                       # 9:25 is exactly 300s after 9:20: not fresh, refetch
     clock.t = dt.datetime(2026, 9, 16, 9, 26)
     await p.tick(); assert len(said) == 1          # not repeated
+    assert calls["events"] == 2                       # 9:26 is within 5 min of the 9:25 fetch
     clock.t = dt.datetime(2026, 9, 16, 10, 59)
     await p.tick(); assert said[-1] == "Heads up, Review starts in a minute."
-    assert calls["events"] == 1                      # cached within EVENTS_CACHE_S
+    assert calls["events"] == 3                       # 10:59 is well past the 9:25 fetch: refetch
 
 
 async def test_nudge_refetches_after_cache_expiry_and_ignores_past():
