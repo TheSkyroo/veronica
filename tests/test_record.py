@@ -223,3 +223,38 @@ async def test_on_audio_hop_counts_only_speech_frames(monkeypatch):
     r.on_audio = calls.append
     await r.capture(partial=True)
     assert calls == []
+
+
+# -- follow-up window: a brief false onset (e.g. Veronica's own audio tail) --
+
+async def test_short_live_speech_then_real_speech_within_wait_budget(monkeypatch):
+    """A brief false onset (2 speech frames, below min_speech_frames) that
+    endpoints on silence must not give up — with wait budget left, it should
+    keep waiting for a real onset, here arriving ~1.5s in."""
+    pattern = "ss" + "." * 48 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=120, max_utterance_s=5)
+    pcm = await r.capture(max_s=4)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9   # 6 real speech frames + 3 silence to endpoint
+    assert np.all(pcm[: FRAME * 6] == 1000)
+
+
+async def test_short_live_speech_with_no_wait_budget_returns_none(monkeypatch):
+    """Same pattern, but with no wait budget (max_s=None): old behavior —
+    give up and return None once the brief false onset endpoints."""
+    pattern = "ss" + "." * 48 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=120, max_utterance_s=5)
+    pcm = await r.capture(max_s=None)
+    assert pcm is None
+
+
+async def test_skip_ms_drops_leading_live_frames(monkeypatch):
+    """skip_ms discards the first skip_ms of *live* frames before the VAD
+    ever sees them — speech in those frames is ignored entirely."""
+    # 10 frames (300 ms) of speech, then silence, then real speech.
+    pattern = "s" * 10 + "." * 5 + "ssssss" + "....."
+    r = make(pattern, monkeypatch, min_speech_ms=60, max_utterance_s=5)
+    pcm = await r.capture(max_s=4, skip_ms=300)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9   # only the real speech (6) + 3 silence to endpoint
+    assert np.all(pcm[: FRAME * 6] == 1000)

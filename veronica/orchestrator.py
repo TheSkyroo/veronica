@@ -476,7 +476,9 @@ class Orchestrator:
                     continue
             self._set("followup")
             await self.chime(self.s.chime_followup_hz, 100)
-            pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s), partial=True)
+            pcm = await self.recorder.capture(
+                max_s=max(1, self.s.followup_window_s), partial=True, skip_ms=self.s.followup_skip_ms
+            )
             self._end_partial_window()
             if pcm is None:
                 break

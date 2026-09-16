@@ -17,7 +17,7 @@ class Rec:
         self.pcms = list(pcms)
         self._has_speech = has_speech
         self.preroll_calls = []
-    async def capture(self, max_s=None, preroll=None, partial=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
         self.preroll_calls.append(preroll)
         return self.pcms.pop(0) if self.pcms else None
     def has_speech(self, pcm): return self._has_speech
@@ -331,7 +331,7 @@ class RecArgs:
         self.pcms = list(pcms)
         self.max_s_calls = []
 
-    async def capture(self, max_s=None, preroll=None, partial=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
         self.max_s_calls.append(max_s)
         return self.pcms.pop(0) if self.pcms else None
 
@@ -716,7 +716,7 @@ async def test_barge_in_stops_speech_and_relistens():
             super().__init__(pcms)
             self.n = 0
 
-        async def capture(self, max_s=None, preroll=None, partial=False):
+        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
             self.n += 1
             if self.n > 1:
                 events.append("capture")
@@ -758,7 +758,7 @@ class StoppableRec:
     def has_speech(self, pcm):
         return False
 
-    async def capture(self, max_s=None, preroll=None, partial=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
         item = self.pcms.pop(0) if self.pcms else None
         if item is self.BLOCK:
             await self._ev.wait()
@@ -835,7 +835,7 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
             self.pcms = list(pcms)
             self.captures = 0
 
-        async def capture(self, max_s=None, preroll=None, partial=False):
+        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
             self.captures += 1
             return self.pcms.pop(0) if self.pcms else None
 
@@ -1059,7 +1059,7 @@ class RecWithOnAudio(Rec):
         self.audio_chunks = audio_chunks
         self.on_audio = None
 
-    async def capture(self, max_s=None, preroll=None, partial=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
         if partial and self.on_audio is not None:
             for chunk in self.audio_chunks:
                 self.on_audio(chunk)
