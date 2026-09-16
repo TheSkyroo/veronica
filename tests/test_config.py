@@ -16,6 +16,12 @@ def test_defaults(tmp_home):
     assert s.wake_hits == 2
     assert s.brain_timeout_s == 60
     assert s.wake_model == "hey_veronica"
+    assert s.wake_engine == "whisper"
+    assert s.wake_whisper_model == "tiny.en"
+    assert s.wake_window_s == 1.6
+    assert s.wake_hop_s == 0.6
+    assert s.wake_min_rms == 0.01
+    assert s.wake_phrases == ["veronica", "veronika", "hey veronica", "hi veronica"]
     assert s.session_file == tmp_home / "session"
     assert s.log_file == tmp_home / "logs" / "veronica.log"
     assert s.whisper_model == "small.en"

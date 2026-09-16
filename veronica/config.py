@@ -23,11 +23,19 @@ class Settings(BaseSettings):
     listen_wait_s: int = 6
 
     # wake word
+    wake_engine: str = "whisper"
     wake_model: str = "hey_veronica"
     wake_threshold: float = 0.35
     wake_hits: int = 2
     wake_retry_s: int = 10
     barge_threshold: float = 0.8
+    wake_whisper_model: str = "tiny.en"
+    wake_window_s: float = 1.6
+    wake_hop_s: float = 0.6
+    wake_min_rms: float = 0.01
+    wake_phrases: list[str] = Field(
+        default_factory=lambda: ["veronica", "veronika", "hey veronica", "hi veronica"]
+    )
 
     # speech
     whisper_model: str = "small.en"

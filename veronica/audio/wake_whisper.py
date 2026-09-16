@@ -1,0 +1,116 @@
+import asyncio
+import difflib
+import logging
+import string
+import threading
+from collections.abc import Callable, Iterator
+
+import numpy as np
+import sounddevice as sd
+from faster_whisper import WhisperModel
+
+from veronica.config import Settings
+from veronica.ui.events import rms
+
+CHUNK = 1280  # 80 ms @ 16 kHz, same cadence as WakeWord
+
+log = logging.getLogger("veronica.audio")
+
+_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
+
+
+def _normalize(text: str) -> str:
+    return text.lower().translate(_PUNCT_TABLE).strip()
+
+
+def _matches(text: str, phrases: list[str]) -> bool:
+    norm = _normalize(text)
+    if not norm:
+        return False
+    for phrase in phrases:
+        if _normalize(phrase) in norm:
+            return True
+    words = norm.split()
+    for word in words:
+        # Length-gated so short unrelated words (e.g. "verona", ratio ~0.86)
+        # don't slip past the ratio bar meant for near-misses like
+        # "veronika"/"veronicah" that are close to "veronica"'s own length.
+        if abs(len(word) - len("veronica")) > 1:
+            continue
+        ratio = difflib.SequenceMatcher(None, word, "veronica").ratio()
+        if ratio >= 0.8:
+            return True
+    return False
+
+
+class WhisperWake:
+    """Blocks until the configured wake phrase is heard via faster-whisper.
+
+    Same public interface as WakeWord: __init__(settings, frames=None),
+    async wait(threshold=None) -> bool, one-shot consume-on-use stop().
+    """
+
+    _model_cls = WhisperModel  # swapped in tests
+    _warned_threshold = False
+
+    def __init__(self, settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None) -> None:
+        self.s = settings
+        self._frames = frames or self._mic_frames
+        self._model = self._model_cls(settings.wake_whisper_model, device="cpu", compute_type="int8")
+        self._stop = threading.Event()
+        self._window_samples = int(settings.wake_window_s * settings.sample_rate)
+        self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
+        self._buf = np.zeros(0, dtype=np.int16)
+
+    def _mic_frames(self) -> Iterator[bytes]:
+        # Relies on CPython refcounting to close the stream (via __exit__) as soon as
+        # this generator is garbage-collected when _wait returns/breaks out of the loop.
+        with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK) as stream:
+            while True:
+                data, _ = stream.read(CHUNK)
+                yield bytes(data)
+
+    def stop(self) -> None:
+        """Request that the in-flight (or next) wait() stop. Thread-safe, one-shot: a
+        pending stop is consumed by the next wait() even if issued before it starts."""
+        self._stop.set()
+
+    async def wait(self, threshold: float | None = None) -> bool:
+        """Block until the wake phrase is detected (True) or stop() is called (False).
+        Only one wait() should be in flight per WhisperWake instance at a time."""
+        if threshold is not None and not WhisperWake._warned_threshold:
+            log.debug("WhisperWake.wait: threshold=%s ignored (phrase match used instead)", threshold)
+            WhisperWake._warned_threshold = True
+        return await asyncio.to_thread(self._wait)
+
+    def _transcribe(self, window: np.ndarray) -> str:
+        audio = window.astype(np.float32) / 32768.0
+        segments, _ = self._model.transcribe(
+            audio,
+            beam_size=1,
+            language="en",
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        return " ".join(s.text.strip() for s in segments).strip()
+
+    def _wait(self) -> bool:
+        self._buf = np.zeros(0, dtype=np.int16)
+        since_hop = 0
+        for frame in self._frames():
+            if self._stop.is_set():
+                self._stop.clear()
+                return False
+            chunk = np.frombuffer(frame, dtype=np.int16)
+            self._buf = np.concatenate([self._buf, chunk])[-self._window_samples:]
+            since_hop += chunk.size
+            if since_hop < self._hop_samples:
+                continue
+            since_hop = 0
+            if rms(self._buf) < self.s.wake_min_rms:
+                continue
+            text = self._transcribe(self._buf)
+            if _matches(text, self.s.wake_phrases):
+                self._buf = np.zeros(0, dtype=np.int16)
+                return True
+        return False

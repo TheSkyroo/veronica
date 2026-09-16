@@ -89,3 +89,12 @@ class WakeWord:
             else:
                 hits = 0
         return False
+
+
+def make_wake(settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None):
+    """Return the configured wake-word engine (WhisperWake or WakeWord)."""
+    if settings.wake_engine == "whisper":
+        from veronica.audio.wake_whisper import WhisperWake
+
+        return WhisperWake(settings, frames=frames)
+    return WakeWord(settings, frames=frames)
