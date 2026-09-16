@@ -330,6 +330,22 @@ async def mail_unread(args: dict) -> dict:
     return _ok(_format_mail(res["content"][0]["text"]))
 
 
+async def mail_unread_count() -> int:
+    """Mail's inbox unread count, straight from the mailbox property — a
+    plain helper (not an MCP tool) for the proactive briefing, which
+    wants the real number rather than the capped `mail_unread` listing.
+    Raises RuntimeError when Mail errors or returns something that isn't
+    an integer."""
+    res = await _osascript('tell application "Mail" to get unread count of inbox')
+    text = res["content"][0]["text"]
+    if res.get("is_error"):
+        raise RuntimeError(text)
+    try:
+        return int(text.strip())
+    except ValueError:
+        raise RuntimeError(f"unexpected unread count: {text!r}") from None
+
+
 @tool("mail_search", "Search Mail.app inbox by subject/sender substring", {"query": str, "limit": int})
 @_guard
 async def mail_search(args: dict) -> dict:

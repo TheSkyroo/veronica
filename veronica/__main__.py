@@ -48,6 +48,12 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         return res["content"][0]["text"]
 
     async def _mail_count() -> int:
+        # Mail's own unread count is the real number; the listing is capped
+        # at MAIL_LIMIT_MAX, so counting it is only a best-effort fallback.
+        try:
+            return await pim.mail_unread_count()
+        except Exception as exc:
+            logging.getLogger("veronica").warning("mail unread count failed, counting the listing: %s", exc)
         res = await pim.mail_unread.handler({"limit": 50})
         return proactive.count_mail(res["content"][0]["text"]) if not res.get("is_error") else 0
 

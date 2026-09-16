@@ -173,9 +173,19 @@ async def test_build_orchestrator_no_proactive_in_text_mode(monkeypatch, tmp_hom
     memory_tools.bind(None)
 
 
+async def _build_audio_orch(monkeypatch):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+    return main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+
+
 async def test_proactive_adapters_read_pim_tool_text(monkeypatch, tmp_home):
-    """The three adapters hand the pim tools' text (or a mail count) to
-    Proactive; mail errors count as zero rather than blowing up a briefing."""
+    """Calendar/reminder adapters hand the pim tools' text to Proactive; the
+    mail adapter uses Mail's real unread count, not the (capped) listing."""
     from veronica.tools import pim as pim_tools
 
     calls = []
@@ -184,41 +194,60 @@ async def test_proactive_adapters_read_pim_tool_text(monkeypatch, tmp_home):
         calls.append(("cal", args))
         return {"content": [{"type": "text", "text": "09:00–09:30  Standup (Work)"}]}
 
-    async def mail(args):
-        calls.append(("mail", args))
+    async def listing(args):
+        calls.append(("mail_listing", args))
         return {"content": [{"type": "text", "text": "A  Subject\n  preview\nB  Other\n  preview"}]}
 
-    async def mail_err(args):
-        return {"content": [{"type": "text", "text": "Mail isn't running"}], "is_error": True}
+    async def count():
+        calls.append(("mail_count", None))
+        return 42
 
     async def rem(args):
         calls.append(("rem", args))
         return {"content": [{"type": "text", "text": "2026-09-16 10:00  Pay rent"}]}
 
     monkeypatch.setattr(pim_tools.calendar_events, "handler", cal)
-    monkeypatch.setattr(pim_tools.mail_unread, "handler", mail)
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing)
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
     monkeypatch.setattr(pim_tools.reminders_due, "handler", rem)
-    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
-    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
-    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
-    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
-    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
 
-    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
-    pro = orch.proactive
+    pro = (await _build_audio_orch(monkeypatch)).proactive
     assert await pro._calendar_events("today", 1) == "09:00–09:30  Standup (Work)"
-    assert await pro._mail_unread_count() == 2
+    assert await pro._mail_unread_count() == 42
     assert await pro._reminders_due(1) == "2026-09-16 10:00  Pay rent"
     assert calls == [
         ("cal", {"day": "today", "days": 1}),
-        ("mail", {"limit": 50}),
+        ("mail_count", None),
         ("rem", {"days": 1}),
     ]
-    monkeypatch.setattr(pim_tools.mail_unread, "handler", mail_err)
-    assert await pro._mail_unread_count() == 0
     memory_tools.bind(None)
 
+
+async def test_proactive_mail_count_falls_back_to_listing(monkeypatch, tmp_home, caplog):
+    """If Mail's unread-count property fails, fall back to counting the
+    (capped) unread listing; a listing error counts as zero."""
+    from veronica.tools import pim as pim_tools
+
+    async def count():
+        raise RuntimeError("Mail got an error: Connection is invalid.")
+
+    async def listing(args):
+        assert args == {"limit": 50}
+        return {"content": [{"type": "text", "text": "A  Subject\n  preview\nB  Other\n  preview"}]}
+
+    async def listing_err(args):
+        return {"content": [{"type": "text", "text": "error: Mail isn't running"}], "is_error": True}
+
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing)
+    pro = (await _build_audio_orch(monkeypatch)).proactive
+    with caplog.at_level(logging.WARNING, logger="veronica"):
+        assert await pro._mail_unread_count() == 2
+    assert any("unread count" in r.getMessage() for r in caplog.records)
+
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing_err)
+    assert await pro._mail_unread_count() == 0
+    memory_tools.bind(None)
 
 def test_main_text_mode_parses(monkeypatch):
     calls = []
