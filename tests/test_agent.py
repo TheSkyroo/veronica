@@ -24,6 +24,35 @@ def test_system_prompt_has_date_and_rules():
     ) in p
 
 
+def test_system_prompt_facts_and_recent_injection():
+    p = system_prompt(dt.date(2026, 9, 15), facts=["likes tea", "works at Acme"], recent=[("hi", "hello")])
+    assert "Facts about the user:\n- likes tea\n- works at Acme" in p
+    assert "Recent conversation:\nUser: hi\nVeronica: hello" in p
+
+
+def test_system_prompt_no_injection_when_empty():
+    p = system_prompt(dt.date(2026, 9, 15))
+    assert "Facts about the user" not in p
+    assert "Recent conversation" not in p
+
+
+def test_system_prompt_facts_capped():
+    facts = [f"fact number {i} " + "x" * 50 for i in range(200)]
+    p = system_prompt(dt.date(2026, 9, 15), facts=facts)
+    start = p.index("Facts about the user:")
+    end = p.index("\n\n", start) if "\n\n" in p[start:] else len(p)
+    block = p[start:end]
+    assert len(block.encode("utf-8")) <= 2 * 1024
+
+
+def test_system_prompt_recent_capped():
+    recent = [(f"heard {i}", "reply " + "x" * 50) for i in range(200)]
+    p = system_prompt(dt.date(2026, 9, 15), recent=recent)
+    start = p.index("Recent conversation:")
+    block = p[start:]
+    assert len(block.encode("utf-8")) <= 1024
+
+
 def test_summarize_detail_pim_tools():
     assert summarize_detail("mcp__pim__calendar_events", {"day": "today"}) == "Check calendar"
     assert summarize_detail("mcp__pim__calendar_create", {"title": "Lunch"}) == "Create event Lunch"
@@ -124,6 +153,63 @@ async def test_options_wired(brain):
     assert "memory" in o.mcp_servers
     assert not o.allowed_tools
     assert o.cwd == str(Path.home())
+
+
+class FakeMemory:
+    def __init__(self, facts=(), recent=()):
+        self._facts = list(facts)
+        self._recent = list(recent)
+
+    def facts(self):
+        return self._facts
+
+    def recent(self, n):
+        return self._recent[-n:]
+
+
+async def test_memory_injected_into_system_prompt(tmp_home, monkeypatch):
+    monkeypatch.setattr(agent_mod, "AssistantMessage", _Assistant)
+    monkeypatch.setattr(agent_mod, "TextBlock", _Text)
+    monkeypatch.setattr(agent_mod, "ResultMessage", _Result)
+    monkeypatch.setattr(Brain, "_client_cls", FakeClient)
+    FakeClient.instances.clear()
+
+    async def confirm(summary, detail=""):
+        return True
+
+    mem = FakeMemory(
+        facts=[(1, "t", "likes tea")],
+        recent=[("t", "hi", "hello")],
+    )
+    b = Brain(Settings(), confirm=confirm, memory=mem)
+    [s async for s in b.ask("x")]
+    prompt = FakeClient.instances[0].options.system_prompt
+    assert "Facts about the user:\n- likes tea" in prompt
+    assert "Recent conversation:\nUser: hi\nVeronica: hello" in prompt
+
+
+async def test_memory_not_injected_when_disabled(tmp_home, monkeypatch):
+    monkeypatch.setattr(agent_mod, "AssistantMessage", _Assistant)
+    monkeypatch.setattr(agent_mod, "TextBlock", _Text)
+    monkeypatch.setattr(agent_mod, "ResultMessage", _Result)
+    monkeypatch.setattr(Brain, "_client_cls", FakeClient)
+    FakeClient.instances.clear()
+
+    async def confirm(summary, detail=""):
+        return True
+
+    mem = FakeMemory(facts=[(1, "t", "likes tea")])
+    b = Brain(Settings(memory_enabled=False), confirm=confirm, memory=mem)
+    [s async for s in b.ask("x")]
+    prompt = FakeClient.instances[0].options.system_prompt
+    assert "Facts about the user" not in prompt
+
+
+async def test_no_memory_store_no_injection(brain):
+    [s async for s in brain.ask("x")]
+    prompt = FakeClient.instances[0].options.system_prompt
+    assert "Facts about the user" not in prompt
+    assert "Recent conversation" not in prompt
 
 
 async def test_resume_from_saved_session(brain, tmp_home):
