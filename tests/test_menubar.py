@@ -672,6 +672,8 @@ def test_popup_menu_handler_forwards_to_app_callbacks(fake_env):
 # -- commit: Voice submenu (voices, faster/slower/normal) ----------------------
 
 VOICE_NAMES = ["Sarah", "Bella", "Nicole", "Sky", "Adam", "Michael", "Emma", "Isabella", "George", "Lewis"]
+HINDI_VOICE_NAMES = ["Alpha", "Beta", "Omega", "Psi"]
+ALL_VOICE_NAMES = VOICE_NAMES + HINDI_VOICE_NAMES
 
 
 class _ResettablePlayer(FakePlayer):
@@ -687,9 +689,9 @@ class _VoiceOrch:
     """Minimal orchestrator stand-in for the Voice menu: records the
     (kind, arg) actions passed to _voice_turn and player.reset() calls."""
 
-    def __init__(self, voice="af_sarah"):
+    def __init__(self, voice="af_sarah", hindi_voice="hf_alpha"):
         self.calls = []
-        self.tts = types.SimpleNamespace(voice=voice, speed=1.0)
+        self.tts = types.SimpleNamespace(voice=voice, speed=1.0, hindi_voice=hindi_voice)
         self.player = _ResettablePlayer()
 
     async def _voice_turn(self, action):
@@ -707,8 +709,11 @@ def test_voice_submenu_lists_voices_and_speed(fake_env):
         titles = [i.title if i is not None else None for i in sub.children]
         assert titles[:10] == VOICE_NAMES
         assert titles[10] is None  # separator
+        assert titles[11:15] == HINDI_VOICE_NAMES
+        assert titles[15] is None  # separator
         assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
-        assert list(app._voice_items) == VOICE_NAMES
+        assert len(titles) == 19
+        assert list(app._voice_items) == ALL_VOICE_NAMES
         assert list(app._speed_items) == ["Faster", "Slower", "Normal speed"]
         assert all(i.callback == app._pick_voice for i in app._voice_items.values())
         assert all(i.callback == app._speed for i in app._speed_items.values())
@@ -811,13 +816,16 @@ def test_popup_menu_voice_submenu_mirrors_menu_bar(fake_env, monkeypatch):
         titles = [i.title for i in sub.items]
         assert titles[:10] == VOICE_NAMES
         assert titles[10] == "-"
+        assert titles[11:15] == HINDI_VOICE_NAMES
+        assert titles[15] == "-"
         assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
-        assert [i.action for i in sub.items[:10]] == ["onPickVoice:"] * 10
+        voice_items = sub.items[:10] + sub.items[11:15]
+        assert [i.action for i in voice_items] == ["onPickVoice:"] * 14
         assert [i.action for i in sub.items[-3:]] == ["onSpeed:"] * 3
-        assert [i.representedObject() for i in sub.items[:10]] == VOICE_NAMES
+        assert [i.representedObject() for i in voice_items] == ALL_VOICE_NAMES
         assert [i.representedObject() for i in sub.items[-3:]] == ["Faster", "Slower", "Normal speed"]
         assert all(i.target is not None for i in sub.items if i.action is not None)
-        assert [i.state for i in sub.items[:10]] == [1 if n == "Adam" else 0 for n in VOICE_NAMES]
+        assert [i.state for i in voice_items] == [1 if n in ("Adam", "Alpha") else 0 for n in ALL_VOICE_NAMES]
     finally:
         _quit_and_join(app)
 
@@ -940,3 +948,50 @@ def test_real_rumps_restored_after_fixture_teardown():
 
     assert menubar.rumps.__name__ == "rumps"
     assert menubar.rumps is real_rumps
+
+
+# -- batch C: Hindi voices in the Voice submenu --------------------------------
+
+def test_voice_menu_hindi_pick_schedules_voice_turn(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    _quit_and_join(app)  # stop the background loop so a fresh, non-running loop drives the test
+    vo = _VoiceOrch()
+    app._orch = vo
+    app._loop = asyncio.new_event_loop()
+    try:
+        app._pick_voice(app._voice_items["Omega"])
+        app._loop.run_until_complete(asyncio.sleep(0))
+        assert vo.calls == [("voice", "omega")]
+        assert vo.player.resets == 1
+    finally:
+        app._loop.close()
+
+
+def test_refresh_voice_menu_checks_english_and_hindi_voices(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = _VoiceOrch(voice="bm_george", hindi_voice="hm_omega")
+        app._refresh_voice_menu()
+        checked = [n for n, i in app._voice_items.items() if i.state == 1]
+        assert checked == ["George", "Omega"]
+        app._orch.tts.hindi_voice = "hf_beta"
+        app._refresh(None)
+        checked = [n for n, i in app._voice_items.items() if i.state == 1]
+        assert checked == ["George", "Beta"]
+    finally:
+        _quit_and_join(app)
+
+
+def test_refresh_voice_menu_tolerates_tts_without_hindi_voice(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = _VoiceOrch(voice="af_sky")
+        del app._orch.tts.hindi_voice
+        app._refresh_voice_menu()
+        checked = [n for n, i in app._voice_items.items() if i.state == 1]
+        assert checked == ["Sky"]
+    finally:
+        _quit_and_join(app)
