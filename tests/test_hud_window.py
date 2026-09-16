@@ -499,6 +499,133 @@ def test_webview_class_is_draggable_through_the_page(monkeypatch):
     assert instance.acceptsFirstMouse_(None) is True
 
 
+# -- commit: click the HUD orb to open the menu --------------------------------
+
+def test_webview_right_click_calls_super_then_on_menu(monkeypatch):
+    class FakeWKWebView:
+        def rightMouseDown_(self, event):
+            self.super_rightMouseDown_called = event
+
+    fake_webkit = types.SimpleNamespace(WKWebView=FakeWKWebView)
+    monkeypatch.setitem(sys.modules, "WebKit", fake_webkit)
+
+    from veronica.ui.hud import _webview_class
+
+    cls = _webview_class()
+    instance = cls.__new__(cls)
+    seen = []
+    instance.on_menu = lambda ev: seen.append(ev)
+
+    instance.rightMouseDown_("evt")
+
+    assert instance.super_rightMouseDown_called == "evt"
+    assert seen == ["evt"]
+
+
+def test_webview_right_click_is_noop_without_on_menu(monkeypatch):
+    class FakeWKWebView:
+        def rightMouseDown_(self, event):
+            pass
+
+    fake_webkit = types.SimpleNamespace(WKWebView=FakeWKWebView)
+    monkeypatch.setitem(sys.modules, "WebKit", fake_webkit)
+
+    from veronica.ui.hud import _webview_class
+
+    cls = _webview_class()
+    instance = cls.__new__(cls)
+    instance.rightMouseDown_("evt")  # must not raise; on_menu defaults to None
+
+
+class _FakeMenuWindow:
+    def __init__(self, x, y):
+        self._x, self._y = x, y
+
+    def frame(self):
+        return types.SimpleNamespace(origin=types.SimpleNamespace(x=self._x, y=self._y))
+
+
+def _draggable_instance(monkeypatch):
+    class FakeWKWebView:
+        def mouseDown_(self, event):
+            self.down_called = event
+
+        def mouseUp_(self, event):
+            self.up_called = event
+
+    fake_webkit = types.SimpleNamespace(WKWebView=FakeWKWebView)
+    monkeypatch.setitem(sys.modules, "WebKit", fake_webkit)
+
+    from veronica.ui.hud import _webview_class
+
+    cls = _webview_class()
+    return cls.__new__(cls)
+
+
+def test_webview_click_without_drag_calls_on_menu(monkeypatch):
+    instance = _draggable_instance(monkeypatch)
+    window = _FakeMenuWindow(10.0, 20.0)
+    instance.window = lambda: window
+    seen = []
+    instance.on_menu = lambda ev: seen.append(ev)
+
+    instance.mouseDown_("down")
+    instance.mouseUp_("up")
+
+    assert instance.down_called == "down"
+    assert instance.up_called == "up"
+    assert seen == ["up"]
+
+
+def test_webview_drag_does_not_call_on_menu(monkeypatch):
+    instance = _draggable_instance(monkeypatch)
+    window = _FakeMenuWindow(0.0, 0.0)
+    instance.window = lambda: window
+    seen = []
+    instance.on_menu = lambda ev: seen.append(ev)
+
+    instance.mouseDown_("down")
+    window._x, window._y = 50.0, 5.0   # the panel moved: setMovableByWindowBackground_ dragged it
+    instance.mouseUp_("up")
+
+    assert seen == []
+
+
+def test_webview_click_without_on_menu_is_noop(monkeypatch):
+    instance = _draggable_instance(monkeypatch)
+    window = _FakeMenuWindow(1.0, 1.0)
+    instance.window = lambda: window
+    instance.mouseDown_("down")
+    instance.mouseUp_("up")  # must not raise; on_menu defaults to None
+
+
+def test_popup_menu_invokes_on_menu_with_coords():
+    h, _, _, _ = make()
+    seen = []
+    h.on_menu = lambda x, y: seen.append((x, y))
+    h._popup_menu(10.0, 20.0)
+    assert seen == [(10.0, 20.0)]
+
+
+def test_popup_menu_noop_when_on_menu_unset():
+    h, _, _, _ = make()
+    h._popup_menu(1.0, 2.0)  # must not raise
+
+
+def test_webview_click_triggers_popup_menu_via_screen_coords(monkeypatch):
+    fake_point = types.SimpleNamespace(x=111.0, y=222.0)
+    fake_appkit = types.SimpleNamespace(NSEvent=types.SimpleNamespace(mouseLocation=lambda: fake_point))
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+
+    h, web, _, _ = make()
+    seen = []
+    h.on_menu = lambda x, y: seen.append((x, y))
+
+    web.on_menu(object())  # simulate the draggable web view's click handler firing
+
+    assert seen == [(111.0, 222.0)]
+
+
 def test_close_before_load_discards_pending_queue():
     h, web, _, _ = make(mark_loaded=False)
     h.push({"kind": "mic", "payload": 0.1})
