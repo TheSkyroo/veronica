@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     frame_ms: int = 30                 # webrtcvad frame size
     vad_aggressiveness: int = 2        # 0-3
-    vad_silence_ms: int = 800
+    vad_silence_ms: int = 600
     max_utterance_s: int = 15
     min_speech_ms: int = 300
-    followup_window_s: int = 8
+    followup_window_s: int = 4
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
 
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     barge_threshold: float = 0.8  # openwakeword engine only; the whisper engine uses own-speech suppression instead
     wake_whisper_model: str = "tiny.en"
     wake_window_s: float = 1.6
-    wake_hop_s: float = 0.6
+    wake_hop_s: float = 0.4
     wake_min_rms: float = 0.01
     wake_phrases: list[str] = Field(
         default_factory=lambda: ["veronica", "veronika", "hey veronica", "hi veronica"]
@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # speech
     whisper_model: str = "small.en"
     kokoro_voice: str = "af_sarah"
+    partial_stt: bool = True
+    partial_stt_model: str = "tiny.en"
+    partial_hop_s: float = 0.7
 
     # chimes (Hz)
     chime_wake_hz: int = 880

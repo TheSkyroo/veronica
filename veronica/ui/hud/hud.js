@@ -19,6 +19,11 @@
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
   let replySentences = [];
 
+  const STATUS_LABELS = {
+    idle: '', warming: 'Warming up…', listening: 'Listening…', thinking: 'Thinking…',
+    speaking: 'Speaking', followup: 'Listening…', confirming: 'Say yes or no', error: 'Error',
+  };
+
   const $ = id => document.getElementById(id);
   const heardEl = $('heard').querySelector('.msg');
   const replyEl = $('reply').querySelector('.msg');
@@ -27,6 +32,10 @@
   const badgeEl = $('tool').querySelector('.badge');
   const promptEl = $('prompt').querySelector('.msg');
   const hintEl = $('hint').querySelector('.msg');
+  const statusEl = $('status');
+  const statusLabelEl = statusEl.querySelector('.label');
+  const statusLevelEl = statusEl.querySelector('.level i');
+  statusEl.dataset.state = 'idle';
 
   function clearReply() {
     replyGen++;
@@ -37,7 +46,7 @@
 
   function clearTurn() {
     model.heard = ''; model.reply = ''; replySentences = []; clearReply();
-    replyEl.textContent = ''; heardEl.textContent = '';
+    replyEl.textContent = ''; heardEl.textContent = ''; heardEl.classList.remove('partial');
     model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = ''; detailEl.textContent = '';
     model.prompt = ''; promptEl.textContent = '';
     hintEl.textContent = '';
@@ -76,13 +85,23 @@
               clearTurn();
             }
             if (payload === 'confirming') model.confirmStart = null;
-            model.state = payload; break;
+            model.state = payload;
+            statusEl.dataset.state = payload;
+            statusLabelEl.textContent = STATUS_LABELS[payload] || '';
+            break;
+          case 'heard_partial': {
+            const s = String(payload ?? '');
+            heardEl.textContent = s;
+            heardEl.classList.add('partial');
+            break;
+          }
           case 'heard': {
             // A new user utterance (including a follow-up, which never
             // passes through 'listening') starts a fresh turn: clear the
             // previous reply/tool state so it doesn't bleed into this one.
             clearTurn();
             model.heard = payload || ''; heardEl.textContent = model.heard;
+            heardEl.classList.remove('partial');
             break;
           }
           case 'sentence': {
@@ -108,25 +127,28 @@
             // of blanking it out.
             if (typeof t.detail === 'string') detailEl.textContent = t.detail;
             if (decision === 'ask') {
-              hintEl.textContent = 'say "yes" or "no"';
+              // No "say yes or no" text here: the #status label already
+              // says "Say yes or no" while confirming, so the hint row is
+              // reserved for the question itself (set by the 'prompt' event
+              // below), not a duplicate of the status label.
               model.confirmTimeoutMs = (+t.timeout_ms) || 8000;
               // Countdown starts here (once the question has actually been
               // spoken and we're about to start listening), not when the
               // 'confirming' state was entered.
               model.confirmStart = performance.now();
             } else {
-              hintEl.textContent = '';
               model.prompt = ''; promptEl.textContent = '';
             }
             break;
           }
           case 'prompt': {
             // The confirmation question, spoken right before we start
-            // listening. Shown immediately, with the hint beneath it; the
-            // countdown arc itself doesn't start until the 'tool' ask event.
+            // listening. Shown immediately in the prompt row; the status
+            // label already reads "Say yes or no" while confirming, so
+            // there's no separate hint text here. The countdown arc itself
+            // doesn't start until the 'tool' ask event.
             const s = String(payload ?? '');
             model.prompt = s; promptEl.textContent = s;
-            hintEl.textContent = s ? 'say "yes" or "no"' : '';
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
@@ -292,6 +314,8 @@
     const pal = PALETTE[model.state] || PALETTE.idle;
     micSmooth += (model.mic - micSmooth) * 0.25;
     const vLevel = model.state === 'speaking' ? voiceLevel(now) : 0;
+    statusLevelEl.style.width = (Math.max(0, Math.min(1, micSmooth)) * 100) + '%';
+    const listeningGlow = model.state === 'listening' || model.state === 'followup';
 
     for (const shell of SHELLS) {
       shell.angle += dt * shell.baseSpeed * pal.speed;
@@ -307,6 +331,7 @@
     let glowAlphaBoost = 1;
     if (pal.voiceBoost) glowAlphaBoost = 1 + vLevel * 0.6;
     else if (pal.flicker) glowAlphaBoost = 0.8 + 0.4 * Math.sin(now / 130);
+    else if (listeningGlow) glowAlphaBoost = 1.6;
     const glow = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * 0.9);
     glow.addColorStop(0, 'rgba(255,170,60,.45)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.globalAlpha = Math.min(1, glowAlphaBoost);
@@ -319,6 +344,7 @@
       let factor = shell.factor;
       if (pal.micBoost && si === 0) factor *= 1 + 0.15 * micSmooth;
       const extraLine = pal.voiceBoost ? 1.2 * vLevel : 0;
+      const shellBrightness = (listeningGlow && si === 0) ? 1.35 : 1;
 
       // faint filled disc behind the wireframe so the sphere reads as a body
       ctx.globalAlpha = 1;
@@ -336,11 +362,11 @@
         }
       }
       // back-facing first, front-facing drawn on top of it
-      ctx.globalAlpha = pal.alpha * 0.18;
+      ctx.globalAlpha = Math.min(1, pal.alpha * 0.18 * shellBrightness);
       ctx.strokeStyle = colors.back;
       ctx.lineWidth = 0.45 + extraLine;
       ctx.stroke(backPath);
-      ctx.globalAlpha = pal.alpha * 0.9;
+      ctx.globalAlpha = Math.min(1, pal.alpha * 0.9 * shellBrightness);
       ctx.strokeStyle = colors.front;
       ctx.lineWidth = 0.8 + extraLine;
       ctx.stroke(frontPath);

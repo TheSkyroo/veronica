@@ -27,6 +27,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=Transcriber(s.whisper_model) if audio else None,
+        partial_stt=Transcriber(s.partial_stt_model) if (audio and s.partial_stt) else None,
         brain=Brain(s, confirm=confirm, on_tool=on_tool),
         tts=Synthesizer(s.kokoro_voice, s.models_dir),
         player=Player(),

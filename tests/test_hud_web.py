@@ -142,7 +142,9 @@ def test_confirm_hint_appears_and_clears():
         # The question is spoken (and rendered) as a 'prompt' event, distinct
         # from the reply row; the 'tool' ask event (carrying summary/detail
         # and the countdown timeout) follows once the question has been
-        # spoken.
+        # spoken. The status label ("Say yes or no") covers the "how to
+        # answer" part, so the #hint row is not a duplicate of it.
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
         page.evaluate(
             "window.hud.push({kind:'prompt', payload:'Fetch weather from wttr.in?'})"
         )
@@ -151,7 +153,8 @@ def test_confirm_hint_appears_and_clears():
             "detail:'Bash: curl -s https://wttr.in', decision:'ask', timeout_ms:8000}})"
         )
         assert page.inner_text("#prompt .msg") == 'Fetch weather from wttr.in?'
-        assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
+        assert page.inner_text("#status .label") == 'Say yes or no'
+        assert page.inner_text("#hint .msg") == ""  # no duplicate "say yes or no" text
         assert page.inner_text("#tool .detail") == 'Bash: curl -s https://wttr.in'
         assert page.inner_text("#reply .msg") == 'Something before.'
 
@@ -231,4 +234,128 @@ def test_hud_setvisible_does_not_double_schedule_raf():
 
         assert toggled <= baseline * 1.3, f"toggled={toggled} baseline={baseline}"
 
+        browser.close()
+
+
+@pytest.mark.live
+def test_status_label_per_state():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        assert page.inner_text("#status .label") == ""
+
+        cases = [
+            ("warming", "Warming up…"),
+            ("listening", "Listening…"),
+            ("thinking", "Thinking…"),
+            ("speaking", "Speaking"),
+            ("followup", "Listening…"),
+            ("confirming", "Say yes or no"),
+            ("error", "Error"),
+        ]
+        for state, label in cases:
+            page.evaluate(f"window.hud.push({{kind:'state', payload:'{state}'}})")
+            assert page.inner_text("#status .label") == label, state
+            assert page.get_attribute("#status", "data-state") == state
+
+        page.evaluate("window.hud.push({kind:'state', payload:'idle'})")
+        assert page.inner_text("#status .label") == ""
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_level_bar_grows_with_mic_while_listening():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'mic', payload:0.8})")
+        page.wait_for_timeout(500)  # let the smoothed mic level catch up
+        width = page.eval_on_selector("#status .level i", "el => el.getBoundingClientRect().width")
+        assert width > 40, width  # bar is 120px wide; a strong mic level should fill a good chunk
+
+        page.evaluate("window.hud.push({kind:'state', payload:'idle'})")
+        page.wait_for_timeout(50)
+        level_display = page.eval_on_selector(
+            "#status .level", "el => getComputedStyle(el).display"
+        )
+        assert level_display == "none"
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_heard_clamp_keeps_card_in_bounds():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        long_heard = "word " * 60  # ~300 chars
+        page.evaluate("window.hud.push({kind:'heard', payload:" + repr(long_heard) + "})")
+        page.wait_for_timeout(100)
+
+        card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        heard_box = page.eval_on_selector("#heard", "el => el.getBoundingClientRect()")
+        assert heard_box["bottom"] <= card_box["bottom"]
+        assert card_box["width"] == 400 and card_box["height"] == 230
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_partial_transcript_then_final():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'heard_partial', payload:'what time'})")
+        assert page.inner_text("#heard .msg") == "what time"
+        assert "partial" in page.get_attribute("#heard .msg", "class")
+
+        page.evaluate("window.hud.push({kind:'heard', payload:'what time is it'})")
+        assert page.inner_text("#heard .msg") == "what time is it"
+        assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
+
+        # a fresh 'listening' clears any leftover partial styling/text
+        page.evaluate("window.hud.push({kind:'heard_partial', payload:'stray'})")
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        assert page.inner_text("#heard .msg") == ""
+        assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
+
+        assert not errors, f"page errors: {errors}"
         browser.close()

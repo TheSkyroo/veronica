@@ -10,10 +10,17 @@ from veronica.orchestrator import Orchestrator
 class Wake:
     async def wait(self, threshold=None, suppress=None): pass
     def stop(self): pass
+    def take_preroll(self): return np.zeros(0, dtype=np.int16)
 
 class Rec:
-    def __init__(self, pcms): self.pcms = list(pcms)
-    async def capture(self, max_s=None): return self.pcms.pop(0) if self.pcms else None
+    def __init__(self, pcms, has_speech=False):
+        self.pcms = list(pcms)
+        self._has_speech = has_speech
+        self.preroll_calls = []
+    async def capture(self, max_s=None, preroll=None, partial=False):
+        self.preroll_calls.append(preroll)
+        return self.pcms.pop(0) if self.pcms else None
+    def has_speech(self, pcm): return self._has_speech
 
 class STT:
     def __init__(self, texts): self.texts = list(texts)
@@ -63,6 +70,35 @@ async def test_chime_after_wake_and_on_followup():
     await o.one_turn()
     # chime samples go through player.play like speech; count plays: wake chime + 2 sentences + followup chime
     assert o.player.played == 4
+
+
+async def test_wake_chime_skipped_when_preroll_has_speech():
+    o, _ = build()
+    o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=True)
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    # wake chime skipped (preroll already has speech), so: 2 sentences + followup chime
+    assert o.player.played == 3
+
+
+async def test_wake_chime_played_when_preroll_has_no_speech():
+    o, _ = build()
+    o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=False)
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    # wake chime + 2 sentences + followup chime
+    assert o.player.played == 4
+
+
+async def test_preroll_is_handed_to_recorder_capture():
+    rec = Rec([np.zeros(1, np.int16), None])
+    o, _ = build()
+    o.recorder = rec
+    o.wake = Wake()
+    o.stt = STT(["hi"])
+    await o.one_turn()
+    assert len(rec.preroll_calls) >= 1
+    assert isinstance(rec.preroll_calls[0], np.ndarray)  # the wake-triggered listen gets the wake engine's preroll
 
 
 async def test_chime_skipped_when_muted():
@@ -194,6 +230,9 @@ async def test_run_forever_survives_reporting_failure():
         def stop(self):
             self._barge_ev.set()
 
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
+
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
         wake=WakeOnceThenCancel(),
@@ -292,9 +331,11 @@ class RecArgs:
         self.pcms = list(pcms)
         self.max_s_calls = []
 
-    async def capture(self, max_s=None):
+    async def capture(self, max_s=None, preroll=None, partial=False):
         self.max_s_calls.append(max_s)
         return self.pcms.pop(0) if self.pcms else None
+
+    def has_speech(self, pcm): return False
 
 
 async def test_first_capture_uses_listen_wait_s_and_no_speech_goes_idle():
@@ -357,6 +398,9 @@ async def test_wake_failure_retries_and_continues_into_a_turn(monkeypatch):
         def stop(self):
             self._barge_ev.set()
 
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
+
     states = []
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -397,6 +441,9 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
 
         def stop(self):
             self._barge_ev.set()
+
+        def take_preroll(self):
+            return __import__("numpy").zeros(0, dtype="int16")
 
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
@@ -581,6 +628,7 @@ class BargeWake:
         await self._ev.wait(); self._ev.clear(); return False
     def stop(self):
         self.stops += 1; self._ev.set()
+    def take_preroll(self): return np.zeros(0, dtype=np.int16)
 
 
 async def test_barge_listener_receives_suppress_callback():
@@ -668,11 +716,11 @@ async def test_barge_in_stops_speech_and_relistens():
             super().__init__(pcms)
             self.n = 0
 
-        async def capture(self, max_s=None):
+        async def capture(self, max_s=None, preroll=None, partial=False):
             self.n += 1
             if self.n > 1:
                 events.append("capture")
-            return await super().capture(max_s=max_s)
+            return await super().capture(max_s=max_s, preroll=preroll, partial=partial)
 
     class LoggingSlowBrain(SlowBrain):
         async def interrupt(self):
@@ -707,7 +755,10 @@ class StoppableRec:
         self.stops += 1
         self._ev.set()
 
-    async def capture(self, max_s=None):
+    def has_speech(self, pcm):
+        return False
+
+    async def capture(self, max_s=None, preroll=None, partial=False):
         item = self.pcms.pop(0) if self.pcms else None
         if item is self.BLOCK:
             await self._ev.wait()
@@ -784,9 +835,12 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
             self.pcms = list(pcms)
             self.captures = 0
 
-        async def capture(self, max_s=None):
+        async def capture(self, max_s=None, preroll=None, partial=False):
             self.captures += 1
             return self.pcms.pop(0) if self.pcms else None
+
+        def has_speech(self, pcm):
+            return False
 
         def stop(self):
             pass   # never reached: confirm() bails before it would capture
@@ -893,6 +947,8 @@ async def test_barge_listener_failure_does_not_cancel_good_turn(caplog):
             raise RuntimeError("mic hiccup")
         def stop(self):
             self.stops += 1
+        def take_preroll(self):
+            return np.zeros(0, dtype=np.int16)
 
     o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
     o.wake = RaisingWake()
@@ -982,3 +1038,228 @@ async def test_on_event_errors_are_swallowed():
     def boom(k, p): raise RuntimeError("x")
     o = Orchestrator(Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]), brain=Brain(), tts=TTS(), player=Player(), on_event=boom)
     await o.say("hi")   # must not raise
+
+
+# -- item 3: live partial transcript -------------------------------------------
+
+class PartialSTT:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls = 0
+
+    async def atranscribe(self, pcm):
+        self.calls += 1
+        return self.texts.pop(0) if self.texts else ""
+
+
+class RecWithOnAudio(Rec):
+    """Simulates the real Recorder firing on_audio during capture()."""
+    def __init__(self, pcms, audio_chunks):
+        super().__init__(pcms)
+        self.audio_chunks = audio_chunks
+        self.on_audio = None
+
+    async def capture(self, max_s=None, preroll=None, partial=False):
+        if partial and self.on_audio is not None:
+            for chunk in self.audio_chunks:
+                self.on_audio(chunk)
+            # give the loop.call_soon_threadsafe-scheduled callback (and the
+            # task it creates) time to actually run before this returns.
+            await asyncio.sleep(0.02)
+        return await super().capture(max_s=max_s, preroll=preroll, partial=partial)
+
+
+async def test_partial_transcript_emitted_during_capture_then_final_heard():
+    events = []
+    audio_chunks = [np.zeros(10, dtype=np.int16)]
+    rec = RecWithOnAudio([np.zeros(1, np.int16), None], audio_chunks)
+    partial = PartialSTT(["what time"])
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=rec, stt=STT(["what time is it"]),
+        partial_stt=partial,
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    await o.one_turn()
+    await asyncio.sleep(0.05)
+
+    kinds = [k for k, _ in events]
+    assert [p for k, p in events if k == "heard_partial"] == ["what time"]
+    assert ("heard", "what time is it") in events
+    assert kinds.index("heard_partial") < kinds.index("heard")
+
+
+async def test_no_partial_transcript_without_partial_stt():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    assert o.partial_stt is None
+    # Rec (the plain fake) has no on_audio attribute set by Orchestrator
+    # since partial_stt is None.
+    await o.one_turn()  # must not raise
+
+
+async def test_partial_transcription_coalesces_while_one_in_flight():
+    """A second on_audio callback that arrives while a partial transcription
+    is still running must be dropped, not queued."""
+    running = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class SlowPartial:
+        async def atranscribe(self, pcm):
+            calls.append(pcm)
+            running.set()
+            await release.wait()
+            return "slow result"
+
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=SlowPartial(),
+        brain=Brain(), tts=TTS(), player=Player(),
+    )
+    o._loop = asyncio.get_running_loop()
+
+    o._on_recorder_audio(np.zeros(4, dtype=np.int16))
+    await asyncio.wait_for(running.wait(), 1)
+    # second callback while the first is still in flight: coalesced away
+    o._on_recorder_audio(np.zeros(4, dtype=np.int16))
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+# -- fix round: confirm() must not be contaminated by a stray partial ---------
+
+async def test_confirm_capture_does_not_fire_on_audio():
+    """confirm()'s yes/no capture must never invoke on_audio — a partial
+    transcription of "yes" would otherwise overwrite the HUD's You row."""
+    audio_chunks = [np.zeros(10, dtype=np.int16)]
+    rec = RecWithOnAudio([np.zeros(1, np.int16)], audio_chunks)
+    partial = PartialSTT(["should never appear"])
+    events = []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=rec, stt=STT(["yes"]),
+        partial_stt=partial,
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    o._loop = asyncio.get_running_loop()
+    rec.on_audio = o._on_recorder_audio
+
+    assert await o.confirm("Bash: rm x") is True
+    await asyncio.sleep(0.05)
+    assert [p for k, p in events if k == "heard_partial"] == []
+    assert partial.calls == 0
+
+
+# -- fix round: stale partial dropped after the turn's final heard ------------
+
+async def test_run_partial_drops_result_if_gen_advanced_while_transcribing():
+    """The gen re-check right before _emit: even if a partial transcription
+    wasn't (or couldn't be) cancelled in time, a result computed for a
+    generation that's no longer current must not be emitted."""
+    events = []
+
+    class SlowPartial:
+        async def atranscribe(self, pcm):
+            return "late text"
+
+    o = Orchestrator(
+        Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=SlowPartial(),
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    stale_gen = o._partial_gen
+    o._partial_gen += 1  # simulate the owning capture() having already ended
+
+    await o._run_partial(np.zeros(4, dtype=np.int16), stale_gen)
+
+    assert [p for k, p in events if k == "heard_partial"] == []
+
+
+def test_schedule_partial_drops_stale_gen():
+    o = Orchestrator(
+        Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=object(), brain=Brain(), tts=TTS(), player=Player(),
+    )
+    stale_gen = o._partial_gen
+    o._partial_gen += 1
+
+    o._schedule_partial(np.zeros(4, dtype=np.int16), stale_gen)
+
+    assert o._partial_task is None  # never scheduled: the gen was already stale
+
+
+async def test_partial_task_cancelled_when_capture_returns():
+    o, _ = build()
+    o.partial_stt = object()  # unused; we drive _partial_task directly
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    o._partial_task = asyncio.ensure_future(fut)
+    o._end_partial_window()
+    await asyncio.sleep(0)
+    assert o._partial_task.cancelled()
+
+
+async def test_end_partial_window_bumps_gen_each_call():
+    o, _ = build()
+    g0 = o._partial_gen
+    o._end_partial_window()
+    assert o._partial_gen == g0 + 1
+    o._end_partial_window()
+    assert o._partial_gen == g0 + 2
+
+
+# -- item 4: stop eavesdropping (shorter follow-up, spoken end phrases) --------
+
+async def test_end_phrase_thanks_veronica_says_okay_and_goes_idle():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["thanks veronica"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+    assert "followup" not in states
+
+
+async def test_end_phrase_thank_you_veronica_says_okay():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["Thank you, Veronica!"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert o.brain.asked == []
+
+
+@pytest.mark.parametrize(
+    "heard",
+    ["that's all", "thats all", "that is all", "stop", "goodbye", "never mind", "nevermind"],
+)
+async def test_end_phrase_silent_variants_go_idle_without_speaking(heard):
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[heard])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+
+
+async def test_end_phrase_matches_case_and_punctuation_insensitively():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["Stop."])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+
+
+async def test_non_end_phrase_is_not_treated_as_end():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["stop the timer"])
+    await o.one_turn()
+    assert o.brain.asked == ["stop the timer"]
+
+
+async def test_followup_window_default_is_four_seconds():
+    assert Settings().followup_window_s == 4
+
+
+async def test_vad_silence_ms_default_is_600():
+    assert Settings().vad_silence_ms == 600

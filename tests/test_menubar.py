@@ -129,11 +129,20 @@ def fake_env(monkeypatch, tmp_home, request):
 
     request.addfinalizer(_restore_real_rumps)
 
-    orch_holder = {}
+    # Written on the main thread, before VeronicaApp() ever starts its
+    # background thread, so _make_app() waiting on it never races the key
+    # itself — only the .set() (done from the background thread once
+    # build_orchestrator actually ran) is awaited.
+    orch_holder = {"ready": threading.Event()}
 
     def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True):
         orch = FakeOrch(on_state=on_state)
         orch_holder["orch"] = orch
+        # VeronicaApp() (on the main thread) can return before the
+        # background thread it starts has run build_orchestrator and
+        # populated orch_holder — signal readiness explicitly rather than
+        # racing a bare dict read.
+        orch_holder["ready"].set()
         return orch
 
     monkeypatch.setattr(menubar, "build_orchestrator", fake_build_orchestrator)
@@ -143,6 +152,11 @@ def fake_env(monkeypatch, tmp_home, request):
 
 def _make_app(menubar, orch_holder):
     app = menubar.VeronicaApp()
+    # VeronicaApp() can return before the background thread it starts has
+    # reached build_orchestrator and populated orch_holder — wait for that
+    # explicitly instead of racing a bare dict read (this was the source of
+    # an intermittent KeyError: 'orch').
+    assert orch_holder["ready"].wait(2), "build_orchestrator was not called within 2s"
     orch = orch_holder["orch"]
     assert orch.started.wait(2), "background loop did not start within 2s"
     return app, orch

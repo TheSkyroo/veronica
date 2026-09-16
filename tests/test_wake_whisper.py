@@ -11,8 +11,14 @@ CHUNK = 1280  # 80 ms @ 16 kHz
 
 
 class FakeSegment:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, words=None) -> None:
         self.text = text
+        self.words = words or []
+
+
+class Word:
+    def __init__(self, start: float, end: float, word: str) -> None:
+        self.start, self.end, self.word = start, end, word
 
 
 class FakeModel:
@@ -108,7 +114,7 @@ async def test_stop_is_consumed(monkeypatch):
     assert await _wait_for(task, 3) is False
 
     # a stale stop flag must not poison the next wait()
-    monkeypatch.setattr(w, "_transcribe", lambda window: "hey veronica")
+    monkeypatch.setattr(w, "_transcribe", lambda window: [FakeSegment("hey veronica")])
     assert await _wait_for(w.wait(), 3) is True
 
 
@@ -153,6 +159,52 @@ async def test_own_speech_is_suppressed(monkeypatch):
     w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
     suppress_texts = iter(["I am Veronica, your assistant.", ""])
     assert await _wait_for(w.wait(suppress=lambda: next(suppress_texts)), 3) is True
+
+
+def _wordseg_model_cls(words, text):
+    def _factory(model_name, device=None, compute_type=None):
+        class M:
+            def transcribe(self, audio, **kw):
+                return [FakeSegment(text, words)], None
+        return M()
+    return staticmethod(_factory)
+
+
+@pytest.mark.asyncio
+async def test_take_preroll_returns_tail_after_last_wake_word_then_empty(monkeypatch):
+    # First hop transcribed is exactly wake_hop_s (0.4s) of buffered audio;
+    # "veronica" ends at 0.3s into that window, so the tail from 0.3s to 0.4s
+    # (0.1s = 1600 samples at 16 kHz) should become the pre-roll.
+    words = [Word(0.0, 0.15, "hey"), Word(0.15, 0.3, "veronica")]
+    monkeypatch.setattr(WhisperWake, "_model_cls", _wordseg_model_cls(words, "hey veronica"))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    assert await _wait_for(w.wait(), 3) is True
+
+    preroll = w.take_preroll()
+    assert preroll.size == 1600
+    assert np.all(preroll == 1000)
+    assert w.take_preroll().size == 0
+
+
+@pytest.mark.asyncio
+async def test_take_preroll_falls_back_without_word_timestamps(monkeypatch):
+    # No word-level timestamps at all -> fallback to window_end - 0.3s.
+    # window here is 0.4s (wake_hop_s), so fallback end_s = 0.1s -> tail is
+    # 0.3s = 4800 samples.
+    monkeypatch.setattr(WhisperWake, "_model_cls", _wordseg_model_cls([], "veronica"))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    assert await _wait_for(w.wait(), 3) is True
+
+    preroll = w.take_preroll()
+    assert preroll.size == 4800
+
+
+def test_wakeword_take_preroll_returns_empty_int16(monkeypatch, tmp_home):
+    monkeypatch.setattr(WakeWord, "_model_cls", staticmethod(lambda wakeword_models, inference_framework: object()))
+    w = WakeWord(Settings(wake_engine="openwakeword"), frames=lambda: iter([]))
+    p = w.take_preroll()
+    assert p.size == 0
+    assert p.dtype == np.int16
 
 
 @pytest.mark.asyncio

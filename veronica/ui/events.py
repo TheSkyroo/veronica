@@ -3,7 +3,7 @@ import math
 
 import numpy as np
 
-EVENT_KINDS = frozenset({"state", "heard", "sentence", "tool", "prompt", "mic", "voice", "warm"})
+EVENT_KINDS = frozenset({"state", "heard", "heard_partial", "sentence", "tool", "prompt", "mic", "voice", "warm"})
 
 
 def rms(pcm16: np.ndarray) -> float:

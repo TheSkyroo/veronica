@@ -61,6 +61,7 @@ class WhisperWake:
         self._window_samples = int(settings.wake_window_s * settings.sample_rate)
         self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
         self._buf = np.zeros(0, dtype=np.int16)
+        self.preroll = np.zeros(0, dtype=np.int16)
 
     def _mic_frames(self) -> Iterator[bytes]:
         # Relies on CPython refcounting to close the stream (via __exit__) as soon as
@@ -87,7 +88,7 @@ class WhisperWake:
             WhisperWake._warned_threshold = True
         return await asyncio.to_thread(self._wait, suppress)
 
-    def _transcribe(self, window: np.ndarray) -> str:
+    def _transcribe(self, window: np.ndarray) -> list:
         audio = window.astype(np.float32) / 32768.0
         segments, _ = self._model.transcribe(
             audio,
@@ -95,8 +96,39 @@ class WhisperWake:
             language="en",
             vad_filter=False,
             condition_on_previous_text=False,
+            word_timestamps=True,
         )
+        return list(segments)
+
+    @staticmethod
+    def _segments_text(segments: list) -> str:
         return " ".join(s.text.strip() for s in segments).strip()
+
+    @staticmethod
+    def _last_wake_word_end(segments: list, window_dur_s: float) -> float:
+        """End time (seconds into the transcribed window) of the last word
+        that itself fuzzy-matches "veronica". Falls back to window end - 0.3s
+        (a rough guess at the wake word's length) when word timestamps aren't
+        available or nothing at the word level matched (e.g. a substring-only
+        phrase match like "hey veronica" mis-segmented by the model)."""
+        last_end = None
+        for seg in segments:
+            for w in getattr(seg, "words", None) or []:
+                word = _normalize(getattr(w, "word", ""))
+                if not word or abs(len(word) - len("veronica")) > 1:
+                    continue
+                if difflib.SequenceMatcher(None, word, "veronica").ratio() >= 0.8:
+                    last_end = w.end
+        if last_end is None:
+            return max(0.0, window_dur_s - 0.3)
+        return last_end
+
+    def take_preroll(self) -> np.ndarray:
+        """Return (and clear) the audio captured just after the last matched
+        wake word, so a command spoken in the same breath isn't lost."""
+        p = self.preroll
+        self.preroll = np.zeros(0, dtype=np.int16)
+        return p
 
     def _wait(self, suppress: Callable[[], str] | None = None) -> bool:
         self._buf = np.zeros(0, dtype=np.int16)
@@ -113,11 +145,16 @@ class WhisperWake:
             since_hop = 0
             if rms(self._buf) < self.s.wake_min_rms:
                 continue
-            text = self._transcribe(self._buf)
+            segments = self._transcribe(self._buf)
+            text = self._segments_text(segments)
             if _matches(text, self.s.wake_phrases):
+                window_dur_s = self._buf.size / self.s.sample_rate
+                end_s = self._last_wake_word_end(segments, window_dur_s)
+                self.preroll = self._buf[int(end_s * self.s.sample_rate):].copy()
                 self._buf = np.zeros(0, dtype=np.int16)
                 if suppress is not None and _matches(suppress(), self.s.wake_phrases):
                     log.debug("wake match suppressed (own speech)")
+                    self.preroll = np.zeros(0, dtype=np.int16)
                     continue
                 return True
         return False
