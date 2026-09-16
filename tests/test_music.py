@@ -49,9 +49,23 @@ async def test_music_play_with_query_spotify_uses_search_url(monkeypatch):
     assert not res.get("is_error")
     assert text(res) == "Playing bohemian rhapsody."
     script = calls[1][0][2]
-    assert "spotify:search:bohemian rhapsody" in script
+    # T3: the query is percent-encoded into the URL
+    assert "spotify:search:bohemian%20rhapsody" in script
+    assert "spotify:search:bohemian rhapsody" not in script
     assert "delay 1" in script
     assert 'tell application "Spotify" to play' in script
+
+
+async def test_music_play_spotify_query_percent_encodes_specials(monkeypatch):
+    calls = _scripted(monkeypatch, [spotify_running(True), Done(out="")])
+    await music.music_play.handler({"query": 'AC/DC & "friends" #1 café'})
+    script = calls[1][0][2]
+    assert "spotify:search:AC%2FDC%20%26%20%22friends%22%20%231%20caf%C3%A9" in script
+    assert '"friends"' not in script.split("open location")[1].split("\n")[0].strip('"')
+
+
+def test_music_q_escapes_backslashes_and_quotes():
+    assert music._q('a\\b "c"') == 'a\\\\b \\"c\\"'
 
 
 async def test_music_play_with_query_music_app(monkeypatch):

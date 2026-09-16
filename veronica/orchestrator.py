@@ -384,7 +384,7 @@ class Orchestrator:
         if isinstance(result, str):
             log.warning("screen capture failed: %s", result)
             return await self.handle_text(text)
-        data, _path = result
+        data, _path, _mime = result
         return await self.handle_text(text, images=[data])
 
     # -- music -----------------------------------------------------------------

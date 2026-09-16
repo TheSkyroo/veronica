@@ -236,6 +236,32 @@ async def test_notes_create(fake_run):
     assert 'name:"Groceries"' in argv[2]
     assert 'body:"milk, eggs"' in argv[2]
     assert "Created note 'Groceries'" in text(res)
+    # T2: default account/folder, not a hard-coded `at folder "Notes"`
+    assert "at folder" not in argv[2]
+    assert 'make new note with properties' in argv[2]
+
+
+async def test_notes_create_escapes_html_in_body_and_title(fake_run):
+    """T2: note bodies are HTML — user text must render literally."""
+    await pim.notes_create.handler({"title": "A <b>bold</b> & co", "body": "x < y && <script>alert(1)</script>"})
+    argv = argv_of(fake_run)
+    assert 'name:"A &lt;b&gt;bold&lt;/b&gt; &amp; co"' in argv[2]
+    assert 'body:"x &lt; y &amp;&amp; &lt;script&gt;alert(1)&lt;/script&gt;"' in argv[2]
+    assert "<b>" not in argv[2] and "<script>" not in argv[2]
+
+
+async def test_notes_create_ampersand(fake_run):
+    await pim.notes_create.handler({"title": "R&D", "body": "fish & chips"})
+    argv = argv_of(fake_run)
+    assert 'name:"R&amp;D"' in argv[2]
+    assert 'body:"fish &amp; chips"' in argv[2]
+
+
+async def test_notes_create_newlines_become_br(fake_run):
+    await pim.notes_create.handler({"title": "Lines", "body": "one\ntwo\nthree"})
+    argv = argv_of(fake_run)
+    assert 'body:"one<br>two<br>three"' in argv[2]
+    assert "\n" not in argv[2].split('body:"')[1].split('"')[0]
 
 
 async def test_notes_create_missing_title_is_error(fake_run):
@@ -252,7 +278,29 @@ async def test_notes_create_no_body(fake_run):
 async def test_notes_create_escapes_quotes(fake_run):
     await pim.notes_create.handler({"title": 'Say "hi"', "body": 'he said "hi"'})
     argv = argv_of(fake_run)
+    # quotes are left for _q() (AppleScript escaping), not turned into &quot;
     assert argv[2].count('\\"hi\\"') == 2
+    assert "&quot;" not in argv[2]
+
+
+# -- _q (AppleScript string literal quoting) ------------------------------------
+
+@pytest.mark.parametrize("raw, quoted", [
+    ('say "hi"', 'say \\"hi\\"'),
+    ("C:\\path\\to", "C:\\\\path\\\\to"),                        # T10: backslashes doubled
+    ('back\\slash "and" quote', 'back\\\\slash \\"and\\" quote'),
+    ("trailing backslash\\", "trailing backslash\\\\"),
+    ('\\"', '\\\\\\"'),                                         # a backslash-quote pair stays a pair
+    ("plain", "plain"),
+])
+def test_q_escapes_backslashes_before_quotes(raw, quoted):
+    assert pim._q(raw) == quoted
+
+
+async def test_reminder_create_escapes_backslashes(fake_run):
+    await pim.reminder_create.handler({"title": "path C:\\temp"})
+    argv = argv_of(fake_run)
+    assert 'name:"path C:\\\\temp"' in argv[2]
 
 
 # -- reminders_due --------------------------------------------------------------

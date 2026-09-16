@@ -23,9 +23,15 @@ from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
 from veronica.tools.pim import pim_server
-from veronica.tools.screen import screen_server
+from veronica.tools.screen import latest_screenshot_path, screen_server
 
 log = logging.getLogger("veronica.brain")
+
+
+def _image_media_type(data: bytes) -> str:
+    """image/jpeg for JPEG magic bytes (an oversized capture re-encoded by
+    tools/screen.py), else image/png."""
+    return "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
 
 Confirm = Callable[[str, str], Awaitable[bool]]
 
@@ -243,18 +249,33 @@ class Brain:
 
         async def _stream():
             content: list[dict] = [{"type": "text", "text": text}]
-            for png_bytes in images:
+            for image_bytes in images:
                 content.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
-                        "data": base64.b64encode(png_bytes).decode("ascii"),
+                        "media_type": _image_media_type(image_bytes),
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
                     },
                 })
-            yield {"type": "user", "message": {"role": "user", "content": content}}
+            # parent_tool_use_id: None for parity with the SDK's own user
+            # message shape (see claude_agent_sdk client.py's streaming
+            # example); some SDK versions read it unconditionally.
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "parent_tool_use_id": None,
+            }
 
         return _stream()
+
+    @staticmethod
+    def _image_fallback_text(text: str) -> str:
+        return (
+            f"{text}\n\n(A screenshot of the screen was taken but could not be "
+            f"attached to this message; it is saved at {latest_screenshot_path()} "
+            "— use the Read tool to look at it.)"
+        )
 
     # -- public ---------------------------------------------------------------
     async def ask(self, text: str, images: list[bytes] = ()) -> AsyncIterator[str]:
@@ -271,7 +292,17 @@ class Brain:
             # the turn actually ends (a ResultMessage is seen, in close(), or
             # after interrupt()'s drain completes).
             self._in_flight = True
-            await client.query(self._build_prompt(text, tuple(images)))
+            try:
+                await client.query(self._build_prompt(text, tuple(images)))
+            except Exception:
+                if not images:
+                    raise
+                # The image content-block message shape is the least
+                # battle-tested path through the SDK; rather than failing
+                # the whole turn, fall back to a plain text query that
+                # points Claude's Read tool at the saved capture.
+                log.exception("image query failed; falling back to text-only")
+                await client.query(self._image_fallback_text(text))
             it = client.receive_response().__aiter__()
             while True:
                 try:

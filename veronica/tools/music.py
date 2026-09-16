@@ -5,6 +5,7 @@ access beyond what Spotify/Music.app already do on their own.
 """
 import asyncio
 import subprocess
+import urllib.parse
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -77,9 +78,12 @@ def _play_sync(query: str) -> dict:
     if be == "spotify":
         # Spotify's AppleScript dictionary has no search command; open the
         # spotify:search: URL (which the Spotify app handles itself) then
-        # play once it's loaded a result.
+        # play once it's loaded a result. The query is a URL path segment:
+        # percent-encode it (spaces, '&', '#', non-ASCII...) so it survives
+        # both the URI parser and the AppleScript string literal.
+        encoded = urllib.parse.quote(query, safe="")
         script = (
-            f'tell application "Spotify" to open location "spotify:search:{_q(query)}"\n'
+            f'tell application "Spotify" to open location "spotify:search:{_q(encoded)}"\n'
             "delay 1\n"
             'tell application "Spotify" to play\n'
         )

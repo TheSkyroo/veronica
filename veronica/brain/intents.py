@@ -165,7 +165,9 @@ MusicAction = Literal["play", "pause", "next", "prev", "now_playing"]
 _MUSIC_PLAY_PHRASES = frozenset({"resume", "resume music", "play music", "unpause", "unpause music"})
 _MUSIC_PAUSE_PHRASES = frozenset({"pause", "pause music", "stop the music", "stop music"})
 _MUSIC_NEXT_PHRASES = frozenset({"next song", "next track", "skip", "skip song", "skip track"})
-_MUSIC_PREV_PHRASES = frozenset({"previous song", "previous track", "previous", "go back", "last song"})
+# "go back" deliberately absent: far too generic (navigation, undo, "go
+# back to what you were saying") to hijack as a music command.
+_MUSIC_PREV_PHRASES = frozenset({"previous song", "previous track", "previous", "last song"})
 _MUSIC_NOW_PLAYING_PHRASES = frozenset({
     "whats playing", "what is playing", "what's playing",
     "what song is this", "what song is playing", "whats this song",

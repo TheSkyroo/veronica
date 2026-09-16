@@ -1752,7 +1752,7 @@ class ImageBrain:
 
 async def test_screen_intent_captures_and_sends_image(monkeypatch):
     monkeypatch.setattr(
-        orchestrator_mod, "capture_screenshot", lambda region: (b"PNGDATA", "/tmp/x.png")
+        orchestrator_mod, "capture_screenshot", lambda region: (b"PNGDATA", "/tmp/x.png", "image/png")
     )
     o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's on my screen"])
     o.brain = ImageBrain()

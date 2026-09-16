@@ -175,7 +175,7 @@ def test_match_screen_intent(heard, expected):
         ("skip song", "next"),
         ("previous", "prev"),
         ("previous song", "prev"),
-        ("go back", "prev"),
+        ("go back", None),   # T12: too generic to be a music command
         ("what's playing", "now_playing"),
         ("whats playing", "now_playing"),
         ("what song is this", "now_playing"),
