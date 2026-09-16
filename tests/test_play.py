@@ -340,8 +340,9 @@ async def test_interruption_by_device_refresh_logs_info_not_warning(fake_sd, cap
         p.close_stream()
         fake_sd.streams[-1].finished_callback()
         await task
-    assert [r.levelno for r in caplog.records] == [logging.INFO]
-    assert "device refresh" in caplog.records[0].getMessage()
+    recs = [r for r in caplog.records if r.name == "veronica.audio.play"]
+    assert [r.levelno for r in recs] == [logging.INFO]
+    assert "device refresh" in recs[0].getMessage()
 
     # a stream that dies on its own is still a WARNING
     caplog.clear()
@@ -351,4 +352,69 @@ async def test_interruption_by_device_refresh_logs_info_not_warning(fake_sd, cap
         fake_sd.streams[-1].stop()
         fake_sd.streams[-1].finished_callback()
         await task
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert [r.levelno for r in caplog.records if r.name == "veronica.audio.play"] == [logging.WARNING]
+
+
+async def test_stream_open_retry_does_not_reinit_while_capture_in_flight(monkeypatch, caplog):
+    """Pa_Terminate under a Recorder's blocking read would be a use-after-
+    free: with devices.busy() True the retry is skipped and the open error
+    propagates (the chime fails; nothing is terminated)."""
+    import logging
+
+    class SD:
+        PortAudioError = play_mod._PortAudioError
+
+        def __init__(self):
+            self.calls = 0
+            self.reinit = []
+
+        def _terminate(self):
+            self.reinit.append("terminate")
+
+        def _initialize(self):
+            self.reinit.append("initialize")
+
+        def OutputStream(self, **kwargs):
+            self.calls += 1
+            raise play_mod._PortAudioError("Internal PortAudio error", -9986)
+
+    fsd = SD()
+    monkeypatch.setattr(play_mod, "sd", fsd)
+    monkeypatch.setattr(devices, "sd", fsd)
+    devices.register_busy(lambda: True)
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    with caplog.at_level(logging.WARNING, logger="veronica.audio.play"), pytest.raises(play_mod._PortAudioError):
+        await p.play(np.ones(500, dtype=np.float32))
+    assert fsd.reinit == [] and fsd.calls == 1
+    assert devices.generation == 0
+    assert "not re-initialising PortAudio: capture in flight" in caplog.text
+    assert p._stream is None
+
+
+@pytest.mark.asyncio
+async def test_refreshed_flag_cleared_by_successful_open(fake_sd, caplog):
+    """A refresh explains only the stream it closed: after the next play()
+    opens a fresh stream, that stream dying on its own is a WARNING again."""
+    import logging
+
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    task = asyncio.create_task(p.play(np.ones(1024, dtype=np.float32)))
+    await asyncio.sleep(0.01)
+    p.close_stream()
+    assert p._refreshed is True
+    fake_sd.streams[-1].finished_callback()
+    await task                                   # consumed here (INFO)
+    p.close_stream()                             # no stream: must not re-arm the flag
+    assert p._refreshed is False
+
+    p._refreshed = True                          # stale flag, e.g. close_stream() with no play() in between
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="veronica.audio.play"):
+        task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32)))
+        await asyncio.sleep(0.01)
+        assert p._refreshed is False             # cleared by the successful open
+        fake_sd.streams[-1].stop()
+        fake_sd.streams[-1].finished_callback()
+        await task
+    assert [r.levelno for r in caplog.records if r.name == "veronica.audio.play"] == [logging.WARNING]

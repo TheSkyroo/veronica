@@ -100,8 +100,15 @@ class Player:
                 # Players close first and the generation bump tells the wake
                 # mic reader (which only reads under refresh_lock, so it is
                 # between reads right now) to reopen its stream. A Recorder
-                # capture open at this moment is not protected: its next
-                # read fails and that capture returns None.
+                # capture's blocking read is *not* under the lock, and
+                # Pa_Terminate under it would be a use-after-free (the
+                # capture raises, it doesn't return None), so while a capture
+                # is in flight we don't re-initialise at all: this play()
+                # fails and the mic reader's watch refreshes once the
+                # capture is done.
+                if devices.busy():
+                    log.warning("output stream open failed (%s); not re-initialising PortAudio: capture in flight", e)
+                    raise
                 log.warning("output stream open failed (%s); re-initialising PortAudio", e)
                 devices.refresh_portaudio(before=close_registered_streams)
                 stream = self._open_stream()
@@ -111,7 +118,9 @@ class Player:
                 with contextlib.suppress(Exception):
                     stream.close()
                 raise
-            self._stream = stream
+            with self._lock:
+                self._stream = stream
+                self._refreshed = False   # a refresh only explains the stream it closed
             return stream
 
     def _on_finished(self) -> None:
@@ -200,7 +209,12 @@ class Player:
                 if self._stream is stream:
                     self._stream = None
                 self._queue.clear()
-            self._close_stream_obj(stream)
+            # _on_finished may already have detached this stream from
+            # self._stream, so close_registered_streams() can't close it for
+            # a refresh: close it under refresh_lock so a refresh can't
+            # terminate PortAudio while it is still live.
+            with devices.refresh_lock:
+                self._close_stream_obj(stream)
             return
 
     def stop(self) -> None:

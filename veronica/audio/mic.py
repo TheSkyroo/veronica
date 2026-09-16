@@ -125,7 +125,8 @@ def mic_frames(
         except Exception:
             log.exception("%s mic reader died", log_prefix)
         finally:
-            close_current()
+            with devices.refresh_lock:
+                close_current()
             q.put(None)
 
     t = threading.Thread(target=reader, name=f"{log_prefix}-mic", daemon=True)
