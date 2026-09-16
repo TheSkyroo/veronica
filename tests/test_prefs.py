@@ -1,4 +1,6 @@
 import json
+import os
+import threading
 
 from veronica import prefs
 
@@ -91,3 +93,57 @@ def test_clear_settings_override_on_missing_key_is_noop(monkeypatch, tmp_path):
     monkeypatch.setattr(prefs, "_PREFS_PATH", path)
     prefs.clear_settings_override("effort")
     assert prefs.load() == {}
+
+
+def test_save_is_atomic_no_temp_left_and_replace_used(monkeypatch, tmp_path):
+    path = tmp_path / "prefs.json"
+    monkeypatch.setattr(prefs, "_PREFS_PATH", path)
+    replaced = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaced.append((os.path.basename(src), dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(prefs.os, "replace", spy)
+    prefs.save({"hud_mode": "mini"})
+    assert replaced and str(replaced[0][1]) == str(path)
+    assert replaced[0][0] != "prefs.json"          # written to a temp file first
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["prefs.json"]   # temp file gone
+    assert json.loads(path.read_text()) == {"hud_mode": "mini"}
+
+
+def test_save_failure_mid_write_leaves_old_file_intact(monkeypatch, tmp_path):
+    path = tmp_path / "prefs.json"
+    monkeypatch.setattr(prefs, "_PREFS_PATH", path)
+    prefs.save({"hud_mode": "mini"})
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(prefs.os, "replace", boom)
+    prefs.save({"hud_mode": "full"})    # logged, not raised
+    assert json.loads(path.read_text()) == {"hud_mode": "mini"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["prefs.json"]   # temp cleaned up
+
+
+def test_concurrent_saves_lose_nothing(monkeypatch, tmp_path):
+    path = tmp_path / "prefs.json"
+    monkeypatch.setattr(prefs, "_PREFS_PATH", path)
+    n = 8
+    start = threading.Barrier(n)
+
+    def worker(i):
+        start.wait()
+        for j in range(20):
+            prefs.save_settings_override(f"k{i}", j)
+            prefs.save({f"p{i}": j})
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    data = prefs.load()
+    assert data["settings"] == {f"k{i}": 19 for i in range(n)}
+    assert all(data[f"p{i}"] == 19 for i in range(n))
