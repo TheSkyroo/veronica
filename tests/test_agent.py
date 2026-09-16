@@ -723,5 +723,5 @@ async def test_options_register_browser_server(brain):
 
 def test_system_prompt_asks_for_same_language_replies():
     p = system_prompt(dt.date(2026, 9, 15))
-    assert "Reply in the same language they used" in p
+    assert "reply in Hindi written in Devanagari script" in p
     assert "Hinglish" in p and "Devanagari" in p

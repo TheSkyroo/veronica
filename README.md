@@ -175,7 +175,8 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 
 - **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
   (Sarah, Bella, Nicole, Sky, Adam, Michael, Emma, Isabella, George, Lewis), picked by name or by descriptor
-  (british/american, male/female), plus the four Hindi voices (see *Hindi & Hinglish*); "use the default voice"
+  (british/american, male/female), plus the four Hindi voices (see *Hindi & Hinglish*) — picking a Hindi voice while she's in English mode also switches her to
+  "understand both" so she can hear Hindi; "use the default voice"
   goes back to the configured one. "Change your voice" /
   "different voice" cycles to the next one. She confirms in the new voice ("Okay, this is George.") so you hear it
   straight away; an unknown name gets the list back.
@@ -208,13 +209,14 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 
 - **Switch** — "speak hindi" / "hindi mein bolo" pins her to Hindi; "speak english" / "english mein bolo" goes
   back; "understand both" / "dono bhasha" lets whisper detect the language per utterance. She confirms in the new
-  language ("Ab Hindi mein baat karte hain." / "Okay, English it is." / "Theek hai, dono chalega."), and the mode
+  language ("अब हिंदी में बात करते हैं।" / "Okay, English it is." / "ठीक है, दोनों चलेगा।"), and the mode
   persists in `~/.veronica/prefs.json`. In pinned Hindi mode everything you say is treated as Hindi and spoken with
   the Hindi voice; say "understand both" / "dono bhasha" if you mix English and Hindi.
 - **What to expect** — Hindi and auto mode swap the English-only whisper models for the multilingual ones; the
-  first switch downloads them (~500 MB) after an "Ek minute, Hindi load kar rahi hoon." Replies follow your
-  language: Hinglish in, Hinglish out (Latin letters); pure Hindi in, Devanagari out; English in, English out.
-  Hindi replies are spoken with a Hindi voice; timers, briefings and other announcements keep the English voice
+  first switch downloads them (~500 MB) after an "एक मिनट, हिंदी load कर रही हूँ।" Replies follow your
+  language: Hindi or Hinglish in → Hindi out in Devanagari (Kokoro's Hindi voice needs Devanagari to sound
+  natural — romanized Hinglish gets read like English); English in, English out. Hindi replies are spoken with a
+  Hindi voice; timers, briefings and other announcements keep the English voice
   unless they contain Devanagari.
 - **Hinglish commands** — the local intents understand romanized Hindi too: "bas karo" / "chup" ends the turn,
   "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "ji" / "nahi" answer a
@@ -222,7 +224,7 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
   common ones are understood in script as well ("बस करो", "हाँ" / "नहीं", "समय क्या है").
 - **Hindi voices** — Alpha, Beta (female), Omega, Psi (male). "Use a hindi voice" / "use the omega voice" picks
   the voice Hindi replies use (the English voice is untouched, so both show a checkmark in the **Voice** menu),
-  confirmed with "Theek hai, ab main aise bolungi." Prefetch the models without switching:
+  confirmed with "ठीक है, अब मैं ऐसे बोलूँगी।" Prefetch the models without switching:
   `uv run python scripts/download_models.py --hindi`.
 
 ## Briefings & nudges

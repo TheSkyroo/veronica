@@ -485,7 +485,13 @@ class Orchestrator:
                 self.tts.hindi_voice = vid
                 prefs.save({"tts_hindi_voice": vid})
                 self._emit("tool", {"summary": f"Voice: {voices.display_name(vid)}", "decision": "auto"})
-                await self.say("Theek hai, ab main aise bolungi.", lang="hi")
+                await self.say("ठीक है, अब मैं ऐसे बोलूँगी।", lang="hi")
+                if getattr(self, "language", "en") == "en":
+                    # Picking a Hindi voice while pinned to English is a
+                    # strong hint they want to *speak* Hindi too — the
+                    # English-only whisper can't hear it, so open up to
+                    # both languages.
+                    await self._language_turn("auto")
                 return
             self.tts.voice = vid
             prefs.save({"tts_voice": vid})
@@ -516,14 +522,14 @@ class Orchestrator:
 
     # -- language mode (C2) ---------------------------------------------------------
     _LANG_LOADING = {
-        "hi": "Ek minute, Hindi load kar rahi hoon.",
+        "hi": "एक मिनट, हिंदी load कर रही हूँ।",
         "en": "One moment, switching to English.",
         "auto": "Ek minute.",
     }
     _LANG_CONFIRM = {
-        "hi": "Ab Hindi mein baat karte hain.",
+        "hi": "अब हिंदी में बात करते हैं।",
         "en": "Okay, English it is.",
-        "auto": "Theek hai, dono chalega.",
+        "auto": "ठीक है, दोनों चलेगा।",
     }
 
     def _stt_spec(self, mode: str) -> tuple[str, str | None, str]:
@@ -559,7 +565,7 @@ class Orchestrator:
             except Exception:
                 log.exception("language switch failed")
                 if mode == "hi":
-                    await self.say("Hindi load nahi ho paayi, baad mein try karo.", lang="hi")
+                    await self.say("हिंदी load नहीं हो पाई, बाद में try करो।", lang="hi")
                 else:
                     await self.say("Couldn't switch language, check the log.")
                 return
@@ -801,7 +807,7 @@ class Orchestrator:
         only carries the language; the value is read here."""
         kind, reply = hit
         # A Hinglish/Devanagari phrase gets a Hindi reply even in English
-        # mode ("shukriya" -> "Koi baat nahi."), so voice it in Hindi too.
+        # mode ("shukriya" -> "कोई बात नहीं।"), so voice it in Hindi too.
         lang = reply if kind in ("battery", "volume") else quick.reply_lang(heard, self._utterance_lang)
         if kind == "battery":
             percent, state = await asyncio.to_thread(mac_tools.read_battery)

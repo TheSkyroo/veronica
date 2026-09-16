@@ -2992,7 +2992,7 @@ async def test_quick_battery_failure_copy(monkeypatch):
     monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (None, None))
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery kitni hai"])
     await o.one_turn()
-    assert o.tts.said == ["Battery level nahi mil paaya."]
+    assert o.tts.said == ["Battery level नहीं मिल पाया।"]
 
 
 async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
@@ -3002,7 +3002,7 @@ async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
     assert o.tts.said[-1] == "Battery is at 98 percent."
     o, *_ = build_lang(["battery kitni hai"], langs=["en"], mode="en")
     await o.one_turn()
-    assert o.tts.said[-1] == "Battery 98 percent hai."
+    assert o.tts.said[-1] == "Battery 98 percent है।"
 
 
 async def test_quick_volume_uses_mac_tool(monkeypatch):
@@ -3020,7 +3020,7 @@ async def test_quick_volume_error_copy(monkeypatch):
     monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["volume kitna hai"])
     await o.one_turn()
-    assert o.tts.said == ["Volume nahi mil paaya."]
+    assert o.tts.said == ["Volume नहीं मिल पाया।"]
 
 
 async def test_quick_uses_utterance_lang_for_english_phrase():
@@ -3030,7 +3030,7 @@ async def test_quick_uses_utterance_lang_for_english_phrase():
     await o.one_turn()
     assert o._utterance_lang == "hi"
     import datetime as _dt
-    assert o.tts.said == [f"Aaj {_dt.datetime.now().strftime('%A')} hai."]
+    assert o.tts.said == [f"आज {_dt.datetime.now().strftime('%A')} है।"]
 
 
 async def test_quick_does_not_shadow_local_intents_or_brain():
@@ -3136,7 +3136,7 @@ async def test_utterance_lang_from_detection_and_script():
 async def test_hinglish_phrase_in_auto_mode_counts_as_hindi():
     o, *_ = build_lang(["shukriya"], langs=["en"], mode="auto")
     await o.one_turn()
-    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+    assert o.tts.said[-1] in {"कोई बात नहीं।", "हमेशा।"} and o.tts.langs[-1][1] == "hi"
 
 
 async def test_hinglish_phrase_in_english_mode_stays_english():
@@ -3144,7 +3144,7 @@ async def test_hinglish_phrase_in_english_mode_stays_english():
     await o.one_turn()
     assert o._utterance_lang == "en"
     # ...but the Hindi reply to a Hinglish phrase is still voiced in Hindi
-    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+    assert o.tts.said[-1] in {"कोई बात नहीं।", "हमेशा।"} and o.tts.langs[-1][1] == "hi"
 
 
 async def test_english_quick_reply_in_english_mode_is_voiced_in_english():
@@ -3160,8 +3160,8 @@ async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
     assert made[-2:] == [("small", "hi"), ("tiny", "hi")]     # main + partial
     assert o.stt.model_name == "small" and o.partial_stt.model_name == "tiny"
     assert {"language": "hi"} in saved
-    assert o.tts.said[:2] == ["Ek minute, Hindi load kar rahi hoon.", "Ab Hindi mein baat karte hain."]
-    assert o.tts.langs[:2] == [("Ek minute, Hindi load kar rahi hoon.", "hi"), ("Ab Hindi mein baat karte hain.", "hi")]
+    assert o.tts.said[:2] == ["एक मिनट, हिंदी load कर रही हूँ।", "अब हिंदी में बात करते हैं।"]
+    assert o.tts.langs[:2] == [("एक मिनट, हिंदी load कर रही हूँ।", "hi"), ("अब हिंदी में बात करते हैं।", "hi")]
     assert ("tool", {"summary": "Language: hi", "decision": "auto"}) in ev
     assert o.brain.asked == []
 
@@ -3174,7 +3174,7 @@ async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
     o.stt = STT2(["dono bhasha"]); o.recorder = Rec([np.zeros(1, np.int16), None])
     await o.one_turn()
     assert o.language == "auto" and made[-2:] == [("small", None), ("tiny", None)]
-    assert o.tts.said[-1] == "Theek hai, dono chalega."
+    assert o.tts.said[-1] == "ठीक है, दोनों चलेगा।"
 
 
 async def test_language_switch_same_model_only_sets_language(monkeypatch):
@@ -3182,7 +3182,7 @@ async def test_language_switch_same_model_only_sets_language(monkeypatch):
     o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
     await o.one_turn()
     assert made == [] and o.stt.language == "hi" and o.partial_stt.language == "hi"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
     assert {"language": "hi"} in saved
 
 
@@ -3192,7 +3192,7 @@ async def test_language_switch_already_active_just_confirms(monkeypatch):
     o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"; o.partial_stt.language = "hi"
     await o.one_turn()
     assert made == [] and o.language == "hi"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
 
 
 async def test_language_switch_without_factory_only_sets_language(monkeypatch):
@@ -3205,7 +3205,7 @@ async def test_language_switch_without_factory_only_sets_language(monkeypatch):
     )
     await o.one_turn()
     assert o.language == "hi" and o.stt.language == "hi" and o.stt.model_name == "small.en"
-    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert o.tts.said == ["अब हिंदी में बात करते हैं।"]
 
 
 async def test_stt_without_detailed_api_defaults_to_english():
@@ -3226,7 +3226,7 @@ async def test_hindi_voice_request_sets_hindi_voice(monkeypatch):
     await o.one_turn()
     assert o.tts.voice == "af_sarah" and o.tts.hindi_voice == "hf_alpha"
     assert {"tts_hindi_voice": "hf_alpha"} in saved
-    assert o.tts.langs[-1] == ("Theek hai, ab main aise bolungi.", "hi")
+    assert ("ठीक है, अब मैं ऐसे बोलूँगी।", "hi") in o.tts.langs
 
     o.stt = STT2(["use the omega voice"]); o.recorder = Rec([np.zeros(1, np.int16), None])
     await o.one_turn()
@@ -3250,7 +3250,7 @@ async def test_language_switch_load_failure_leaves_everything_untouched(monkeypa
     assert o.stt is original_stt and o.stt.model_name == "small.en" and o.stt.language == "en"
     assert o.partial_stt is None
     assert o.language == "en" and saved == []
-    assert o.tts.said == ["Ek minute, Hindi load kar rahi hoon.", "Hindi load nahi ho paayi, baad mein try karo."]
+    assert o.tts.said == ["एक मिनट, हिंदी load कर रही हूँ।", "हिंदी load नहीं हो पाई, बाद में try करो।"]
     assert o.tts.langs[-1][1] == "hi"
     assert o.brain.asked == []
 
@@ -3264,3 +3264,19 @@ async def test_language_switch_load_failure_english_line(monkeypatch):
     await o.one_turn()
     assert o.language == "hi" and saved == [] and o.stt.model_name == "small"
     assert o.tts.said[-1] == "Couldn't switch language, check the log."
+
+
+async def test_hindi_voice_pick_in_english_mode_switches_to_auto(monkeypatch):
+    o, saved, made, _ = build_lang(["use a hindi voice"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hf_alpha"
+    assert o.language == "auto"
+    assert made[-2:] == [("small", None), ("tiny", None)]
+    assert {"language": "auto"} in saved
+
+
+async def test_hindi_voice_pick_in_auto_mode_keeps_mode(monkeypatch):
+    o, saved, made, _ = build_lang(["use a hindi male voice"], mode="auto", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hm_omega" and o.language == "auto" and made == []

@@ -41,23 +41,23 @@ _SOCIAL: list[tuple[set[str], set[str], list[str], list[str]]] = [
     # "thanks veronica"/"thank you veronica" are deliberately absent: the
     # local END intent owns them and runs before match_quick.
     ({"hello", "hi", "hey", "hi veronica", "hello veronica"}, {"namaste", "namaskar"},
-     ["Hi Manik.", "Hello. What can I do for you?", "Hey there."], ["Namaste Manik.", "Haan, boliye."]),
+     ["Hi Manik.", "Hello. What can I do for you?", "Hey there."], ["नमस्ते मनिक।", "हाँ, बोलिए।"]),
     ({"thanks", "thank you", "thanks a lot", "cheers", "thank you so much"},
      {"shukriya", "dhanyavaad", "dhanyavad"},
-     ["You're welcome.", "Anytime.", "Happy to help."], ["Koi baat nahi.", "Hamesha."]),
+     ["You're welcome.", "Anytime.", "Happy to help."], ["कोई बात नहीं।", "हमेशा।"]),
     ({"see you", "see you later"}, {"alvida", "phir milenge"},
-     ["Bye, Manik.", "See you."], ["Alvida.", "Phir milenge."]),
+     ["Bye, Manik.", "See you."], ["अलविदा।", "फिर मिलेंगे।"]),
     ({"how are you", "how are you doing", "hows it going", "how are you veronica"},
      {"kaise ho", "kaisi ho", "kya haal hai", "kya haal hain"},
-     ["I'm doing well, thanks. How can I help?"], ["Main theek hoon. Aap batao, kya karna hai?"]),
+     ["I'm doing well, thanks. How can I help?"], ["मैं ठीक हूँ। आप बताइए, क्या करना है?"]),
     ({"who are you", "whats your name", "what is your name"}, {"tum kaun ho", "aap kaun ho", "tumhara naam kya hai"},
-     ["I'm Veronica, your voice assistant on this Mac."], ["Main Veronica hoon, is Mac par aapki voice assistant."]),
+     ["I'm Veronica, your voice assistant on this Mac."], ["मैं वेरोनिका हूँ, इस Mac पर आपकी voice assistant।"]),
     ({"what can you do", "what do you do", "help", "what can i ask you"}, {"tum kya kar sakti ho", "kya kar sakti ho"},
      ["I can answer questions, control this Mac, read your calendar and mail, play music, take notes, control your browser, and remember things for you."],
-     ["Main sawaal jawab, Mac control, calendar aur mail, music, notes, browser aur yaad rakhne mein madad kar sakti hoon."]),
+     ["मैं सवाल-जवाब, Mac control, calendar और mail, music, notes, browser और याद रखने में मदद कर सकती हूँ।"]),
 ]
 _GREETINGS = {"good morning": "Good morning, Manik.", "good afternoon": "Good afternoon, Manik.", "good evening": "Good evening, Manik."}
-_GOOD_NIGHT = {"good night": "Good night.", "shubh ratri": "Shubh ratri."}
+_GOOD_NIGHT = {"good night": "Good night.", "shubh ratri": "शुभ रात्रि।"}
 
 
 def ordinal(n: int) -> str:
@@ -266,7 +266,7 @@ def _match_math(text: str) -> QuickReply | None:
     if value is None:
         return None
     spoken, result = _spoken(body, hi), format_number(value)
-    return ("math", f"{spoken}, {result} hota hai." if hi else f"{spoken} is {result}.")
+    return ("math", f"{spoken}, {result} होता है।" if hi else f"{spoken} is {result}.")
 
 
 # -- public -------------------------------------------------------------------
@@ -278,16 +278,16 @@ def reply_for(kind: str, lang: str, **kw) -> str:
     if kind == "battery":
         p, st = kw.get("percent"), kw.get("state")
         if p is None:
-            return "Battery level nahi mil paaya." if hi else "I couldn't read the battery level."
-        tail = {"charging": ("aur charge ho rahi hai", "and charging"),
-                "discharging": ("aur charge nahi ho rahi", "and not charging"),
-                "charged": ("aur full charge hai", "and fully charged")}.get(st, ("", ""))
-        return (f"Battery {p} percent hai {tail[0]}." if hi else f"Battery is at {p} percent {tail[1]}.").replace(" .", ".")
+            return "Battery level नहीं मिल पाया।" if hi else "I couldn't read the battery level."
+        tail = {"charging": ("और charge हो रही है", "and charging"),
+                "discharging": ("और charge नहीं हो रही", "and not charging"),
+                "charged": ("और full charge है", "and fully charged")}.get(st, ("", ""))
+        return (f"Battery {p} percent है {tail[0]}।".replace(" ।", "।") if hi else f"Battery is at {p} percent {tail[1]}.".replace(" .", "."))
     if kind == "volume":
         p = kw.get("percent")
         if p is None:
-            return "Volume nahi mil paaya." if hi else "I couldn't read the volume."
-        return f"Volume {p} percent hai." if hi else f"Volume is at {p} percent."
+            return "Volume नहीं मिल पाया।" if hi else "I couldn't read the volume."
+        return f"Volume {p} percent है।" if hi else f"Volume is at {p} percent."
     raise ValueError(kind)
 
 
@@ -342,10 +342,10 @@ def match_quick(text: str, *, now: Callable[[], dt.datetime] = dt.datetime.now, 
 
     t = now()
     for en_set, hi_set, kind, en_fn, hi_fn in (
-        (_TIME, _TIME_HI, "time", lambda: f"It's {_clock(t)}.", lambda: f"Abhi {_clock(t)} hain."),
+        (_TIME, _TIME_HI, "time", lambda: f"It's {_clock(t)}.", lambda: f"अभी {_clock(t)} हैं।"),
         (_DATE, _DATE_HI, "date", lambda: f"It's {t.strftime('%A, %B')} {ordinal(t.day)}.",
-         lambda: f"Aaj {t.strftime('%A')}, {t.day} {t.strftime('%B')} hai."),
-        (_DAY, _DAY_HI, "day", lambda: f"It's {t.strftime('%A')}.", lambda: f"Aaj {t.strftime('%A')} hai."),
+         lambda: f"आज {t.strftime('%A')}, {t.day} {t.strftime('%B')} है।"),
+        (_DAY, _DAY_HI, "day", lambda: f"It's {t.strftime('%A')}.", lambda: f"आज {t.strftime('%A')} है।"),
         (_BATTERY, _BATTERY_HI, "battery", lambda: "en", lambda: "hi"),
         (_VOLUME, _VOLUME_HI, "volume", lambda: "en", lambda: "hi"),
     ):

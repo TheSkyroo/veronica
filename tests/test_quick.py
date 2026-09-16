@@ -15,16 +15,16 @@ def at(text, lang="en"):
 @pytest.mark.parametrize("text,expected", [
     ("what time is it", ("time", "It's 3:42 pm.")),
     ("Veronica, what's the time please", ("time", "It's 3:42 pm.")),
-    ("kitne baje hain", ("time", "Abhi 3:42 pm hain.")),
+    ("kitne baje hain", ("time", "अभी 3:42 pm हैं।")),
     ("what's the date", ("date", "It's Wednesday, September 16th.")),
-    ("aaj kya tareekh hai", ("date", "Aaj Wednesday, 16 September hai.")),
+    ("aaj kya tareekh hai", ("date", "आज Wednesday, 16 September है।")),
     ("what day is it today", ("day", "It's Wednesday.")),
-    ("aaj kaun sa din hai", ("day", "Aaj Wednesday hai.")),
+    ("aaj kaun sa din hai", ("day", "आज Wednesday है।")),
     ("hello", ("social", None)),
     ("good evening", ("social", "Good evening, Manik.")),
     ("shukriya", ("social", None)),
     ("who are you", ("social", "I'm Veronica, your voice assistant on this Mac.")),
-    ("tum kaun ho", ("social", "Main Veronica hoon, is Mac par aapki voice assistant.")),
+    ("tum kaun ho", ("social", "मैं वेरोनिका हूँ, इस Mac पर आपकी voice assistant।")),
     ("what can you do", ("social", "I can answer questions, control this Mac, read your calendar and mail, play music, take notes, control your browser, and remember things for you.")),
     ("battery level", ("battery", "en")),
     ("battery kitni hai", ("battery", "hi")),
@@ -38,10 +38,10 @@ def test_match_quick_tables(text, expected):
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("समय क्या है", ("time", "Abhi 3:42 pm hain.")),
-    ("कितने बजे हैं?", ("time", "Abhi 3:42 pm hain.")),
-    ("आज क्या तारीख है", ("date", "Aaj Wednesday, 16 September hai.")),
-    ("आज कौन सा दिन है।", ("day", "Aaj Wednesday hai.")),
+    ("समय क्या है", ("time", "अभी 3:42 pm हैं।")),
+    ("कितने बजे हैं?", ("time", "अभी 3:42 pm हैं।")),
+    ("आज क्या तारीख है", ("date", "आज Wednesday, 16 September है।")),
+    ("आज कौन सा दिन है।", ("day", "आज Wednesday है।")),
 ])
 def test_devanagari_phrases_answer_in_hindi(text, expected):
     assert at(text) == expected
@@ -70,8 +70,8 @@ def test_social_does_not_shadow_end_phrases():
 
 
 def test_hi_lang_uses_hindi_copy():
-    assert at("what time is it", lang="hi") == ("time", "Abhi 3:42 pm hain.")
-    assert at("what day is it", lang="hi") == ("day", "Aaj Wednesday hai.")
+    assert at("what time is it", lang="hi") == ("time", "अभी 3:42 pm हैं।")
+    assert at("what day is it", lang="hi") == ("day", "आज Wednesday है।")
 
 
 def test_social_choice_is_seeded():
@@ -81,7 +81,7 @@ def test_social_choice_is_seeded():
     assert at("hello")[1] == a
     assert a in {"Hi Manik.", "Hello. What can I do for you?", "Hey there."}
     q._rng = random.Random(0)
-    assert at("shukriya")[1] in {"Koi baat nahi.", "Hamesha."}
+    assert at("shukriya")[1] in {"कोई बात नहीं।", "हमेशा।"}
 
 
 @pytest.mark.parametrize("text,reply", [
@@ -94,8 +94,8 @@ def test_social_choice_is_seeded():
     ("what's 7 squared", "7 squared is 49."),
     ("what's 3 plus 4 times 2", "3 plus 4 times 2 is 11."),
     ("what's 10 minus 15", "10 minus 15 is -5."),
-    ("12 guna 8 kitna hota hai", "12 guna 8, 96 hota hai."),
-    ("100 bhaag 4 kya hota hai", "100 bhaag 4, 25 hota hai."),
+    ("12 guna 8 kitna hota hai", "12 guna 8, 96 होता है।"),
+    ("100 bhaag 4 kya hota hai", "100 bhaag 4, 25 होता है।"),
     # symbol operators survive now that math runs on the raw text
     ("what's 10 - 3", "10 minus 3 is 7."),
     ("whats 10-3", "10 minus 3 is 7."),
@@ -160,14 +160,14 @@ def test_reply_for_battery_and_volume():
     assert q.reply_for("battery", "en", percent=72, state="charging") == "Battery is at 72 percent and charging."
     assert q.reply_for("battery", "en", percent=72, state="discharging") == "Battery is at 72 percent and not charging."
     assert q.reply_for("battery", "en", percent=100, state="charged") == "Battery is at 100 percent and fully charged."
-    assert q.reply_for("battery", "hi", percent=72, state="charging") == "Battery 72 percent hai aur charge ho rahi hai."
-    assert q.reply_for("battery", "hi", percent=72, state="discharging") == "Battery 72 percent hai aur charge nahi ho rahi."
-    assert q.reply_for("battery", "hi", percent=100, state="charged") == "Battery 100 percent hai aur full charge hai."
+    assert q.reply_for("battery", "hi", percent=72, state="charging") == "Battery 72 percent है और charge हो रही है।"
+    assert q.reply_for("battery", "hi", percent=72, state="discharging") == "Battery 72 percent है और charge नहीं हो रही।"
+    assert q.reply_for("battery", "hi", percent=100, state="charged") == "Battery 100 percent है और full charge है।"
     assert q.reply_for("battery", "en", percent=98, state=None) == "Battery is at 98 percent."
-    assert q.reply_for("battery", "hi", percent=98, state=None) == "Battery 98 percent hai."
+    assert q.reply_for("battery", "hi", percent=98, state=None) == "Battery 98 percent है।"
     assert q.reply_for("battery", "en", percent=None, state=None) == "I couldn't read the battery level."
-    assert q.reply_for("battery", "hi", percent=None, state=None) == "Battery level nahi mil paaya."
+    assert q.reply_for("battery", "hi", percent=None, state=None) == "Battery level नहीं मिल पाया।"
     assert q.reply_for("volume", "en", percent=40) == "Volume is at 40 percent."
-    assert q.reply_for("volume", "hi", percent=40) == "Volume 40 percent hai."
+    assert q.reply_for("volume", "hi", percent=40) == "Volume 40 percent है।"
     assert q.reply_for("volume", "en", percent=None) == "I couldn't read the volume."
-    assert q.reply_for("volume", "hi", percent=None) == "Volume nahi mil paaya."
+    assert q.reply_for("volume", "hi", percent=None) == "Volume नहीं मिल पाया।"
