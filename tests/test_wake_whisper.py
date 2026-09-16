@@ -142,3 +142,27 @@ async def test_threshold_accepted_and_ignored(monkeypatch):
     monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["hey veronica"]))
     w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
     assert await _wait_for(w.wait(threshold=0.8), 3) is True
+
+
+@pytest.mark.asyncio
+async def test_own_speech_is_suppressed(monkeypatch):
+    """A wake match caused by Veronica's own TTS (e.g. "I am Veronica") must be
+    dropped rather than returned, so she doesn't self-interrupt; a later,
+    genuine match (nothing being spoken at the time) still returns True."""
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["i am veronica", "hey veronica"]))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    suppress_texts = iter(["I am Veronica, your assistant.", ""])
+    assert await _wait_for(w.wait(suppress=lambda: next(suppress_texts)), 3) is True
+
+
+@pytest.mark.asyncio
+async def test_own_speech_suppression_is_fuzzy(monkeypatch):
+    """The suppress-text check reuses the same _matches() as the wake check
+    (substring + fuzzy), so a possessive form like "Veronika's" — punctuation
+    stripped to "veronikas", not a substring of any wake phrase but within
+    fuzzy ratio (~0.82) of "veronica" — is still recognized as self-speech
+    and the match is suppressed."""
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["hey veronica", "hey veronica"]))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    suppress_texts = iter(["Veronika's here to help.", ""])
+    assert await _wait_for(w.wait(suppress=lambda: next(suppress_texts)), 3) is True

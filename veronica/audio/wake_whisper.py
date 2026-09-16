@@ -75,13 +75,17 @@ class WhisperWake:
         pending stop is consumed by the next wait() even if issued before it starts."""
         self._stop.set()
 
-    async def wait(self, threshold: float | None = None) -> bool:
+    async def wait(self, threshold: float | None = None, suppress: Callable[[], str] | None = None) -> bool:
         """Block until the wake phrase is detected (True) or stop() is called (False).
-        Only one wait() should be in flight per WhisperWake instance at a time."""
+        Only one wait() should be in flight per WhisperWake instance at a time.
+        `suppress`, if given, is called on every phrase match; if the text it
+        returns also matches a wake phrase (i.e. Veronica is currently saying
+        something like "I'm Veronica"), the match is treated as self-triggered
+        and dropped rather than returned."""
         if threshold is not None and not WhisperWake._warned_threshold:
             log.debug("WhisperWake.wait: threshold=%s ignored (phrase match used instead)", threshold)
             WhisperWake._warned_threshold = True
-        return await asyncio.to_thread(self._wait)
+        return await asyncio.to_thread(self._wait, suppress)
 
     def _transcribe(self, window: np.ndarray) -> str:
         audio = window.astype(np.float32) / 32768.0
@@ -94,7 +98,7 @@ class WhisperWake:
         )
         return " ".join(s.text.strip() for s in segments).strip()
 
-    def _wait(self) -> bool:
+    def _wait(self, suppress: Callable[[], str] | None = None) -> bool:
         self._buf = np.zeros(0, dtype=np.int16)
         since_hop = 0
         for frame in self._frames():
@@ -112,5 +116,8 @@ class WhisperWake:
             text = self._transcribe(self._buf)
             if _matches(text, self.s.wake_phrases):
                 self._buf = np.zeros(0, dtype=np.int16)
+                if suppress is not None and _matches(suppress(), self.s.wake_phrases):
+                    log.debug("wake match suppressed (own speech)")
+                    continue
                 return True
         return False

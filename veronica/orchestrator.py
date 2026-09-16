@@ -48,6 +48,7 @@ class Orchestrator:
         self._speech_queue: asyncio.Queue | None = None
         self._confirm_capturing = False
         self._barged = False
+        self._now_speaking = ""
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -85,7 +86,11 @@ class Orchestrator:
         samples, sr = await self.tts.asynth(text)
         self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
         self._emit(kind, text)
-        await self.player.play(samples)
+        self._now_speaking = text
+        try:
+            await self.player.play(samples)
+        finally:
+            self._now_speaking = ""
 
     async def say(self, text: str) -> None:
         if self.muted:
@@ -177,7 +182,11 @@ class Orchestrator:
                             # events for audio that hasn't started yet.
                             self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
                             self._emit("sentence", sent)
-                            await self.player.play(samples)
+                            self._now_speaking = sent
+                            try:
+                                await self.player.play(samples)
+                            finally:
+                                self._now_speaking = ""
                 finally:
                     # Accounted for whether this item played cleanly, raised,
                     # or we were cancelled mid-item — unfinished_tasks must
@@ -275,7 +284,9 @@ class Orchestrator:
     async def _run_with_barge(self, coro) -> bool:
         """Run a turn coroutine; return True if the wake word interrupted it."""
         turn = asyncio.ensure_future(coro)
-        listener = asyncio.create_task(self.wake.wait(threshold=self.s.barge_threshold))
+        listener = asyncio.create_task(
+            self.wake.wait(threshold=self.s.barge_threshold, suppress=lambda: self._now_speaking)
+        )
         try:
             done, _ = await asyncio.wait({turn, listener}, return_when=asyncio.FIRST_COMPLETED)
             if listener in done and listener.exception() is not None:

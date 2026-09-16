@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     wake_threshold: float = 0.35
     wake_hits: int = 2
     wake_retry_s: int = 10
-    barge_threshold: float = 0.8
+    barge_threshold: float = 0.8  # openwakeword engine only; the whisper engine uses own-speech suppression instead
     wake_whisper_model: str = "tiny.en"
     wake_window_s: float = 1.6
     wake_hop_s: float = 0.6
