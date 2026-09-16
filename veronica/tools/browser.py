@@ -67,14 +67,31 @@ async def target_browser() -> str:
     res = await _osascript(
         'tell application "System Events" to get name of first application process whose frontmost is true'
     )
-    front = res["content"][0]["text"].strip() if not res.get("is_error") else ""
+    if res.get("is_error"):
+        _raise_if_denied("System Events", res["content"][0]["text"])
+        front = ""
+    else:
+        front = res["content"][0]["text"].strip()
     if front in (CHROME, SAFARI):
         return front
     for name in (CHROME, SAFARI):
         r = await _osascript(f'tell application "System Events" to (exists process "{name}")')
-        if not r.get("is_error") and r["content"][0]["text"].strip().lower() == "true":
+        if r.get("is_error"):
+            _raise_if_denied("System Events", r["content"][0]["text"])
+            continue
+        if r["content"][0]["text"].strip().lower() == "true":
             return name
     raise BrowserUnavailable("No supported browser is open (Chrome or Safari).")
+
+
+def _is_denied(text: str) -> bool:
+    return "-1743" in text or "not authorized" in text.lower()
+
+
+def _raise_if_denied(app: str, text: str) -> None:
+    """An Automation-permission denial must not masquerade as 'no browser'."""
+    if _is_denied(text):
+        raise BrowserUnavailable(_map_error(app, text)["content"][0]["text"])
 
 
 def _map_error(browser: str, text: str) -> dict:
@@ -85,7 +102,7 @@ def _map_error(browser: str, text: str) -> dict:
             f"JavaScript from Apple Events is off in {browser}. Turn it on under "
             f"{menu} > Allow JavaScript from Apple Events and try again."
         )
-    if "-1743" in text or "not authorized" in low:
+    if _is_denied(text):
         return _err(
             f"Veronica isn't allowed to control {browser} yet; allow it in "
             "System Settings > Privacy & Security > Automation."
@@ -93,16 +110,16 @@ def _map_error(browser: str, text: str) -> dict:
     return _err(text)
 
 
-async def _js(js: str) -> tuple[str, dict]:
-    """Run `js` in the target browser; returns (browser, result)."""
+async def _js(js: str) -> dict:
+    """Run `js` in the target browser and return the MCP-shaped result."""
     try:
         browser = await target_browser()
     except BrowserUnavailable as e:
-        return "", _err(str(e))
+        return _err(str(e))
     res = await _osascript(_wrap_js(browser, js))
     if res.get("is_error"):
-        return browser, _map_error(browser, res["content"][0]["text"])
-    return browser, res
+        return _map_error(browser, res["content"][0]["text"])
+    return res
 
 
 def _json(res: dict) -> dict | None:
@@ -137,14 +154,24 @@ function labelsOf(el){
   if(el.labels){for(var i=0;i<el.labels.length;i++){out.push(el.labels[i].innerText);}}
   return out.map(norm).filter(Boolean);
 }
-function visible(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0;}
+function visible(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(el).visibility!=='hidden';}
+function innermost(cands){
+  var keep=cands.filter(function(a){return !cands.some(function(b){return a!==b&&a.contains(b);});});
+  return keep.length?keep[0]:null;
+}
 function findEl(sel, target){
   var t=norm(target), els=Array.from(document.querySelectorAll(sel)).filter(visible);
-  for(var i=0;i<els.length;i++){if(labelsOf(els[i]).indexOf(t)>=0)return els[i];}
-  for(var j=0;j<els.length;j++){if(labelsOf(els[j]).some(function(l){return l.indexOf(t)>=0;}))return els[j];}
-  return null;
+  var exact=els.filter(function(el){return labelsOf(el).indexOf(t)>=0;});
+  if(exact.length)return innermost(exact);
+  var partial=els.filter(function(el){return labelsOf(el).some(function(l){return l.indexOf(t)>=0;});});
+  return innermost(partial);
 }
-function describe(el){return el.tagName+' '+norm(el.innerText||el.value||el.getAttribute('aria-label')||el.placeholder||'').slice(0,60);}
+function describe(el){
+  var tag=el.tagName, s;
+  if(tag==='INPUT'||tag==='TEXTAREA'){s=el.getAttribute('aria-label')||el.placeholder||el.name||el.value||'';}
+  else{s=el.innerText||el.value||el.getAttribute('aria-label')||el.placeholder||'';}
+  return tag+' '+(s||'').replace(/\\s+/g,' ').trim().slice(0,60);
+}
 """
 
 _JS_READ = """(function(){
@@ -166,7 +193,7 @@ _JS_CLICK = """(function(){%s
 })()"""
 
 _JS_TYPE = """(function(){%s
-  var el=findEl('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable=true],[role=textbox]', %s);
+  var el=findEl('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable]:not([contenteditable=false]),[role=textbox]', %s);
   if(!el)return JSON.stringify({typed:null});
   el.scrollIntoView({block:'center'}); el.focus();
   var v=%s;
@@ -218,7 +245,9 @@ async def browser_tabs(args: dict) -> dict:
     res = await _osascript(script)
     if res.get("is_error"):
         return _map_error(browser, res["content"][0]["text"])
-    lines = [ln for ln in res["content"][0]["text"].split("\n") if ln.strip()]
+    lines = res["content"][0]["text"].split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
     if not lines:
         return _ok("No tabs.")
     try:
@@ -273,7 +302,7 @@ async def browser_read(args: dict) -> dict:
     except (TypeError, ValueError):
         max_chars = READ_DEFAULT
     max_chars = max(READ_MIN, min(READ_MAX, max_chars))
-    _, res = await _js(_JS_READ)
+    res = await _js(_JS_READ)
     if res.get("is_error"):
         return res
     data = _json(res) or {}
@@ -289,7 +318,7 @@ async def browser_find(args: dict) -> dict:
     needle = str(args.get("text", "")).strip()
     if not needle:
         return _err("text is required")
-    _, res = await _js(_JS_FIND % (_JS_MATCH_HELPERS, json.dumps(needle), FIND_MAX_LINES))
+    res = await _js(_JS_FIND % (_JS_MATCH_HELPERS, json.dumps(needle), FIND_MAX_LINES))
     if res.get("is_error"):
         return res
     lines = (_json(res) or {}).get("lines") or []
@@ -304,7 +333,7 @@ async def browser_click(args: dict) -> dict:
     target = str(args.get("target", "")).strip()
     if not target:
         return _err("target is required")
-    _, res = await _js(_JS_CLICK % (_JS_MATCH_HELPERS, json.dumps(target)))
+    res = await _js(_JS_CLICK % (_JS_MATCH_HELPERS, json.dumps(target)))
     if res.get("is_error"):
         return res
     clicked = (_json(res) or {}).get("clicked")
@@ -321,7 +350,7 @@ async def browser_type(args: dict) -> dict:
     if not target:
         return _err("target is required")
     submit = "true" if bool(args.get("submit", False)) else "false"
-    _, res = await _js(_JS_TYPE % (_JS_MATCH_HELPERS, json.dumps(target), json.dumps(text), submit))
+    res = await _js(_JS_TYPE % (_JS_MATCH_HELPERS, json.dumps(target), json.dumps(text), submit))
     if res.get("is_error"):
         return res
     typed = (_json(res) or {}).get("typed")
@@ -336,14 +365,14 @@ async def browser_scroll(args: dict) -> dict:
     direction = str(args.get("direction", "down")).strip().lower()
     if direction not in _JS_SCROLL:
         return _err("direction must be up, down, top or bottom")
-    _, res = await _js(_JS_SCROLL[direction])
+    res = await _js(_JS_SCROLL[direction])
     return res if res.get("is_error") else _ok(f"Scrolled {direction}")
 
 
 @tool("browser_back", "Go back one page in the current tab", {})
 @_guard
 async def browser_back(args: dict) -> dict:
-    _, res = await _js(_JS_BACK)
+    res = await _js(_JS_BACK)
     return res if res.get("is_error") else _ok("Went back")
 
 

@@ -162,3 +162,36 @@ async def test_js_error_mapping(scripts):
 def test_js_string_is_escaped_for_applescript():
     s = b._wrap_js("Google Chrome", 'alert("x\\y")')
     assert '\\"' in s and "\\\\" in s
+
+
+async def test_target_browser_reports_automation_denial(scripts):
+    _sent, replies = scripts
+    replies.append(_err("execution error: Not authorized to send Apple events to System Events. (-1743)"))
+    with pytest.raises(b.BrowserUnavailable) as exc:
+        await b.target_browser()
+    assert "Automation" in str(exc.value) and "System Events" in str(exc.value)
+
+
+async def test_tool_surfaces_automation_denial(scripts):
+    _sent, replies = scripts
+    replies.append(_err("execution error: Not authorized to send Apple events to System Events. (-1743)"))
+    res = await b.browser_read.handler({})
+    assert res.get("is_error") and "Automation" in res["content"][0]["text"]
+
+
+async def test_click_prefers_innermost_match(scripts):
+    sent, replies = scripts
+    frontmost(replies, "Google Chrome")
+    replies.append(_ok(json.dumps({"clicked": "BUTTON Log in"})))
+    await b.browser_click.handler({"target": "Log in"})
+    assert "contains(" in sent[1]
+
+
+def test_wrap_js_roundtrip():
+    needle = 'pri"cing\\x'  # a quote and a backslash, the two chars _q must escape
+    js = f"var q=norm({json.dumps(needle)}); q"
+    wrapped = b._wrap_js("Google Chrome", js)
+    inner = wrapped.split(' javascript "', 1)[1]
+    assert inner.endswith('"')
+    unescaped = inner[:-1].replace('\\"', '"').replace("\\\\", "\\")
+    assert unescaped == js
