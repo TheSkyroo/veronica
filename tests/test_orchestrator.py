@@ -3297,3 +3297,125 @@ async def test_hindi_voice_pick_in_auto_mode_keeps_mode(monkeypatch):
 ])
 def test_is_confirmation_last_decisive_wins(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok
+
+
+# -- Batch D: settings / version / update turns ---------------------------------
+
+from veronica import version as version_mod
+from veronica.updater import UpdateStatus
+
+
+def _status(kind):
+    return UpdateStatus(available=kind != "none", kind=kind, detail=f"{kind} detail",
+                        running_sha="aaa", head_sha="bbb", remote_sha=None)
+
+
+def build_d(stt_texts, langs=(), mode="en", **kw):
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(stt_texts, langs),
+        brain=Brain(), tts=TTS3(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), language=mode, **kw,
+    )
+    return o, states, events
+
+
+async def test_settings_intent_emits_event_and_skips_brain():
+    o, _, ev = build_d(["open settings"])
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "general"}) in ev
+    assert o.tts.said == ["Here you go."]
+    assert o.tts.langs[-1] == ("Here you go.", None)
+    assert o.brain.asked == []
+    assert o.player.resets >= 1
+
+
+async def test_history_intent_opens_history_tab():
+    o, _, ev = build_d(["show my history"])
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "history"}) in ev
+    assert o.tts.said == ["Here you go."]
+
+
+async def test_settings_intent_in_hindi_replies_in_hindi():
+    o, _, ev = build_d(["settings kholo"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert ("settings", {"open": True, "tab": "general"}) in ev
+    assert o.tts.langs[-1] == ("यह लीजिए।", "hi")
+
+
+async def test_version_intent_speaks_describe(monkeypatch):
+    monkeypatch.setattr(version_mod, "describe", lambda info=None: "Veronica 9.9.9 (abc1234, 1 Jan)")
+    o, _, _ = build_d(["what version are you"])
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 9.9.9 (abc1234, 1 Jan)"]
+    assert o.brain.asked == []
+
+
+async def test_update_intent_unavailable_in_text_mode():
+    o, _, _ = build_d(["update yourself"])
+    await o.one_turn()
+    assert o.tts.said == ["Updates aren't available in this mode."]
+    assert o.brain.asked == []
+
+
+async def test_update_intent_already_latest():
+    calls = []
+    o, _, ev = build_d(
+        ["check for updates"], updater_check=lambda: _status("none"),
+        updater_update=lambda st: calls.append(st) or "log", relaunch=lambda: calls.append("relaunch") or True,
+    )
+    await o.one_turn()
+    assert o.tts.said == ["You're already on the latest."]
+    assert calls == []
+    assert not any(k == "tool" for k, _ in ev)
+
+
+@pytest.mark.parametrize("kind", ["remote", "local"])
+async def test_update_intent_updates_and_relaunches(kind):
+    calls = []
+    st = _status(kind)
+    o, _, ev = build_d(
+        ["update yourself"], updater_check=lambda: st,
+        updater_update=lambda s: calls.append(("update", s)) or "log",
+        relaunch=lambda: calls.append(("relaunch",)) or True,
+    )
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment."]
+    assert ("tool", {"summary": "Update Veronica", "decision": "auto"}) in ev
+    assert calls == [("update", st), ("relaunch",)]
+
+
+async def test_update_intent_failure_speaks_and_does_not_relaunch(caplog):
+    calls = []
+
+    def boom(_st):
+        raise RuntimeError("git pull exploded")
+
+    o, _, _ = build_d(
+        ["update now"], updater_check=lambda: _status("remote"), updater_update=boom,
+        relaunch=lambda: calls.append("relaunch") or True,
+    )
+    with caplog.at_level("ERROR", logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "The update failed, check the log."]
+    assert calls == []
+    assert "git pull exploded" in caplog.text
+
+
+async def test_update_intent_check_failure_speaks(caplog):
+    def boom():
+        raise RuntimeError("no network")
+
+    o, _, _ = build_d(["update yourself"], updater_check=boom, updater_update=lambda s: "", relaunch=lambda: True)
+    with caplog.at_level("WARNING", logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert o.tts.said == ["Couldn't check for updates, check the log."]
+
+
+async def test_update_and_version_intents_ignored_during_dictation_guard():
+    # "update my calendar" is not the update intent: it goes to the brain
+    o, _, _ = build_d(["update my calendar"])
+    await o.one_turn()
+    assert o.brain.asked == ["update my calendar"]

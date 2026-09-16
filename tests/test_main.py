@@ -527,3 +527,18 @@ async def test_build_orchestrator_ignores_bad_hindi_voice(monkeypatch, tmp_home)
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
     assert orch.tts.hindi_voice == "hf_alpha"
     memory_tools.bind(None)
+
+
+async def test_build_orchestrator_passes_updater_hooks(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    check, update, relaunch = dict, (lambda st: ""), (lambda: True)
+
+    orch = main_mod.build_orchestrator(
+        Settings(), audio=False, updater_check=check, updater_update=update, relaunch=relaunch,
+    )
+    assert (orch.updater_check, orch.updater_update, orch.relaunch) == (check, update, relaunch)
+
+    plain = main_mod.build_orchestrator(Settings(), audio=False)
+    assert (plain.updater_check, plain.updater_update, plain.relaunch) == (None, None, None)

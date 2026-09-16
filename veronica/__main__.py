@@ -19,7 +19,11 @@ from veronica.tools import memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
-def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None) -> Orchestrator:
+def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None,
+                       updater_check=None, updater_update=None, relaunch=None) -> Orchestrator:
+    """`updater_check`/`updater_update`/`relaunch` are the menu bar app's
+    self-update hooks (see Orchestrator); None (text mode) disables the
+    "update yourself" turn."""
     holder: dict = {}
 
     async def confirm(summary: str, detail: str = "") -> bool:
@@ -139,6 +143,9 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         proactive=pro,
         stt_factory=make_stt,
         language=language,
+        updater_check=updater_check,
+        updater_update=updater_update,
+        relaunch=relaunch,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

@@ -9,6 +9,9 @@ from veronica.brain.intents import (
     match_music_intent,
     match_note_intent,
     match_screen_intent,
+    match_settings_intent,
+    match_update_intent,
+    match_version_intent,
     normalize,
 )
 
@@ -363,3 +366,48 @@ def test_match_language_intent(text, expected):
 def test_clause_split_on_danda():
     assert match_intent("ठीक है। बस।") == "end"
     assert match_intent("मीटिंग बंद करो।") is None
+
+
+# -- Batch D: settings / history / version / update -----------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("open settings", "general"), ("show settings", "general"), ("settings", "general"),
+    ("preferences", "general"), ("open preferences", "general"),
+    ("settings kholo", "general"), ("setting kholo", "general"),
+    ("Veronica, open settings please", "general"), ("Open settings.", "general"),
+    ("show history", "history"), ("show my history", "history"), ("what did i ask you", "history"),
+    ("what did I ask you earlier?", "history"), ("history", "history"), ("history dikhao", "history"),
+    ("conversation history", "history"),
+    # whole-utterance only: never hijack a longer request
+    ("open safari settings", None), ("history of rome", None), ("what did i ask you to buy", None),
+    ("settings for the hud", None), ("", None),
+])
+def test_match_settings_intent(text, expected):
+    assert match_settings_intent(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("what version are you", True), ("which version are you", True), ("what version", True),
+    ("version", True), ("your version", True), ("kaunsa version hai", True),
+    ("Veronica, what version are you?", True),
+    ("what version of python is installed", False), ("version control", False), ("", False),
+])
+def test_match_version_intent(text, expected):
+    assert match_version_intent(text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("update yourself", True), ("update now", True), ("check for updates", True),
+    ("check for an update", True), ("apna update karo", True), ("update karo", True),
+    ("Veronica, update yourself please.", True),
+    ("update my calendar", False), ("update the note", False), ("update", False), ("", False),
+])
+def test_match_update_intent(text, expected):
+    assert match_update_intent(text) is expected
+
+
+def test_hinglish_settings_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    for phrase in ("settings kholo", "setting kholo", "history dikhao", "kaunsa version hai",
+                   "apna update karo", "update karo"):
+        assert phrase in HINGLISH_INTENT_PHRASES

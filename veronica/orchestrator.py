@@ -11,6 +11,7 @@ import numpy as np
 
 from veronica import prefs
 from veronica import proactive as proactive_mod
+from veronica import version
 from veronica.audio.chime import tone
 from veronica.brain import quick
 from veronica.brain.intents import (
@@ -23,6 +24,9 @@ from veronica.brain.intents import (
     match_note_intent,
     match_proactive_intent,
     match_screen_intent,
+    match_settings_intent,
+    match_update_intent,
+    match_version_intent,
     match_voice_intent,
     normalize,
 )
@@ -111,8 +115,18 @@ class Orchestrator:
                  on_quit: Callable[[], None] | None = None,
                  proactive=None,
                  stt_factory: Callable[[str, str | None], Any] | None = None,
-                 language: str = "en") -> None:
+                 language: str = "en",
+                 updater_check: Callable[[], Any] | None = None,
+                 updater_update: Callable[[Any], str] | None = None,
+                 relaunch: Callable[[], bool] | None = None) -> None:
         self.s = settings
+        # Self-update (D3): `updater_check()` -> UpdateStatus, `updater_update(
+        # status)` -> log text, `relaunch()` restarts the app (and quits this
+        # process). All three are injected by the menu bar app; None (tests,
+        # --text mode) means "update yourself" just says it can't here.
+        self.updater_check = updater_check
+        self.updater_update = updater_update
+        self.relaunch = relaunch
         # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
         # Started once by run_forever; its schedule is what the "brief me"
         # / "turn on nudges" intents edit. None in --text mode.
@@ -842,6 +856,49 @@ class Orchestrator:
         if self.store is not None and self.s.memory_enabled:
             self.store.add_turn(heard, reply)
 
+    # -- settings window / self-update (Batch D) ---------------------------------
+    async def _settings_turn(self, tab: str, heard: str) -> None:
+        """Local fast path for "open settings" / "show history": ask the
+        menu bar (which owns the window) to show it on the given tab, and
+        confirm. A Hindi/Hinglish utterance gets the Hindi confirmation."""
+        self._emit("settings", {"open": True, "tab": tab})
+        hindi = self._utterance_lang == "hi" or has_devanagari(heard) or quick.is_hinglish_phrase(heard)
+        if hindi:
+            await self.say("यह लीजिए।", lang="hi")
+        else:
+            await self.say("Here you go.")
+
+    async def _update_turn(self) -> None:
+        """Local fast path for "update yourself" / "check for updates":
+        check on a thread, and if something newer exists, pull/build (also
+        on a thread) and relaunch — this IS the in-progress turn, so the
+        settings bridge's idle rule doesn't apply; a barge cancels it like
+        any other turn. Nothing is injected in --text mode/tests."""
+        if self.updater_check is None or self.updater_update is None:
+            await self.say("Updates aren't available in this mode.")
+            return
+        self._set("thinking")
+        try:
+            status = await asyncio.to_thread(self.updater_check)
+        except Exception:
+            log.warning("update check failed", exc_info=True)
+            await self.say("Couldn't check for updates, check the log.")
+            return
+        if not status.available:
+            await self.say("You're already on the latest.")
+            return
+        await self.say("Updating, back in a moment.")
+        self._emit("tool", {"summary": "Update Veronica", "decision": "auto"})
+        self._set("thinking")
+        try:
+            log.info("update: %s", await asyncio.to_thread(self.updater_update, status))
+        except Exception:
+            log.exception("update failed")
+            await self.say("The update failed, check the log.")
+            return
+        if self.relaunch is not None:
+            self.relaunch()
+
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
         """Local fast path for "take a note: X" / "note that X": create the
@@ -1142,19 +1199,35 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
                 else match_language_intent(text)
             )
-            proactive_action = (
+            settings_tab = (
                 None
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None)
+                else match_settings_intent(text)
+            )
+            version_intent = (
+                False
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or settings_tab is not None)
+                else match_version_intent(text)
+            )
+            update_intent = (
+                False
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or settings_tab is not None or version_intent)
+                else match_update_intent(text)
+            )
+            local_hit = settings_tab is not None or version_intent or update_intent
+            proactive_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit)
                 else match_proactive_intent(text)
             )
             quick_hit = (
                 None
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None)
                 else quick.match_quick(text, lang=self._utterance_lang)
             )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None or quick_hit is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -1201,6 +1274,21 @@ class Orchestrator:
             elif lang_mode is not None:
                 self.player.reset()
                 await self._language_turn(lang_mode)
+            elif settings_tab is not None:
+                self.player.reset()
+                await self._settings_turn(settings_tab, text)
+            elif version_intent:
+                self.player.reset()
+                await self.say(version.describe())
+            elif update_intent:
+                self.player.reset()
+                barged = await self._run_with_barge(self._update_turn())
+                if barged:
+                    pcm = await self._relisten(barged)
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
             elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
                 self.player.reset()
                 barged = await self._run_with_barge(self._brief_now_turn())

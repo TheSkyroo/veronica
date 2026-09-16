@@ -111,6 +111,57 @@ def match_language_intent(text: str) -> LanguageMode | None:
     return None
 
 
+# Settings window / history tab / version / self-update (Batch D). All
+# whole-utterance only (no clause split): "open safari settings", "history
+# of rome" and "update my calendar" must stay with the brain.
+SettingsTab = Literal["general", "history"]
+
+_SETTINGS_PHRASES: dict[str, SettingsTab] = {
+    "open settings": "general", "show settings": "general", "settings": "general",
+    "preferences": "general", "open preferences": "general", "open the settings": "general",
+    "settings kholo": "general", "setting kholo": "general",
+    "show history": "history", "show my history": "history", "what did i ask you": "history",
+    "what did i ask you earlier": "history", "history": "history", "history dikhao": "history",
+    "conversation history": "history", "show conversation history": "history",
+}
+_SETTINGS_PHRASES_HINGLISH = frozenset({"settings kholo", "setting kholo", "history dikhao"})
+
+VERSION_PHRASES = frozenset({
+    "what version are you", "which version are you", "what version", "version",
+    "your version", "whats your version", "what's your version", "which version",
+    "kaunsa version hai",
+})
+_VERSION_PHRASES_HINGLISH = frozenset({"kaunsa version hai"})
+
+UPDATE_PHRASES = frozenset({
+    "update yourself", "update now", "check for updates", "check for an update",
+    "check for update", "apna update karo", "update karo",
+})
+_UPDATE_PHRASES_HINGLISH = frozenset({"apna update karo", "update karo"})
+
+
+def match_settings_intent(text: str) -> SettingsTab | None:
+    """"open settings" / "settings kholo" -> "general"; "show history" /
+    "what did i ask you" / "history dikhao" -> "history". Whole-utterance
+    candidates only, so "open safari settings" is None."""
+    for candidate in _candidates_for(normalize(text)):
+        if candidate in _SETTINGS_PHRASES:
+            return _SETTINGS_PHRASES[candidate]
+    return None
+
+
+def match_version_intent(text: str) -> bool:
+    """True for "what version are you" / "version" / "kaunsa version hai"
+    (whole utterance only: "what version of python is installed" is False)."""
+    return any(c in VERSION_PHRASES for c in _candidates_for(normalize(text)))
+
+
+def match_update_intent(text: str) -> bool:
+    """True for "update yourself" / "check for updates" / "apna update karo"
+    (whole utterance only: "update my calendar" is False)."""
+    return any(c in UPDATE_PHRASES for c in _candidates_for(normalize(text)))
+
+
 # Romanized-Hindi (Hinglish) forms of the local intents above. Filled in by
 # the Hinglish intents work; quick.is_hinglish_phrase() unions this with its
 # own phrase tables so a whole-utterance Hinglish command is treated as
@@ -121,7 +172,7 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "mute karo", "awaaz band karo", "unmute karo", "awaaz chalu karo",
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
     "quit karo", "band ho jao",
-}) | _LANG_PHRASES_HINGLISH
+}) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH
 
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"
