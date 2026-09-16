@@ -31,3 +31,25 @@ def save(prefs: dict) -> None:
         _PREFS_PATH.write_text(json.dumps(current))
     except OSError:
         log.warning("failed to save prefs", exc_info=True)
+
+
+def get(key, default=None):
+    """Convenience accessor: load() then dict.get(key, default)."""
+    return load().get(key, default)
+
+
+def save_settings_override(field: str, value) -> None:
+    """Persist one Settings-field override, merged under the "settings"
+    dict in prefs.json (leaving other overrides and other prefs alone)."""
+    current_settings = load().get("settings", {})
+    current_settings = dict(current_settings)
+    current_settings[field] = value
+    save({"settings": current_settings})
+
+
+def clear_settings_override(field: str) -> None:
+    """Remove one Settings-field override, if present."""
+    current_settings = dict(load().get("settings", {}))
+    if field in current_settings:
+        del current_settings[field]
+        save({"settings": current_settings})

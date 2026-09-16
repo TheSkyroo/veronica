@@ -1,14 +1,22 @@
 import logging
 import sys
+from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from veronica import prefs
+
+log = logging.getLogger("veronica.config")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="VERONICA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="VERONICA_", env_file=".env", extra="ignore", validate_assignment=True
+    )
 
     home: Path = Field(default_factory=lambda: Path.home() / ".veronica")
 
@@ -104,7 +112,112 @@ class Settings(BaseSettings):
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
 
-settings = Settings()
+@dataclass(frozen=True)
+class EditableField:
+    kind: Literal["bool", "int", "float", "str", "choice", "list"]
+    label: str
+    help: str = ""
+    choices: tuple[str, ...] | None = None
+    min: float | None = None
+    max: float | None = None
+    restart: bool = True
+
+
+EDITABLE_SETTINGS: dict[str, EditableField] = {
+    "followup_window_s": EditableField(
+        "int", "Follow-up window (seconds)", "How long she keeps listening after answering.",
+        min=1, max=15, restart=False,
+    ),
+    "confirm_listen_s": EditableField(
+        "int", "Confirmation timeout (seconds)", "How long she waits for yes/no.",
+        min=3, max=30, restart=False,
+    ),
+    "hud_hide_after_s": EditableField(
+        "float", "Hide HUD after (seconds)", "", min=1, max=30, restart=False,
+    ),
+    "wake_min_rms": EditableField(
+        "float", "Wake sensitivity (min level)",
+        "Lower = more sensitive; raise if she wakes on noise.", min=0.002, max=0.05,
+    ),
+    "wake_phrases": EditableField("list", "Wake phrases", "Comma-separated; 'veronica' is recommended."),
+    "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Option)"),
+    "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
+                             choices=("low", "medium", "high")),
+    "memory_enabled": EditableField("bool", "Remember conversations"),
+    "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
+}
+
+
+def coerce_setting(name: str, value: Any) -> Any:
+    """Coerce a raw (e.g. UI-supplied) value to what Settings expects for
+    field `name`: clamps numbers to their min/max, splits/strips comma
+    lists, validates choice membership. Raises ValueError on bad input."""
+    if name not in EDITABLE_SETTINGS:
+        raise ValueError(f"{name!r} is not an editable setting")
+    field = EDITABLE_SETTINGS[name]
+
+    if field.kind == "bool":
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    if field.kind == "int":
+        v = int(value)
+        if field.min is not None:
+            v = max(v, int(field.min))
+        if field.max is not None:
+            v = min(v, int(field.max))
+        return v
+
+    if field.kind == "float":
+        v = float(value)
+        if field.min is not None:
+            v = max(v, field.min)
+        if field.max is not None:
+            v = min(v, field.max)
+        return v
+
+    if field.kind == "choice":
+        s = str(value)
+        if not field.choices or s not in field.choices:
+            raise ValueError(f"{value!r} is not a valid choice for {name!r} ({field.choices})")
+        return s
+
+    if field.kind == "list":
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return list(value)
+
+    # kind == "str"
+    return str(value)
+
+
+def load_settings(overrides: dict | None = None) -> Settings:
+    """Build a Settings instance from env/.env defaults with `overrides`
+    (a dict of field name -> value, as loaded from prefs.json's "settings"
+    key) applied on top. Unknown keys and values that fail validation are
+    dropped (logged, not raised) so a corrupt prefs.json never blocks
+    startup."""
+    overrides = overrides or {}
+    filtered = {k: v for k, v in overrides.items() if k in EDITABLE_SETTINGS}
+    for k in overrides:
+        if k not in EDITABLE_SETTINGS:
+            log.warning("ignoring unknown settings override %r", k)
+
+    while True:
+        try:
+            return Settings(**filtered)
+        except ValidationError as e:
+            bad_fields = {err["loc"][0] for err in e.errors() if err.get("loc")}
+            if not bad_fields:
+                log.warning("failed to apply settings overrides; using defaults", exc_info=True)
+                return Settings()
+            for f in bad_fields:
+                log.warning("ignoring invalid settings override %r=%r", f, filtered.get(f))
+                filtered.pop(f, None)
+
+
+settings = load_settings(prefs.load().get("settings"))
 
 
 def setup_logging(level: int = logging.INFO) -> logging.Logger:

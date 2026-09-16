@@ -2,7 +2,9 @@ import logging
 import pathlib
 import sys
 
-from veronica.config import Settings, setup_logging
+import pytest
+
+from veronica.config import EDITABLE_SETTINGS, Settings, coerce_setting, load_settings, setup_logging
 
 
 def test_defaults(tmp_home):
@@ -89,3 +91,63 @@ def test_setup_logging_keeps_stream_handler_when_tty(tmp_home, monkeypatch):
                     for h in log.handlers)
     finally:
         _fresh_veronica_logger()
+
+
+def test_load_settings_applies_overrides(tmp_home):
+    s = load_settings({"effort": "high"})
+    assert s.effort == "high"
+
+
+def test_load_settings_ignores_unknown_key(tmp_home):
+    s = load_settings({"not_a_real_field": 123})
+    assert not hasattr(s, "not_a_real_field")
+
+
+def test_load_settings_ignores_invalid_value(tmp_home):
+    s = load_settings({"followup_window_s": "abc"})
+    assert s.followup_window_s == 4
+
+
+def test_load_settings_none_overrides(tmp_home):
+    s = load_settings(None)
+    assert s.effort == "low"
+
+
+def test_coerce_setting_clamps_int():
+    assert coerce_setting("followup_window_s", 99) == 15
+    assert coerce_setting("followup_window_s", 0) == 1
+
+
+def test_coerce_setting_clamps_float():
+    assert coerce_setting("wake_min_rms", 0.0001) == 0.002
+    assert coerce_setting("wake_min_rms", 999) == 0.05
+
+
+def test_coerce_setting_splits_list():
+    assert coerce_setting("wake_phrases", "veronica, hey veronica") == ["veronica", "hey veronica"]
+
+
+def test_coerce_setting_invalid_choice_raises():
+    with pytest.raises(ValueError):
+        coerce_setting("effort", "ludicrous")
+
+
+def test_coerce_setting_valid_choice():
+    assert coerce_setting("effort", "medium") == "medium"
+
+
+def test_coerce_setting_unknown_field_raises():
+    with pytest.raises(ValueError):
+        coerce_setting("not_a_real_field", 1)
+
+
+def test_every_editable_setting_is_a_settings_field():
+    fields = Settings.model_fields
+    for name in EDITABLE_SETTINGS:
+        assert name in fields, f"{name} is not a Settings field"
+
+
+def test_validate_assignment_rejects_bad_type(tmp_home):
+    s = Settings()
+    with pytest.raises(Exception):
+        s.followup_window_s = "x"
