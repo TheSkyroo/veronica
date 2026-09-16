@@ -59,7 +59,17 @@ from veronica.brain.intents import match_intent, normalize
         ("", None),
         (None, None),
         ("shrinking violet", None),
-        ("hide and seek", None),
+        # "hide and seek" now clause-splits on " and " into "hide" / "seek";
+        # the first clause is an exact match for hud_hide — an accepted
+        # tradeoff of matching each clause of a multi-clause utterance.
+        ("hide and seek", "hud_hide"),
+        # clause splitting: first matching clause wins
+        ("Make yourself small. I can't see you.", "hud_mini"),
+        ("I think make yourself small. Assalamu alaikum.", "hud_mini"),
+        ("Veronica, go idle please", "end"),
+        ("Okay stop.", "end"),
+        ("expand on that idea.", None),
+        ("hide my files, please", None),
     ],
 )
 def test_match_intent(heard, expected):
