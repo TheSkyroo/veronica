@@ -6,7 +6,7 @@ import sys
 
 from veronica.audio.play import Player
 from veronica.audio.record import Recorder
-from veronica.audio.wake import WakeWord
+from veronica.audio.wake import make_wake
 from veronica.brain.agent import Brain
 from veronica.config import Settings, settings, setup_logging
 from veronica.orchestrator import Orchestrator
@@ -24,7 +24,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     on_tool = (lambda su, d: on_event("tool", {"summary": su, "decision": d})) if on_event else None
     orch = Orchestrator(
         s,
-        wake=WakeWord(s) if audio else None,
+        wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=Transcriber(s.whisper_model) if audio else None,
         brain=Brain(s, confirm=confirm, on_tool=on_tool),

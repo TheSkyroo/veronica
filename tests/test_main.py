@@ -48,6 +48,10 @@ class _FakeWakeWord:
         self.s = settings
 
 
+def _fake_make_wake(settings, frames=None):
+    return _FakeWakeWord(settings)
+
+
 class _FakeTranscriber:
     def __init__(self, model):
         self.model = model
@@ -69,7 +73,7 @@ class _FakeBrainWithOnTool:
 async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
-    monkeypatch.setattr(main_mod, "WakeWord", _FakeWakeWord)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
 

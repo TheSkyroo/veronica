@@ -8,7 +8,7 @@ from veronica.orchestrator import Orchestrator
 
 
 class Wake:
-    async def wait(self, threshold=None): pass
+    async def wait(self, threshold=None, suppress=None): pass
     def stop(self): pass
 
 class Rec:
@@ -103,7 +103,7 @@ async def test_wake_retry_returns_to_idle(monkeypatch):
     class W:
         n = 0
 
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             self.n += 1
             if self.n == 1:
                 raise RuntimeError("no mic")
@@ -181,7 +181,7 @@ async def test_run_forever_survives_reporting_failure():
             self.calls = 0
             self._barge_ev = asyncio.Event()
 
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             if threshold is not None:
                 await self._barge_ev.wait()
                 self._barge_ev.clear()
@@ -342,7 +342,7 @@ async def test_wake_failure_retries_and_continues_into_a_turn(monkeypatch):
             self.calls = 0
             self._barge_ev = asyncio.Event()
 
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             if threshold is not None:
                 await self._barge_ev.wait()
                 self._barge_ev.clear()
@@ -385,7 +385,7 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
             self.calls = 0
             self._barge_ev = asyncio.Event()
 
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             if threshold is not None:
                 await self._barge_ev.wait()
                 self._barge_ev.clear()
@@ -570,15 +570,83 @@ class BargeWake:
     """wait() returns True after `after` calls when barge=True, else blocks until stop()."""
     def __init__(self, barge_on_call=None):
         self.calls = 0; self.stops = 0; self.barge_on_call = barge_on_call
+        self.received_suppress = None
         self._ev = __import__("asyncio").Event()
-    async def wait(self, threshold=None):
+    async def wait(self, threshold=None, suppress=None):
         self.calls += 1
+        self.received_suppress = suppress
         if self.barge_on_call == self.calls:
             await __import__("asyncio").sleep(0.005)
             return True
         await self._ev.wait(); self._ev.clear(); return False
     def stop(self):
         self.stops += 1; self._ev.set()
+
+
+async def test_barge_listener_receives_suppress_callback():
+    """The barge listener must be handed a callable that yields the sentence
+    currently being spoken, so the whisper wake engine can ignore Veronica's
+    own speech (e.g. "I'm Veronica") instead of self-interrupting."""
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o.wake = BargeWake(barge_on_call=None)
+    await o.one_turn()
+    assert callable(o.wake.received_suppress)
+    # immediately after speaking, the post-playback suppression window (see
+    # test_now_speaking_set_during_play_and_cleared_after / _finished_speaking)
+    # is still active, so the last-spoken text is still offered
+    assert "Done." in o.wake.received_suppress()
+    # once that window has elapsed, suppress() reverts to just _now_speaking
+    o._last_spoken_until = 0.0
+    assert o.wake.received_suppress() == ""
+
+
+async def test_now_speaking_set_during_play_and_cleared_after():
+    """_now_speaking must reflect the sentence text for the duration of
+    player.play() (both the pipeline consumer and _say_unlocked), and be
+    cleared once play() returns."""
+    seen = []
+
+    class RecordingPlayer(Player):
+        async def play(self, s):
+            seen.append(o._now_speaking)
+            await super().play(s)
+
+    o, _ = build()
+    o.player = RecordingPlayer()
+    await o.say("Hello there.")
+    assert seen == ["Hello there."]
+    assert o._now_speaking == ""
+
+    seen.clear()
+    await o.handle_text("anything")
+    assert seen == ["Sure.", "Done."]
+    assert o._now_speaking == ""
+
+    seen.clear()
+    o.recorder = Rec([None])
+    await o.confirm("do a thing")
+    assert seen == ["Run do a thing?"]
+    assert o._now_speaking == ""
+
+
+async def test_suppress_stays_active_for_wake_window_after_playback():
+    """The mic's rolling wake-analysis window (wake_window_s + wake_hop_s) can
+    still hold the tail of a just-finished sentence after _now_speaking is
+    cleared, so suppress() must keep returning text mentioning it until that
+    window has elapsed."""
+    o, _ = build()
+    now = [1000.0]
+    o._clock = lambda: now[0]
+    await o.say("I am Veronica.")
+    assert o._now_speaking == ""
+
+    # still within wake_window_s (1.6) + wake_hop_s (0.6) = 2.2 s of playback ending
+    now[0] += 1.0
+    assert "veronica" in o._suppress_text().lower()
+
+    # past the window: no longer suppressed
+    now[0] += 2.0  # total 3.0s elapsed
+    assert o._suppress_text() == ""
 
 
 class SlowBrain:
@@ -748,7 +816,7 @@ async def test_barge_uses_barge_threshold():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
     seen = []
     class W(BargeWake):
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             seen.append(threshold); return await super().wait(threshold)
     o.wake = W()
     await o.one_turn()
@@ -821,7 +889,7 @@ async def test_barge_while_confirm_waits_for_lock_skips_prompt():
 async def test_barge_listener_failure_does_not_cancel_good_turn(caplog):
     class RaisingWake:
         def __init__(self): self.stops = 0
-        async def wait(self, threshold=None):
+        async def wait(self, threshold=None, suppress=None):
             raise RuntimeError("mic hiccup")
         def stop(self):
             self.stops += 1

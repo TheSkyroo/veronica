@@ -68,9 +68,12 @@ class WakeWord:
         pending stop is consumed by the next wait() even if issued before it starts."""
         self._stop.set()
 
-    async def wait(self, threshold: float | None = None) -> bool:
+    async def wait(self, threshold: float | None = None, suppress: Callable[[], str] | None = None) -> bool:
         """Block until the wake word is detected (True) or stop() is called (False).
-        Only one wait() should be in flight per WakeWord instance at a time."""
+        Only one wait() should be in flight per WakeWord instance at a time.
+        `suppress` is accepted for interface parity with WhisperWake and ignored
+        here — openwakeword's own barge threshold already guards against
+        self-triggering on Veronica's own speech."""
         return await asyncio.to_thread(self._wait, threshold if threshold is not None else self.s.wake_threshold)
 
     def _wait(self, threshold: float) -> bool:
@@ -89,3 +92,12 @@ class WakeWord:
             else:
                 hits = 0
         return False
+
+
+def make_wake(settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None):
+    """Return the configured wake-word engine (WhisperWake or WakeWord)."""
+    if settings.wake_engine == "whisper":
+        from veronica.audio.wake_whisper import WhisperWake
+
+        return WhisperWake(settings, frames=frames)
+    return WakeWord(settings, frames=frames)

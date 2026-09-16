@@ -80,6 +80,13 @@ async def test_threshold_override(monkeypatch):
     assert await asyncio.wait_for(task, 2) is False   # 0.9 < 0.95 → never detected
 
 
+async def test_wait_accepts_and_ignores_suppress(monkeypatch):
+    import asyncio
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    w = WakeWord(Settings(wake_threshold=0.5), frames=lambda: frames("ww"))
+    assert await asyncio.wait_for(w.wait(threshold=0.8, suppress=lambda: "x"), 2) is True
+
+
 async def test_stop_is_consumed(monkeypatch):
     import asyncio
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
