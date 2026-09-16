@@ -66,7 +66,11 @@ class Orchestrator:
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
     # Word characters for is_confirmation: Latin letters plus the Devanagari
     # block (U+0900-U+097F, which includes the vowel signs and chandrabindu).
-    _CONFIRM_NON_WORD_RE = re.compile(r"[^a-zऀ-ॿ ]")
+    # Latin letters and Devanagari letters/marks are word characters; the
+    # danda/double danda (U+0964/0965 — Hindi full stops, which whisper glues
+    # onto the last word) and Devanagari digits are NOT, or "नहीं।" would be
+    # one unknown token and "हाँ, नहीं।" would approve.
+    _CONFIRM_NON_WORD_RE = re.compile(r"[^a-z\u0900-\u0963\u0970-\u097f ]")
 
     @staticmethod
     def is_confirmation(heard: str) -> bool:

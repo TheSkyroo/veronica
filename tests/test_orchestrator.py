@@ -3078,6 +3078,8 @@ def test_read_battery_parses_pmset():
     ("हाँ", True), ("हां", True), ("जी", True), ("जी हाँ", True), ("ठीक है", True), ("करो", True),
     ("हाँ, करो।", True),
     ("नहीं", False), ("नही", False), ("मत करो", False), ("रहने दो", False), ("हाँ नहीं", False),
+    # trailing danda must not glue onto the word
+    ("हाँ।", True), ("ठीक है।", True), ("नहीं।", False), ("हाँ, नहीं।", False), ("करो॥", True),
 ])
 def test_is_confirmation_hinglish(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok

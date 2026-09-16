@@ -358,3 +358,8 @@ def test_normalize_keeps_devanagari_and_strips_danda():
 ])
 def test_match_language_intent(text, expected):
     assert match_language_intent(text) == expected
+
+
+def test_clause_split_on_danda():
+    assert match_intent("ठीक है। बस।") == "end"
+    assert match_intent("मीटिंग बंद करो।") is None

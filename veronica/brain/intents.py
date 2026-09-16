@@ -138,7 +138,7 @@ _FILLERS_BY_LEN = tuple(sorted(FILLERS, key=len, reverse=True))
 # still match on its first clause. Deliberately NOT split on " and " --
 # that swallowed compound phrases like "hide and seek" into a false-positive
 # "hide" match.
-_CLAUSE_SPLIT_RE = re.compile(r"[.,!?;]+")
+_CLAUSE_SPLIT_RE = re.compile(r"[.,!?;।]+")  # danda = Hindi full stop
 
 
 def _strip_wrapper(norm: str) -> str:
