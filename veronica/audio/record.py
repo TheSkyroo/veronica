@@ -29,6 +29,7 @@ class Recorder:
         self._frames = frames or self._mic_frames
         self._vad = self._vad_cls(settings.vad_aggressiveness)
         self._stop = threading.Event()
+        self._finish = threading.Event()
         self._capturing = False
         self._on_level = on_level
         self._level_error_logged = False
@@ -56,12 +57,24 @@ class Recorder:
         if self._capturing:
             self._stop.set()
 
+    def finish(self) -> None:
+        """Request that the in-flight hold-mode capture() (`hold=True`, e.g.
+        push-to-talk or dictation) end now, gracefully returning whatever
+        has been recorded so far — unlike stop(), which discards it. A
+        no-op unless a capture is actually running (same best-effort
+        caveat as stop(): a finish() that lands just after an unrelated
+        capture() already returned would otherwise linger and affect the
+        *next* capture)."""
+        if self._capturing:
+            self._finish.set()
+
     async def capture(
         self,
         max_s: int | None = None,
         preroll: np.ndarray | None = None,
         partial: bool = False,
         skip_ms: int = 0,
+        hold: bool = False,
     ) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
 
@@ -82,16 +95,23 @@ class Recorder:
                      unaffected). Used by the follow-up capture to drop the
                      tail/echo of Veronica's own just-spoken audio, which
                      would otherwise get endpointed as a false speech onset.
+            hold: "hold to talk" mode (push-to-talk, dictation): the VAD
+                  silence endpoint is ignored — recording continues (still
+                  capped by settings.max_utterance_s) until finish() is
+                  called, at which point whatever's been captured so far is
+                  returned (even if shorter than min_speech_ms).
 
         Returns:
-            int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
+            int16 mono PCM array, or None if nothing was captured (no speech
+            before max_s, or — outside hold mode — total speech shorter
+            than min_speech_ms).
         """
         # Set on the event-loop thread, before handing off to the worker, so
         # a stop() issued in the (tiny) window between a caller flipping its
         # own "capturing" bookkeeping (e.g. Orchestrator._confirm_capturing)
         # and the worker thread actually starting is not a no-op.
         self._capturing = True
-        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms)
+        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold)
 
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000
@@ -135,6 +155,7 @@ class Recorder:
         preroll: np.ndarray | None = None,
         partial: bool = False,
         skip_ms: int = 0,
+        hold: bool = False,
     ) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
@@ -190,6 +211,9 @@ class Recorder:
                 if self._stop.is_set():
                     self._stop.clear()
                     return None
+                if hold and self._finish.is_set():
+                    self._finish.clear()
+                    break
                 is_speech = self._vad.is_speech(frame, self.s.sample_rate)
                 if self._on_level is not None:
                     try:
@@ -225,7 +249,7 @@ class Recorder:
                                     self._audio_error_logged = True
                 else:
                     silence_run += 1
-                if silence_run >= silence_frames_needed or len(buf) >= max_frames:
+                if (not hold and silence_run >= silence_frames_needed) or len(buf) >= max_frames:
                     has_wait_budget_left = wait_frames is not None and waited < wait_frames
                     if speech_frames < min_speech_frames and (onset_from_preroll or has_wait_budget_left):
                         # Too little real speech to count as an utterance —
@@ -248,6 +272,8 @@ class Recorder:
         finally:
             self._capturing = False
 
-        if speech_frames < min_speech_frames:
+        if not hold and speech_frames < min_speech_frames:
+            return None
+        if not buf:
             return None
         return np.frombuffer(b"".join(buf), dtype=np.int16)

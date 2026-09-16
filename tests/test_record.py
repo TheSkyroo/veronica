@@ -308,3 +308,91 @@ async def test_real_speech_in_progress_not_cut_by_onset_wait_cap(monkeypatch):
     assert pcm is not None
     # full speech run + 3 silence frames (90 ms) to endpoint
     assert len(pcm) == FRAME * (speech_frames + 3)
+
+
+# -- hold mode / finish() (A2 push-to-talk) ------------------------------------
+#
+# These gate the frame generator on a threading.Event (rather than an
+# arbitrary frame count) so the background capture thread is genuinely
+# blocked — not just "probably still running" — at the moment the test
+# asserts task.done()/calls finish(): the generator runs on the same
+# to_thread worker thread as _capture(), so blocking it deterministically
+# pauses capture() without any wall-clock race.
+
+def _gated_frames(pattern, block_after_index, started: threading.Event, gate: threading.Event):
+    for i, frame in enumerate(frames(pattern)):
+        yield frame
+        if i == block_after_index:
+            started.set()
+            gate.wait()
+
+
+async def test_hold_mode_ignores_silence_endpoint_until_finish(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    # speech (4 frames) then silence well past the 90ms/3-frame endpoint
+    # that would have ended a normal (non-hold) capture by frame index 5.
+    pattern = "ssss" + "." * 50
+    r = Recorder(s, frames=lambda: _gated_frames(pattern, 5, started, gate))
+
+    task = asyncio.create_task(r.capture(max_s=None, hold=True))
+    await asyncio.to_thread(started.wait, 2)
+    assert not task.done()   # normal-mode silence endpoint would have ended this by now
+    r.finish()
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is not None
+    assert len(pcm) >= FRAME * 4  # at least the 4 speech frames captured
+
+
+async def test_hold_mode_waits_for_onset_and_finish_before_any_speech(monkeypatch):
+    """Releasing the PTT key before any speech was captured returns None,
+    without hanging (max_s=None normally waits forever for onset)."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    r = Recorder(s, frames=lambda: _gated_frames("." * 500, 3, started, gate))
+
+    task = asyncio.create_task(r.capture(max_s=None, hold=True))
+    await asyncio.to_thread(started.wait, 2)
+    assert not task.done()
+    r.finish()
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is None
+
+
+async def test_hold_mode_returns_short_speech_below_min_speech_ms(monkeypatch):
+    """Unlike normal mode, hold mode doesn't discard a too-short utterance —
+    the user explicitly ended it via finish()."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=600, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    # block right after the single speech frame is captured (index 0)
+    r = Recorder(s, frames=lambda: _gated_frames("s" + "." * 500, 0, started, gate))
+
+    task = asyncio.create_task(r.capture(max_s=None, hold=True))
+    await asyncio.to_thread(started.wait, 2)
+    r.finish()
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is not None
+    assert len(pcm) == FRAME  # the single speech frame, well under min_speech_ms
+
+
+async def test_finish_when_not_capturing_is_noop(monkeypatch):
+    r = make("....ssssss.........", monkeypatch)
+    r.finish()  # no capture in flight
+    pcm = await r.capture()
+    assert pcm is not None
+
+
+async def test_finish_does_not_affect_non_hold_capture(monkeypatch):
+    """finish() only matters in hold mode; a plain capture() must ignore it
+    (nothing in _capture() checks self._finish unless hold=True)."""
+    r = make("....ssssss.........", monkeypatch)
+    r._finish.set()
+    pcm = await r.capture()
+    assert pcm is not None
+    assert len(pcm) == FRAME * 9
