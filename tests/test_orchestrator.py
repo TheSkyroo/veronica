@@ -852,3 +852,59 @@ async def test_play_exception_propagates_and_cleans_up():
         await asyncio.wait_for(o.handle_text("hello"), 1)
 
     assert o._speech_queue is None
+
+
+def build3(rec_pcms=(), stt_texts=()):
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec(rec_pcms), stt=STT(stt_texts),
+        brain=Brain(), tts=TTS(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    return o, states, events
+
+
+async def test_events_full_turn():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    await o.one_turn()
+    kinds = [k for k, _ in ev]
+    assert ("heard", "what time is it") in ev
+    assert [p for k, p in ev if k == "sentence"] == ["Sure.", "Done."]
+    voices = [p for k, p in ev if k == "voice"]
+    assert len(voices) == 2 and voices[0]["step_ms"] == 50 and isinstance(voices[0]["levels"], list)
+    # every sentence is preceded by its voice envelope
+    assert kinds.index("voice") < kinds.index("sentence")
+    assert ("state", "listening") in ev and ("state", "idle") in ev
+
+
+async def test_events_confirm_ask_then_allowed_and_declined():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["yes", "no"])
+    assert await o.confirm("Bash: rm x") is True
+    assert await o.confirm("Bash: rm y") is False
+    tools = [p for k, p in ev if k == "tool"]
+    assert tools == [
+        {"summary": "Bash: rm x", "decision": "ask"},
+        {"summary": "Bash: rm x", "decision": "allowed"},
+        {"summary": "Bash: rm y", "decision": "ask"},
+        {"summary": "Bash: rm y", "decision": "declined"},
+    ]
+    assert ("sentence", "Run Bash: rm x?") in ev
+
+
+async def test_events_confirm_no_speech_declined():
+    o, _, ev = build3(rec_pcms=[None])
+    assert await o.confirm("Bash: rm x") is False
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "declined"]
+
+
+async def test_events_warm():
+    o, _, ev = build3()
+    await o.warmup()
+    assert [p for k, p in ev if k == "warm"] == [{"ready": False}, {"ready": True}]
+
+
+async def test_on_event_errors_are_swallowed():
+    def boom(k, p): raise RuntimeError("x")
+    o = Orchestrator(Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]), brain=Brain(), tts=TTS(), player=Player(), on_event=boom)
+    await o.say("hi")   # must not raise

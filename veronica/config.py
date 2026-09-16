@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     effort: str = "low"
     max_turns: int = 8
 
+    # HUD
+    hud_enabled: bool = True
+    hud_hide_after_s: float = 3.0
+    hud_width: int = 380
+    hud_height: int = 220
+    hud_margin: int = 24
+
     @property
     def session_file(self) -> Path:
         return self.home / "session"

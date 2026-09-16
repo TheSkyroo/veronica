@@ -14,21 +14,24 @@ from veronica.speech.stt import Transcriber
 from veronica.speech.tts import Synthesizer
 
 
-def build_orchestrator(s: Settings, on_state=None, *, audio: bool = True) -> Orchestrator:
+def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True) -> Orchestrator:
     holder: dict = {}
 
     async def confirm(summary: str) -> bool:
         return await holder["orch"].confirm(summary)
 
+    on_level = (lambda v: on_event("mic", v)) if (on_event and audio) else None
+    on_tool = (lambda su, d: on_event("tool", {"summary": su, "decision": d})) if on_event else None
     orch = Orchestrator(
         s,
         wake=WakeWord(s) if audio else None,
-        recorder=Recorder(s) if audio else None,
+        recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=Transcriber(s.whisper_model) if audio else None,
-        brain=Brain(s, confirm=confirm),
+        brain=Brain(s, confirm=confirm, on_tool=on_tool),
         tts=Synthesizer(s.kokoro_voice, s.models_dir),
         player=Player(),
         on_state=on_state,
+        on_event=on_event,
     )
     holder["orch"] = orch
     return orch
