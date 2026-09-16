@@ -71,6 +71,7 @@ class Orchestrator:
         self._last_spoken = ""
         self._last_spoken_until = 0.0
         self._clock = time.monotonic
+        self._announce_queue: asyncio.Queue = asyncio.Queue()
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -494,11 +495,50 @@ class Orchestrator:
                 break
         self._set("idle")
 
+    # -- announcements ----------------------------------------------------------
+    async def announce(self, text: str) -> None:
+        """Queue `text` to be spoken next time we're idle (e.g. a timer
+        firing): never interrupts an in-flight turn. Safe to call from any
+        task (e.g. TimerService's on_fire callback)."""
+        await self._announce_queue.put(text)
+
+    async def _deliver_announcement(self, text: str) -> None:
+        self._set("speaking")
+        self.player.reset()
+        await self.chime(self.s.chime_wake_hz, 120)
+        await self.say(text)
+        self._set("idle")
+
     async def run_forever(self) -> None:
         self._set("idle")
         while True:
+            # Deliver anything queued while we were away (e.g. a timer that
+            # fired mid-turn) before waiting on the wake word again.
+            while not self._announce_queue.empty():
+                await self._deliver_announcement(self._announce_queue.get_nowait())
+
+            wake_task = asyncio.ensure_future(self.wake.wait())
+            announce_task = asyncio.ensure_future(self._announce_queue.get())
+            done, _ = await asyncio.wait(
+                {wake_task, announce_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if announce_task in done:
+                # We're idle right now (run_forever only waits here between
+                # turns): stop the wake listener, speak, then loop back
+                # around to start a fresh one — "resuming" it.
+                self.wake.stop()
+                with contextlib.suppress(BaseException):
+                    await wake_task
+                await self._deliver_announcement(announce_task.result())
+                continue
+
+            announce_task.cancel()
+            with contextlib.suppress(BaseException):
+                await announce_task
+
             try:
-                detected = await self.wake.wait()
+                detected = wake_task.result()
             except Exception:
                 log.exception("wake listener failed; retrying in %s s", self.s.wake_retry_s)
                 self._set("error")

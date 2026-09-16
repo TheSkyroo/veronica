@@ -1356,3 +1356,113 @@ async def test_followup_window_default_is_four_seconds():
 
 async def test_vad_silence_ms_default_is_600():
     assert Settings().vad_silence_ms == 600
+
+
+# -- announce() ---------------------------------------------------------------
+
+class _WakeBlocksThenCancel:
+    """First call() blocks until stop() (mirroring the real wake listener,
+    which a stop() interrupts); every later call raises CancelledError to
+    break the run_forever loop for the test."""
+    def __init__(self):
+        self.calls = 0
+        self.stops = 0
+        self._ev = None
+
+    async def wait(self, threshold=None, suppress=None):
+        self.calls += 1
+        if self.calls > 1:
+            raise asyncio.CancelledError()
+        self._ev = asyncio.Event()
+        await self._ev.wait()
+        return False
+
+    def stop(self):
+        self.stops += 1
+        if self._ev is not None:
+            self._ev.set()
+
+    def take_preroll(self):
+        return np.zeros(0, dtype=np.int16)
+
+
+class _WakeOnceThenCancel:
+    """First call() returns True immediately (triggers one_turn); a
+    barge-listener call (threshold set) blocks until stop(); every later
+    main-loop call raises CancelledError to break the loop for the test."""
+    def __init__(self):
+        self.calls = 0
+        self.stops = 0
+        self._barge_ev = None
+
+    async def wait(self, threshold=None, suppress=None):
+        if threshold is not None:
+            self._barge_ev = asyncio.Event()
+            await self._barge_ev.wait()
+            return False
+        self.calls += 1
+        if self.calls > 1:
+            raise asyncio.CancelledError()
+        return True
+
+    def stop(self):
+        self.stops += 1
+        if self._barge_ev is not None:
+            self._barge_ev.set()
+
+    def take_preroll(self):
+        return np.zeros(0, dtype=np.int16)
+
+
+async def test_announce_queues():
+    o, _ = build()
+    assert o._announce_queue.empty()
+    await o.announce("Timer done")
+    assert not o._announce_queue.empty()
+    assert o._announce_queue.get_nowait() == "Timer done"
+
+
+async def test_announce_delivered_while_idle():
+    """Queued while idle: the wake listener is stopped, the announcement is
+    chimed + spoken, then the wake loop resumes (a fresh wait() call)."""
+    o, states = build()
+    wake = _WakeBlocksThenCancel()
+    o.wake = wake
+
+    async def deliver_soon():
+        await asyncio.sleep(0.01)
+        await o.announce("Timer done")
+
+    asyncio.ensure_future(deliver_soon())
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+
+    assert "Timer done" in o.tts.said
+    assert wake.stops >= 1
+    assert "speaking" in states
+    # wake.wait() was called again after delivering (loop resumed)
+    assert wake.calls >= 2
+
+
+async def test_announce_delivered_after_turn_ends():
+    """Queued mid-turn: not spoken until the in-flight turn's own sentences
+    are done and the orchestrator is idle again."""
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["do something"])
+    o.wake = _WakeOnceThenCancel()
+
+    class AnnouncingBrain:
+        def __init__(self, orch):
+            self.orch = orch
+
+        async def ask(self, text):
+            yield "Sure."
+            await self.orch.announce("Timer done")
+            yield "Done."
+
+    o.brain = AnnouncingBrain(o)
+
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+
+    assert o.tts.said == ["Sure.", "Done.", "Timer done"]
+    assert "followup" in states
