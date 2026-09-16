@@ -216,24 +216,30 @@ def load_settings(overrides: dict | None = None) -> Settings:
     (a dict of field name -> value, as loaded from prefs.json's "settings"
     key) applied on top. Unknown keys and values that fail validation are
     dropped (logged, not raised) so a corrupt prefs.json never blocks
-    startup."""
+    startup. A validation error on a non-override field (env/.env) is
+    re-raised: nothing here can fix it."""
     overrides = overrides or {}
     filtered = {k: v for k, v in overrides.items() if k in EDITABLE_SETTINGS}
     for k in overrides:
         if k not in EDITABLE_SETTINGS:
             log.warning("ignoring unknown settings override %r", k)
 
-    while True:
+    # Bounded: each iteration drops at least one override, so at most
+    # len(filtered) + 1 attempts. A validation error on a field that is NOT
+    # an override (e.g. VERONICA_SAMPLE_RATE=abc in the env) can't be fixed
+    # here and is re-raised as a clean startup crash.
+    for _ in range(len(filtered) + 1):
         try:
             return Settings(**filtered)
         except ValidationError as e:
             bad_fields = {err["loc"][0] for err in e.errors() if err.get("loc")}
-            if not bad_fields:
-                log.warning("failed to apply settings overrides; using defaults", exc_info=True)
-                return Settings()
-            for f in bad_fields:
+            bad = bad_fields & set(filtered)
+            if not bad:
+                raise
+            for f in bad:
                 log.warning("ignoring invalid settings override %r=%r", f, filtered.get(f))
                 filtered.pop(f, None)
+    return Settings(**filtered)
 
 
 settings = load_settings(prefs.load().get("settings"))

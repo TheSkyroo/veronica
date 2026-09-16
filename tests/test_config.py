@@ -4,6 +4,9 @@ import sys
 
 import pytest
 
+from pydantic import ValidationError
+
+from veronica import config as config_mod
 from veronica.config import EDITABLE_SETTINGS, Settings, coerce_setting, load_settings, log_level_from_env, setup_logging
 
 
@@ -106,6 +109,38 @@ def test_load_settings_ignores_unknown_key(tmp_home):
 def test_load_settings_ignores_invalid_value(tmp_home):
     s = load_settings({"followup_window_s": "abc"})
     assert s.followup_window_s == 4
+
+
+def test_load_settings_reraises_when_env_field_invalid(tmp_home, monkeypatch):
+    # A bad NON-override field (env) can't be fixed by dropping overrides:
+    # must raise (not spin forever popping keys that aren't there).
+    monkeypatch.setenv("VERONICA_SAMPLE_RATE", "abc")
+    with pytest.raises(ValidationError):
+        load_settings({})
+    with pytest.raises(ValidationError):
+        load_settings({"effort": "high"})
+
+
+def test_load_settings_drops_bad_override_but_reraises_env_error(tmp_home, monkeypatch):
+    monkeypatch.setenv("VERONICA_SAMPLE_RATE", "abc")
+    with pytest.raises(ValidationError):
+        load_settings({"followup_window_s": "abc"})
+
+
+def test_load_settings_loop_is_bounded(tmp_home, monkeypatch):
+    calls = []
+    real = Settings
+
+    class Counting(real):
+        def __init__(self, **kw):
+            calls.append(dict(kw))
+            super().__init__(**kw)
+
+    monkeypatch.setattr(config_mod, "Settings", Counting)
+    monkeypatch.setenv("VERONICA_SAMPLE_RATE", "abc")
+    with pytest.raises(ValidationError):
+        load_settings({"followup_window_s": "abc", "effort": "high"})
+    assert len(calls) <= 3  # len(filtered) + 1
 
 
 def test_load_settings_none_overrides(tmp_home):
