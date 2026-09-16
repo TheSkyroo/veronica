@@ -17,3 +17,29 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 .row.hidden{opacity:0}
 #prompt .msg{font-size:13px;font-weight:500;color:#f0c36c}
 #hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
+
+#heard .msg{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+#status{display:flex;align-items:center;gap:6px;min-height:14px}
+#status .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s ease}
+#status .label{flex:0 1 auto;font-size:10.5px;letter-spacing:.03em;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#status .label:empty{display:none}
+#status .level{flex:0 0 auto;width:120px;height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-left:4px;display:none}
+#status .level i{display:block;height:100%;width:0%;background:#7ad0ff;border-radius:2px;transition:width .08s linear}
+#status[data-state="listening"] .level,
+#status[data-state="followup"] .level,
+#status[data-state="confirming"] .level{display:block}
+
+#status[data-state="warming"] .dot{background:#a0a4ad}
+#status[data-state="listening"] .dot,#status[data-state="followup"] .dot{
+  background:#7ad0ff;animation:hud-pulse 1.1s ease-in-out infinite;
+}
+#status[data-state="thinking"] .dot{background:#ffb454}
+#status[data-state="speaking"] .dot{background:#f0c36c}
+#status[data-state="confirming"] .dot{background:#ff8a3c}
+#status[data-state="error"] .dot{background:#ff5a5a}
+
+@keyframes hud-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(122,208,255,.55)}
+  50%{box-shadow:0 0 0 4px rgba(122,208,255,0)}
+}
