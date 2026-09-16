@@ -1257,6 +1257,99 @@ async def test_non_end_phrase_is_not_treated_as_end():
     assert o.brain.asked == ["stop the timer"]
 
 
+async def test_followup_empty_transcript_ends_silently():
+    """An empty transcript on a follow-up capture (not the first listen
+    after wake) must not say "Sorry, didn't catch that." nor reopen another
+    follow-up window — just go idle."""
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)],
+        stt_texts=["hi", ""],
+    )
+    await o.one_turn()
+    assert o.tts.said == ["Sure.", "Done."]
+    assert states[-1] == "idle"
+    assert states.count("followup") == 1
+
+
+async def test_first_capture_empty_transcript_keeps_sorry_and_followup():
+    """The first capture after wake (not a follow-up) keeps today's
+    behavior: "Sorry, didn't catch that." then a follow-up window."""
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[""])
+    await o.one_turn()
+    assert o.tts.said == ["Sorry, didn't catch that."]
+    assert o.brain.asked == []
+
+
+async def test_empty_transcript_after_barge_relisten_keeps_sorry():
+    """The re-listen after a barge-in is not a follow-up capture: an empty
+    transcript there should still get "Sorry, didn't catch that."."""
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["hi", ""],
+    )
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = SlowBrain()
+    await o.one_turn()
+    assert "Sorry, didn't catch that." in o.tts.said
+
+
+# -- commit 2: local voice intents --------------------------------------------
+
+async def test_end_intent_emits_hud_hide():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["stop"])
+    await o.one_turn()
+    assert ("hud", {"mode": "hide"}) in ev
+    assert o.tts.said == []
+
+
+async def test_end_intent_spoken_variant_says_okay_and_hides_hud():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["thanks veronica"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "hide"}) in ev
+
+
+async def test_end_intent_new_phrase_go_idle():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["go idle"])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+
+
+async def test_hud_hide_intent_is_silent_and_goes_idle():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["hide"])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+    assert ("hud", {"mode": "hide"}) in ev
+    assert "followup" not in states
+
+
+async def test_hud_mini_intent_says_okay_emits_hud_and_continues_followup():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["shrink"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "mini"}) in ev
+    assert "followup" in states
+    assert o.brain.asked == []
+
+
+async def test_hud_full_intent_says_okay_emits_hud_and_continues_followup():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["expand"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "full"}) in ev
+    assert "followup" in states
+
+
+async def test_non_intent_text_goes_to_brain():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    await o.one_turn()
+    assert o.brain.asked == ["what time is it"]
+
+
 async def test_followup_window_default_is_four_seconds():
     assert Settings().followup_window_s == 4
 

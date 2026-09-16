@@ -11,17 +11,48 @@ class FakeWeb:
     def evaluateJavaScript_completionHandler_(self, js, cb): self.js.append(js)
 
 
+class FakeRect:
+    def __init__(self, x, y, w, h):
+        self.origin = types.SimpleNamespace(x=x, y=y)
+        self.size = types.SimpleNamespace(width=w, height=h)
+
+
 class FakePanel:
-    def __init__(self): self.alpha = 0.0; self.visible = False; self.orders = []
+    def __init__(self, x=0.0, y=0.0, w=540, h=300):
+        self.alpha = 0.0
+        self.visible = False
+        self.orders = []
+        self._rect = FakeRect(x, y, w, h)
+        self.setFrame_calls = []
+
     def setAlphaValue_(self, a): self.alpha = a
     def orderFrontRegardless(self): self.visible = True; self.orders.append("front")
     def orderOut_(self, _): self.visible = False; self.orders.append("out")
 
+    def frame(self):
+        return self._rect
 
-def make(t=[0.0]):
+    def setFrame_display_animate_(self, frame, display, animate):
+        self.setFrame_calls.append((frame.origin.x, frame.origin.y, frame.size.width, frame.size.height))
+        self._rect = frame
+
+
+def _noop_prefs_load():
+    return {}
+
+
+def _noop_prefs_save(_prefs):
+    pass
+
+
+def make(t=[0.0], **settings_over):
     web, panel = FakeWeb(), FakePanel()
-    h = HudWindow(Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
-                  clock=lambda: t[0], main=lambda fn: fn())
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0, **settings_over),
+        webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        clock=lambda: t[0], main=lambda fn: fn(),
+        prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+    )
     return h, web, panel, t
 
 
@@ -56,7 +87,8 @@ def test_push_after_close_is_noop():
 
 def test_factory_failure_is_soft(caplog):
     def bad(s): raise RuntimeError("no webkit")
-    h = HudWindow(Settings(), webview_factory=bad, panel_factory=lambda s, w: FakePanel(), main=lambda fn: fn())
+    h = HudWindow(Settings(), webview_factory=bad, panel_factory=lambda s, w: FakePanel(), main=lambda fn: fn(),
+                  prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save)
     h.push({"kind": "state", "payload": "idle"}); h.on_state("listening")   # no raise
     assert h.available is False
 
@@ -114,7 +146,8 @@ def test_hide_waits_for_animation_completion_before_ordering_out(monkeypatch):
     monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
 
     web, panel = FakeWeb(), FakePanelWithAnimator()
-    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn())
+    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn(),
+                  prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save)
 
     h.hide()
     assert "out" not in panel.orders
@@ -168,7 +201,8 @@ def test_show_during_fade_prevents_stale_hide_completion_from_ordering_out(monke
     monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
 
     web, panel = FakeWeb(), FakePanelWithAnimator()
-    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn())
+    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn(),
+                  prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save)
 
     h.hide()
     stale_completion = FakeNSAnimationContext.ctx.completion
@@ -180,3 +214,175 @@ def test_show_during_fade_prevents_stale_hide_completion_from_ordering_out(monke
     stale_completion()  # the old hide's fade completion fires late
     assert panel.visible
     assert "out" not in panel.orders
+
+
+# -- commit 3: mini mode, draggable panel, position persistence ---------------
+
+def test_default_mode_is_full_and_construction_leaves_geometry_untouched():
+    h, _, panel, _ = make()
+    assert h._mode == "full"
+    assert panel.setFrame_calls == []  # factory-built geometry left alone
+
+
+def test_set_mode_mini_resizes_panel_and_calls_js():
+    h, web, panel, _ = make()
+    h.set_mode("mini")
+    assert h._mode == "mini"
+    assert panel.setFrame_calls[-1][2:] == (110, 110)   # width, height
+    assert web.js[-1] == 'window.hud.setMode("mini")'
+
+
+def test_set_mode_full_resizes_back():
+    h, web, panel, _ = make()
+    h.set_mode("mini")
+    h.set_mode("full")
+    assert panel.setFrame_calls[-1][2:] == (540, 300)
+    assert web.js[-1] == 'window.hud.setMode("full")'
+
+
+def test_set_mode_ignores_unknown_mode():
+    h, web, panel, _ = make()
+    h.set_mode("huge")
+    assert h._mode == "full"
+    assert panel.setFrame_calls == []
+
+
+def test_set_mode_persists_pref():
+    saved = {}
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=_noop_prefs_load,
+        prefs_save=lambda p: saved.update(p),
+    )
+    h.set_mode("mini")
+    assert saved == {"hud_mode": "mini"}
+
+
+def test_construction_applies_saved_mini_mode():
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "mini"}, prefs_save=_noop_prefs_save,
+    )
+    assert h._mode == "mini"
+    assert panel.setFrame_calls[-1][2:] == (110, 110)
+
+
+def test_construction_falls_back_to_settings_hud_mode_when_no_saved_pref():
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0, hud_mode="mini"), webview_factory=lambda s: web,
+        panel_factory=lambda s, w: panel, main=lambda fn: fn(),
+        prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+    )
+    assert h._mode == "mini"
+
+
+def test_construction_ignores_invalid_saved_mode():
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "gigantic"}, prefs_save=_noop_prefs_save,
+    )
+    assert h._mode == "full"
+
+
+def test_construction_applies_saved_position():
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_pos": [12.0, 34.0]}, prefs_save=_noop_prefs_save,
+    )
+    assert h._pos == (12.0, 34.0)
+    assert panel.setFrame_calls[-1][:2] == (12.0, 34.0)
+
+
+def test_hide_persists_panel_position():
+    saved = {}
+    web, panel = FakeWeb(), FakePanel(x=100.0, y=200.0)
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=_noop_prefs_load,
+        prefs_save=lambda p: saved.update(p),
+    )
+    h.hide()
+    assert saved == {"hud_pos": [100.0, 200.0]}
+    assert h._pos == (100.0, 200.0)
+
+
+def test_prefs_load_failure_is_soft(caplog):
+    def boom():
+        raise RuntimeError("disk error")
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=boom, prefs_save=_noop_prefs_save,
+    )
+    assert h._mode == "full"   # falls back to settings default
+    assert h.available
+
+
+def test_panel_factory_sets_up_draggable_non_activating_panel(monkeypatch):
+    """The real panel factory must make the panel draggable (accepts mouse
+    events, movable by its background) while staying a non-activating
+    panel."""
+    import types as _types
+
+    calls = {}
+
+    class FakeAppKitPanel:
+        def __init__(self):
+            self.ignores_mouse = None
+            self.movable_by_bg = None
+
+        def setOpaque_(self, v): pass
+        def setBackgroundColor_(self, v): pass
+        def setLevel_(self, v): pass
+        def setCollectionBehavior_(self, v): pass
+        def setIgnoresMouseEvents_(self, v): self.ignores_mouse = v
+        def setMovableByWindowBackground_(self, v): self.movable_by_bg = v
+        def setHasShadow_(self, v): pass
+        def setAlphaValue_(self, v): pass
+        def setContentView_(self, v): pass
+
+    fake_panel_instance = FakeAppKitPanel()
+
+    class FakeAlloc:
+        def initWithContentRect_styleMask_backing_defer_(self, *a, **k):
+            return fake_panel_instance
+
+    class FakeNSPanel:
+        @staticmethod
+        def alloc():
+            return FakeAlloc()
+
+    class FakeScreen:
+        @staticmethod
+        def mainScreen():
+            frame = _types.SimpleNamespace(
+                origin=_types.SimpleNamespace(x=0, y=0),
+                size=_types.SimpleNamespace(width=1440, height=900),
+            )
+            return _types.SimpleNamespace(visibleFrame=lambda: frame)
+
+    fake_appkit = _types.SimpleNamespace(
+        NSPanel=FakeNSPanel,
+        NSScreen=FakeScreen,
+        NSColor=_types.SimpleNamespace(clearColor=lambda: None),
+        NSWindowStyleMaskBorderless=0,
+        NSWindowStyleMaskNonactivatingPanel=0,
+        NSFloatingWindowLevel=0,
+        NSWindowCollectionBehaviorCanJoinAllSpaces=0,
+        NSWindowCollectionBehaviorStationary=0,
+        NSBackingStoreBuffered=0,
+    )
+    fake_foundation = _types.SimpleNamespace(NSMakeRect=lambda x, y, w, h: (x, y, w, h))
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+    monkeypatch.setitem(sys.modules, "Foundation", fake_foundation)
+
+    from veronica.ui.hud import _real_panel
+
+    panel = _real_panel(Settings(), object())
+    assert panel.ignores_mouse is False
+    assert panel.movable_by_bg is True

@@ -141,6 +141,7 @@ class Recorder:
         min_speech_frames = self.s.min_speech_ms // fm
         max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
+        extra_frames = int(self.s.capture_extra_s * 1000 // fm)
         hop_frames = max(1, int(self.s.partial_hop_s * 1000 / fm))
         skip_frames = skip_ms // fm
 
@@ -173,14 +174,18 @@ class Recorder:
             for frame in _all_frames():
                 frame_idx += 1
                 if frame_idx >= preroll_frame_total:
-                    # Hard cap on live-frame time, independent of started/
-                    # reset state: repeated false onsets (e.g. a bursty noise
-                    # source) each get their own wait budget via the reset
-                    # below, which can otherwise inflate the *real* wall-clock
-                    # wait far past max_s. elapsed counts every live frame no
-                    # matter what state we're in, so this always fires.
+                    # Hard cap on live-frame time spent waiting for an onset:
+                    # repeated false onsets (e.g. a bursty noise source) each
+                    # get their own wait budget via the reset below, which
+                    # can otherwise inflate the *real* wall-clock wait far
+                    # past max_s. elapsed counts every live frame no matter
+                    # what reset state we're in, so this always fires — but
+                    # only while no utterance is in progress (not started):
+                    # once real speech has started, it must be allowed to
+                    # finish, bounded only by max_frames below, not cut short
+                    # by this onset-wait cap.
                     elapsed += 1
-                    if wait_frames is not None and elapsed >= wait_frames + max_frames:
+                    if not started and wait_frames is not None and elapsed >= wait_frames + extra_frames:
                         return None
                 if self._stop.is_set():
                     self._stop.clear()

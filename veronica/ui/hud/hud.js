@@ -207,6 +207,9 @@
       }
     },
     state() { return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready}; },
+    setMode(mode) {
+      document.body.classList.toggle('mini', mode === 'mini');
+    },
     setVisible(visible) {
       visible = !!visible;
       if (!visible) {

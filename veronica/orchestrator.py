@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import logging
 import re
-import string
 import time
 from collections.abc import Callable
 from typing import Any
@@ -10,25 +9,16 @@ from typing import Any
 import numpy as np
 
 from veronica.audio.chime import tone
+from veronica.brain.intents import match_intent, normalize
 from veronica.config import Settings
 from veronica.ui.events import envelope
 
 log = logging.getLogger("veronica.orchestrator")
 
-_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
-
-
-def _normalize_phrase(text: str) -> str:
-    return (text or "").lower().replace("’", "").translate(_PUNCT_TABLE).strip()
-
 
 class Orchestrator:
     CONFIRM_WORDS = frozenset({"yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure"})
     DENY_WORDS = frozenset({"no", "nope", "not", "don't", "dont", "cancel", "stop", "never"})
-    END_PHRASES = frozenset({
-        "thanks veronica", "thank you veronica", "that's all", "thats all",
-        "that is all", "stop", "goodbye", "never mind", "nevermind",
-    })
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
 
     @staticmethod
@@ -453,24 +443,43 @@ class Orchestrator:
         if pcm is None:
             self._set("idle")
             return
+        is_followup = False
         while True:
             text = await self.stt.atranscribe(pcm)
             self._emit("heard", text)
             log.info("heard=%r", text)
-            norm = _normalize_phrase(text)
-            if norm in self.END_PHRASES:
-                if norm in self._SPOKEN_END_PHRASES:
+            intent = match_intent(text)
+            if intent == "end":
+                if normalize(text) in self._SPOKEN_END_PHRASES:
                     self.player.reset()
                     await self.say("Okay.")
+                self._emit("hud", {"mode": "hide"})
                 self._set("idle")
                 return
-            if not text:
+            if intent == "hud_hide":
+                self._emit("hud", {"mode": "hide"})
+                self._set("idle")
+                return
+            if intent in ("hud_mini", "hud_full"):
+                self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
+                self.player.reset()
+                await self.say("Okay.")
+            elif not text:
+                if is_followup:
+                    # A follow-up capture (not the first listen after wake,
+                    # nor the re-listen after a barge) that came back empty
+                    # just means the user didn't say anything more — go
+                    # quiet rather than nag with "Sorry, didn't catch that."
+                    # and reopen yet another follow-up window.
+                    self._set("idle")
+                    return
                 self.player.reset()
                 await self.say("Sorry, didn't catch that.")
             else:
                 barged = await self._run_with_barge(self.handle_text(text))
                 if barged:
                     pcm = await self._listen_after_wake()
+                    is_followup = False
                     if pcm is None:
                         break
                     continue
@@ -479,6 +488,7 @@ class Orchestrator:
             pcm = await self.recorder.capture(
                 max_s=max(1, self.s.followup_window_s), partial=True, skip_ms=self.s.followup_skip_ms
             )
+            is_followup = True
             self._end_partial_window()
             if pcm is None:
                 break

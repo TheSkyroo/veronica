@@ -14,6 +14,7 @@ def test_defaults(tmp_home):
     assert s.followup_skip_ms == 300
     assert s.confirm_listen_s == 10
     assert s.listen_wait_s == 6
+    assert s.capture_extra_s == 3.0
     assert s.wake_retry_s == 10
     assert s.wake_threshold == 0.35
     assert s.wake_hits == 2
@@ -35,6 +36,7 @@ def test_defaults(tmp_home):
     assert s.partial_hop_s == 0.7
     assert s.hud_enabled is True and s.hud_hide_after_s == 3.0
     assert (s.hud_width, s.hud_height, s.hud_margin) == (540, 300, 24)
+    assert s.hud_mode == "full" and s.hud_mini_size == 110
     assert s.vad_silence_ms == 600
     assert s.barge_threshold == 0.8
     assert s.chime_wake_hz == 880 and s.chime_followup_hz == 660

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     followup_skip_ms: int = 300
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
+    capture_extra_s: float = 3.0
 
     # wake word
     wake_engine: str = "whisper"
@@ -62,6 +63,8 @@ class Settings(BaseSettings):
     hud_width: int = 540
     hud_height: int = 300
     hud_margin: int = 24
+    hud_mode: str = "full"    # "full" | "mini"; runtime pref, see veronica.prefs
+    hud_mini_size: int = 110
 
     @property
     def session_file(self) -> Path:
