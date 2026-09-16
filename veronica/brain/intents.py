@@ -44,10 +44,12 @@ _TRAIL_SUFFIX = " please"
 FILLERS = frozenset({"i think", "please", "can you", "could you", "just", "okay", "ok"})
 _FILLERS_BY_LEN = tuple(sorted(FILLERS, key=len, reverse=True))
 
-# Clauses are split on sentence/list punctuation and the word "and", so a
-# single utterance carrying multiple thoughts ("Make yourself small. I can't
-# see you.") can still match on its first clause.
-_CLAUSE_SPLIT_RE = re.compile(r"[.,!?;]+|\s+and\s+", re.IGNORECASE)
+# Clauses are split on sentence/list punctuation, so a single utterance
+# carrying multiple thoughts ("Make yourself small. I can't see you.") can
+# still match on its first clause. Deliberately NOT split on " and " --
+# that swallowed compound phrases like "hide and seek" into a false-positive
+# "hide" match.
+_CLAUSE_SPLIT_RE = re.compile(r"[.,!?;]+")
 
 
 def _strip_wrapper(norm: str) -> str:
@@ -99,8 +101,8 @@ def match_intent(text: str) -> Intent | None:
     local intent phrase sets. Tries the whole normalized utterance first
     (with an optional leading "veronica"/"hey veronica", trailing "please",
     and leading filler stripped), then each clause of the raw utterance in
-    order — split on '.', ',', '!', '?', ';' and " and " — so the first
-    clause that exactly matches a phrase wins."""
+    order — split on '.', ',', '!', '?', ';' — so the first clause that
+    exactly matches a phrase wins."""
     norm_whole = normalize(text)
     for candidate in _candidates_for(norm_whole):
         result = _match_candidate(candidate)
