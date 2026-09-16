@@ -37,6 +37,13 @@ def test_summarize_detail_pim_tools():
     assert summarize_detail("mcp__pim__timer_cancel", {"label": "tea"}) == "Cancel timer tea"
 
 
+def test_summarize_detail_memory_tools():
+    assert summarize_detail("mcp__memory__recall", {"query": "weather"}) == "Recall weather"
+    assert summarize_detail("mcp__memory__facts_list", {}) == "List remembered facts"
+    assert summarize_detail("mcp__memory__fact_add", {"text": "likes tea"}) == "Remember likes tea"
+    assert summarize_detail("mcp__memory__fact_delete", {"text": "likes tea"}) == "Forget likes tea"
+
+
 def test_summarize_tool():
     assert summarize_tool("Bash", {"command": "ls -la"}) == "Bash: ls -la"
     assert summarize_tool("Write", {"file_path": "/x/notes.txt"}) == "Write file /x/notes.txt"
@@ -114,6 +121,7 @@ async def test_options_wired(brain):
     assert o.setting_sources == []
     assert "mac" in o.mcp_servers
     assert "pim" in o.mcp_servers
+    assert "memory" in o.mcp_servers
     assert not o.allowed_tools
     assert o.cwd == str(Path.home())
 

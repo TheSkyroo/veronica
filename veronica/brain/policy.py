@@ -50,6 +50,12 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "timer_list": "allow",
         "timer_cancel": "allow",
     },
+    "memory": {
+        "recall": "allow",
+        "facts_list": "allow",
+        "fact_add": "allow",
+        "fact_delete": "confirm",
+    },
 }
 
 MCP_PREFIX_FMT = "mcp__{server}__"

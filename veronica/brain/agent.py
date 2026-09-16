@@ -19,6 +19,7 @@ from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.mac import mac_server
+from veronica.tools.memory_tools import memory_server
 from veronica.tools.pim import pim_server
 
 log = logging.getLogger("veronica.brain")
@@ -27,6 +28,7 @@ Confirm = Callable[[str, str], Awaitable[bool]]
 
 MAC_PREFIX = "mcp__mac__"
 PIM_PREFIX = "mcp__pim__"
+MEMORY_PREFIX = "mcp__memory__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -80,6 +82,17 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return "List timers"
         if short == "timer_cancel":
             return f"Cancel timer {input.get('label', '')}"
+        return short
+    if tool_name.startswith(MEMORY_PREFIX):
+        short = tool_name[len(MEMORY_PREFIX):]
+        if short == "recall":
+            return f"Recall {input.get('query', '')}"
+        if short == "facts_list":
+            return "List remembered facts"
+        if short == "fact_add":
+            return f"Remember {input.get('text', '')}"
+        if short == "fact_delete":
+            return f"Forget {input.get('text', '')}"
         return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
@@ -142,7 +155,7 @@ class Brain:
             permission_mode="default",
             can_use_tool=self._can_use_tool,
             resume=resume,
-            mcp_servers={"mac": mac_server, "pim": pim_server},
+            mcp_servers={"mac": mac_server, "pim": pim_server, "memory": memory_server},
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool
             # Only our confirmation gate may allow tools; ignore any
