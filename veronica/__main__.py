@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 
-from veronica import prefs
+from veronica import prefs, proactive
 from veronica.audio.play import Player
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
@@ -39,6 +39,32 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         saved_speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
     except (TypeError, ValueError):
         saved_speed = voices.DEFAULT_SPEED
+
+    # Proactive briefings/nudges read the same pim tools the brain uses,
+    # just without going through Claude: the ticker gets the tools' text
+    # (or a mail count) and composes the announcement itself.
+    async def _cal(day: str, days: int) -> str:
+        res = await pim.calendar_events.handler({"day": day, "days": days})
+        return res["content"][0]["text"]
+
+    async def _mail_count() -> int:
+        res = await pim.mail_unread.handler({"limit": 50})
+        return proactive.count_mail(res["content"][0]["text"]) if not res.get("is_error") else 0
+
+    async def _rem(days: int) -> str:
+        res = await pim.reminders_due.handler({"days": days})
+        return res["content"][0]["text"]
+
+    pro = None
+    if audio:
+        # holder["orch"] is set right after construction, and announce() is
+        # only called from ticks that start in run_forever, so the lambda
+        # never runs before the orchestrator exists.
+        pro = proactive.Proactive(
+            proactive.Schedule.from_prefs(saved.get("proactive", {})),
+            announce=lambda t: holder["orch"].announce(t),
+            calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
+        )
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
@@ -52,6 +78,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         on_state=on_state,
         on_event=on_event,
         on_quit=on_quit,
+        proactive=pro,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

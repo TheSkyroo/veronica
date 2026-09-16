@@ -2752,3 +2752,125 @@ async def test_speed_slower_normal(monkeypatch):
     o.stt = STT(["normal speed"]); o.recorder = Rec([np.zeros(1, np.int16), None])
     await o.one_turn()
     assert o.tts.said[-1] == "Already at normal speed."
+
+
+# -- batch B: proactive -------------------------------------------------------
+
+from veronica import proactive as pr_mod
+
+
+class FakeProactive:
+    def __init__(self):
+        self.schedule = pr_mod.Schedule()
+        self.started = 0
+    async def start(self): self.started += 1
+    def stop(self): pass
+    async def build_briefing(self): return "Good morning, Manik. Nothing on your calendar today."
+
+
+class _WakeBlocks(Wake):
+    """Never detects: blocks until cancelled, so run_forever parks in its
+    idle wait instead of spinning."""
+    async def wait(self, threshold=None, suppress=None):
+        await asyncio.Event().wait()
+
+
+def build_pro(stt_texts, monkeypatch, wake=None):
+    saved = []
+    monkeypatch.setattr(pr_mod, "save_schedule", lambda s, save=None: saved.append(s.to_prefs()))
+    states, events = [], []
+    p = FakeProactive()
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=wake or Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(stt_texts),
+        brain=Brain(), tts=TTS(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), proactive=p,
+    )
+    return o, p, saved, events
+
+
+async def test_brief_now_speaks_briefing(monkeypatch):
+    o, _, saved, ev = build_pro(["brief me"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.said == ["Good morning, Manik. Nothing on your calendar today."]
+    assert ("tool", {"summary": "Briefing", "decision": "auto"}) in ev
+    assert o.brain.asked == [] and saved == []
+
+
+async def test_briefing_on_with_time_saves_and_confirms(monkeypatch):
+    o, p, saved, ev = build_pro(["give me a briefing every morning at 7:30 am"], monkeypatch)
+    await o.one_turn()
+    assert p.schedule.briefing_enabled and p.schedule.briefing_time == "07:30"
+    assert saved[-1]["briefing_time"] == "07:30"
+    assert o.tts.said[-1] == "Okay, I'll brief you every day at 7:30."
+    assert ("tool", {"summary": "Update briefing schedule", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+
+async def test_briefing_on_without_time_keeps_stored(monkeypatch):
+    o, p, _, _ = build_pro(["turn on the morning briefing"], monkeypatch)
+    p.schedule.briefing_time = "09:15"
+    await o.one_turn()
+    assert p.schedule.briefing_enabled and p.schedule.briefing_time == "09:15"
+    assert o.tts.said[-1] == "Okay, I'll brief you every day at 9:15."
+
+
+async def test_briefing_off_nudges_on_off(monkeypatch):
+    o, p, saved, _ = build_pro(["stop the morning briefing"], monkeypatch)
+    p.schedule.briefing_enabled = True
+    await o.one_turn()
+    assert not p.schedule.briefing_enabled and o.tts.said[-1] == "Okay, no more morning briefings."
+
+    o.stt = STT(["warn me 10 minutes before my meetings"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 10
+    assert o.tts.said[-1] == "Okay, I'll warn you 10 minutes before each event."
+
+    o.stt = STT(["turn off nudges"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert not p.schedule.nudges_enabled and o.tts.said[-1] == "Okay, no more meeting nudges."
+    assert len(saved) == 3
+
+
+async def test_nudges_on_out_of_range_minutes_keeps_stored(monkeypatch):
+    o, p, _, _ = build_pro(["warn me 90 minutes before my meetings"], monkeypatch)
+    p.schedule.nudge_minutes = 7
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 7
+    assert o.tts.said[-1] == "Okay, I'll warn you 7 minutes before each event."
+
+
+async def test_proactive_intent_without_proactive_says_unavailable(monkeypatch):
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["brief me"])
+    await o.one_turn()
+    assert o.tts.said[-1] == "Briefings aren't available right now."
+    assert o.brain.asked == []
+
+
+async def test_nudges_on_default_minutes(monkeypatch):
+    o, p, saved, _ = build_pro(["turn on nudges"], monkeypatch)
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 5
+    assert o.tts.said == ["Okay, I'll warn you 5 minutes before each event."]
+    assert o.brain.asked == [] and saved == [p.schedule.to_prefs()]
+
+
+async def test_run_forever_starts_proactive(monkeypatch):
+    o, p, _, _ = build_pro([], monkeypatch, wake=_WakeBlocks())
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert p.started == 1
+
+
+async def test_run_forever_without_proactive_is_fine():
+    o, _ = build()
+    o.wake = _WakeBlocks()
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert o.proactive is None

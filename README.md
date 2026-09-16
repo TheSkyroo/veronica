@@ -153,6 +153,34 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
   for 3 seconds, and types everything you said into whichever app is currently focused (via System Events —
   requires **Accessibility** access, same as push-to-talk).
 
+## Voice & speed
+
+- **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
+  (Sarah, Bella, Nicole, Sky, Adam, Michael, Emma, Isabella, George, Lewis), picked by name or by descriptor
+  (british/american, male/female); "use the default voice" goes back to the configured one. "Change your voice" /
+  "different voice" cycles to the next one. She confirms in the new voice ("Okay, this is George.") so you hear it
+  straight away; an unknown name gets the list back.
+- **Speed** — "speak faster" / "speak slower" / "normal speed" nudge the speaking rate in 0.15x steps (0.7x–1.5x)
+  and confirm with "Like this?".
+
+Both are handled locally (no round-trip to Claude), persist across restarts in `~/.veronica/prefs.json`, and are
+also in the menu bar / orb popup under **Voice** (the voice list plus Faster / Slower / Normal speed).
+
+## Briefings & nudges
+
+- **Brief me** — "brief me" / "give me a briefing" / "what's my day look like": a spoken summary of today's
+  calendar, unread mail count and reminders due, composed locally from Calendar.app, Mail.app and Reminders.app.
+- **Daily briefing** — "give me a briefing every morning at 8" / "start the briefing every day at 6 pm" turns on a
+  scheduled briefing at that time ("turn on the morning briefing" keeps the stored time, default 08:00); "stop the
+  morning briefing" / "turn off briefings" turns it off. A briefing more than two hours late (the Mac was asleep) is
+  skipped rather than read out mid-afternoon.
+- **Meeting nudges** — "warn me 10 minutes before my meetings" / "remind me before my meetings" / "turn on nudges"
+  announces "Heads up, <event> starts in 10 minutes." before each timed calendar event (1–60 minutes, default 5);
+  "turn off nudges" / "stop the meeting nudges" turns them off.
+
+Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
+fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
+
 ## Permissions
 
 Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
