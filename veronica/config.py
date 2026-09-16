@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     frame_ms: int = 30                 # webrtcvad frame size
     vad_aggressiveness: int = 2        # 0-3
-    vad_silence_ms: int = 600
+    vad_silence_ms: int = 1200
     max_utterance_s: int = 15
     min_speech_ms: int = 300
     followup_window_s: int = 4
@@ -131,6 +131,16 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "confirm_listen_s": EditableField(
         "int", "Confirmation timeout (seconds)", "How long she waits for yes/no.",
         min=3, max=30, restart=False,
+    ),
+    "vad_silence_ms": EditableField(
+        "int", "End-of-speech silence (ms)",
+        "How long you can pause before Veronica decides you're done talking. "
+        "Raise if she cuts you off mid-sentence.",
+        min=300, max=3000, restart=False,
+    ),
+    "max_utterance_s": EditableField(
+        "int", "Max utterance length (seconds)", "Hard cap on one spoken command.",
+        min=5, max=60, restart=False,
     ),
     "hud_hide_after_s": EditableField(
         "float", "Hide HUD after (seconds)", "", min=1, max=30, restart=False,

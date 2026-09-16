@@ -11,7 +11,7 @@ def test_defaults(tmp_home):
     s = Settings()
     assert s.home == tmp_home
     assert s.sample_rate == 16000
-    assert s.vad_silence_ms == 600
+    assert s.vad_silence_ms == 1200
     assert s.max_utterance_s == 15
     assert s.min_speech_ms == 300
     assert s.followup_window_s == 4
@@ -41,7 +41,7 @@ def test_defaults(tmp_home):
     assert s.hud_enabled is True and s.hud_hide_after_s == 3.0
     assert (s.hud_width, s.hud_height, s.hud_margin) == (540, 300, 24)
     assert s.hud_mode == "full" and s.hud_mini_width == 400 and s.hud_mini_height == 72
-    assert s.vad_silence_ms == 600
+    assert s.vad_silence_ms == 1200
     assert s.barge_threshold == 0.8
     assert s.chime_wake_hz == 880 and s.chime_followup_hz == 660
     assert s.memory_enabled is True
@@ -121,6 +121,16 @@ def test_coerce_setting_clamps_int():
 def test_coerce_setting_clamps_float():
     assert coerce_setting("wake_min_rms", 0.0001) == 0.002
     assert coerce_setting("wake_min_rms", 999) == 0.05
+
+
+def test_coerce_setting_clamps_vad_silence_ms():
+    assert coerce_setting("vad_silence_ms", 100) == 300
+    assert coerce_setting("vad_silence_ms", 9999) == 3000
+
+
+def test_coerce_setting_clamps_max_utterance_s():
+    assert coerce_setting("max_utterance_s", 0) == 5
+    assert coerce_setting("max_utterance_s", 999) == 60
 
 
 def test_coerce_setting_splits_list():

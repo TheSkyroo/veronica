@@ -1377,8 +1377,8 @@ async def test_followup_window_default_is_four_seconds():
     assert Settings().followup_window_s == 4
 
 
-async def test_vad_silence_ms_default_is_600():
-    assert Settings().vad_silence_ms == 600
+async def test_vad_silence_ms_default_is_1200():
+    assert Settings().vad_silence_ms == 1200
 
 
 # -- announce() ---------------------------------------------------------------
