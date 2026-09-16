@@ -2579,3 +2579,93 @@ async def test_dictation_typing_error_mid_way_keeps_earlier_text(monkeypatch):
     await o.one_turn()
     assert typed == ["first", " second"]           # stopped at the failure
     assert "Sorry, I couldn't type that." in o.tts.said
+
+
+async def test_orchestrator_capture_arms_recorder_synchronously():
+    """Orchestrator._capture() must arm() the recorder before scheduling
+    capture(), in the same iteration, so a ptt_end()/stop() landing before
+    the coroutine's first step is honored."""
+    o, _ = build()
+    events = []
+
+    class ArmRec(Rec):
+        def arm(self, hold=False):
+            events.append(("arm", hold))
+
+        async def capture(self, **kw):
+            events.append(("capture", kw.get("hold", False)))
+            return None
+
+    o.recorder = ArmRec([])
+
+    async def run():
+        # _capture() is awaited inline (as _listen_after_ptt does), so its
+        # body runs synchronously up to its first await; the arm must
+        # already have happened by the time control first yields.
+        fut = asyncio.ensure_future(o._capture(max_s=3, hold=True))
+        await asyncio.sleep(0)           # one step: _capture arms + schedules capture()
+        assert events == [("arm", True)]  # capture() body has NOT stepped yet
+        await fut
+
+    await run()
+    assert events == [("arm", True), ("capture", True)]
+
+
+async def test_ptt_quick_tap_with_real_recorder_ends_immediately(monkeypatch):
+    """End to end with the real Recorder: press, then release in the same
+    iteration the hold capture is scheduled -> the capture ends at once
+    instead of running for ptt_max_s."""
+    import threading
+    from veronica.audio.record import Recorder
+    from test_record import FakeVad, frames
+
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    gate = threading.Event()
+
+    def blocking_frames():
+        gate.wait(5)
+        yield from frames("." * 2000)
+
+    o, states = build()
+    o.ready = True
+    o.recorder = Recorder(Settings(ptt_max_s=30, max_utterance_s=60), frames=blocking_frames)
+    o.ptt_start()
+    t = asyncio.ensure_future(o._listen_after_ptt())
+    await asyncio.sleep(0)           # _listen_after_ptt runs up to the shielded await: capture armed
+    assert o._ptt_capturing
+    o.ptt_end()                      # capture() body may not have stepped yet: must still be honored
+    gate.set()
+    pcm = await asyncio.wait_for(t, timeout=2)
+    assert pcm is None
+    assert not o._ptt_capturing and not o._ptt_held
+
+
+async def test_listen_after_ptt_resets_held_flag_when_capture_ends_on_cap():
+    o, _ = build_ptt()
+    o.recorder = SlowRec([None])
+    o.ptt_start()
+    t = asyncio.ensure_future(o._listen_after_ptt())
+    await _settle()
+    o.recorder.finish()              # simulate the capture ending on ptt_max_s with the key still down
+    await t
+    assert not o._ptt_held           # so the eventual key-up is a no-op and the next press is fresh
+    o.ptt_end()
+    assert o.recorder.finish_calls == 1
+
+
+async def test_barge_teardown_logs_turn_exception(caplog):
+    o, _ = build()
+
+    async def interrupt():
+        pass
+
+    o.brain.interrupt = interrupt
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    turn = asyncio.ensure_future(boom())
+    await asyncio.sleep(0)
+    with caplog.at_level("ERROR", logger="veronica.orchestrator"):
+        await o._barge_teardown(turn)
+    assert any("torn down" in r.message for r in caplog.records)

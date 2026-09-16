@@ -244,3 +244,20 @@ def test_start_without_running_loop_calls_back_directly(fake_quartz):
     mon._dispatch(True)
     assert events == ["press"]
     mon.stop()
+
+
+async def test_reenable_tap_releases_a_held_key(fake_quartz):
+    """A key-up can be missed while the tap is disabled; re-enabling must
+    not leave the monitor (and push-to-talk) believing the key is down."""
+    events = []
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
+    mon._loop = asyncio.get_running_loop()
+    mon._setup_tap()
+    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True), None)
+    mon._callback(None, hotkey.TAP_DISABLED_BY_TIMEOUT, None, None)
+    await asyncio.sleep(0)
+    assert events == ["press", "release"]
+    assert mon._pressed is False
+    mon._callback(None, hotkey.TAP_DISABLED_BY_USER_INPUT, None, None)   # nothing held: no extra release
+    await asyncio.sleep(0)
+    assert events == ["press", "release"]

@@ -32,6 +32,7 @@ class Recorder:
         self._finish = threading.Event()
         self._capturing = False
         self._hold = False
+        self._armed = False
         self._on_level = on_level
         self._level_error_logged = False
         # Public, reassignable: Orchestrator wires this up after construction
@@ -111,18 +112,32 @@ class Recorder:
             before max_s, or — outside hold mode — total speech shorter
             than min_speech_ms).
         """
-        # Set on the event-loop thread, before handing off to the worker, so
-        # a stop()/finish() issued in the (tiny) window between a caller
-        # flipping its own "capturing" bookkeeping (e.g.
-        # Orchestrator._ptt_capturing) and the worker thread actually
-        # starting is not a no-op. Any stale stop()/finish() left over from
-        # a previous capture (one that raced its natural end) is discarded
-        # here so it can't cut this capture short.
+        # capture() is a coroutine: this body only runs on the task's first
+        # step, one loop iteration after ensure_future(). Callers that
+        # schedule a capture and may receive a stop()/finish() in that same
+        # iteration must arm() synchronously first (Orchestrator._capture
+        # does); arm() here is then an idempotent no-op.
+        if not self._armed:
+            self.arm(hold)
+        self._armed = False
+        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold)
+
+    def arm(self, hold: bool = False) -> None:
+        """Synchronously mark a capture as in flight *before* its coroutine
+        gets its first step, so a stop()/finish() that lands in the gap
+        between scheduling capture() and the worker thread actually
+        starting is honored rather than silently dropped (a dropped
+        finish() on a push-to-talk quick tap would leave the mic open for
+        the whole ptt_max_s). Also discards any stale stop()/finish() left
+        over from a previous capture (one that raced its natural end) so it
+        can't cut this capture short. capture() arms itself unless the
+        caller already did (so an explicit arm() is consumed by exactly one
+        capture())."""
         self._stop.clear()
         self._finish.clear()
         self._hold = hold
         self._capturing = True
-        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold)
+        self._armed = True
 
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000

@@ -172,6 +172,10 @@ class HotkeyMonitor:
             self._reenable_logged = True
         with contextlib.suppress(Exception):
             self._quartz.CGEventTapEnable(self._tap, True)
+        # While the tap was off we may have missed the key-up: don't leave
+        # push-to-talk believing the key is still held.
+        if self._pressed:
+            self._dispatch(False)
 
     def _dispatch(self, is_down: bool) -> None:
         if is_down == self._pressed:

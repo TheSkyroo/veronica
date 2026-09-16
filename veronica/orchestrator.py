@@ -463,6 +463,10 @@ class Orchestrator:
             pcm = await self._capture(max_s=self.s.ptt_max_s, hold=True, partial=True)
         finally:
             self._ptt_capturing = False
+            # The key may still be physically down (capture ended on the
+            # ptt_max_s cap, or an error); treat it as released so the
+            # eventual key-up is a no-op and the next press is a fresh one.
+            self._ptt_held = False
             self._end_partial_window()
             with contextlib.suppress(BaseException):
                 await chime_task
@@ -480,6 +484,13 @@ class Orchestrator:
         draining the mic — and a stop() meant for the old capture could
         be consumed by the new one."""
         self._capture_in_flight = True
+        # Arm the recorder's flags synchronously: capture()'s own body only
+        # runs on the task's first step, and a stop()/finish() landing in
+        # that gap (a PTT quick tap, a barge from the SDK's confirm task)
+        # would otherwise be a silent no-op.
+        arm = getattr(self.recorder, "arm", None)
+        if arm is not None:
+            arm(hold=kw.get("hold", False))
         fut = asyncio.ensure_future(self.recorder.capture(**kw))
         try:
             return await asyncio.shield(fut)
@@ -488,6 +499,12 @@ class Orchestrator:
                 self.recorder.stop()
                 with contextlib.suppress(BaseException):
                     await fut
+            else:
+                # already finished (possibly with an error nobody will
+                # look at now): retrieve it so asyncio doesn't log
+                # "exception was never retrieved".
+                with contextlib.suppress(BaseException):
+                    fut.exception()
             raise
         finally:
             self._capture_in_flight = False
@@ -673,8 +690,12 @@ class Orchestrator:
             self.recorder.stop()
         self._barged = True
         turn.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        try:
             await turn
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("barged turn raised while being torn down")
         await self.brain.interrupt()
 
     async def _run_with_barge(self, coro) -> str | None:

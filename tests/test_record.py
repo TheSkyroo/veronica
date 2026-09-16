@@ -480,3 +480,74 @@ async def test_hold_capture_total_time_capped_even_with_speech(monkeypatch):
     pcm = await asyncio.wait_for(r.capture(max_s=1, hold=True), timeout=3)
     assert pcm is not None
     assert FRAME * 10 <= len(pcm) <= FRAME * 15   # ~13 speech frames before the cap
+
+
+async def test_arm_makes_same_iteration_finish_honored(monkeypatch):
+    """capture() is a coroutine, so its own flag arming only runs on the
+    task's first step. A finish() issued in the same loop iteration as
+    ensure_future(capture(...)) must still be honored when the caller
+    arm()ed synchronously first — otherwise a push-to-talk quick tap
+    leaves the mic open for the whole max_s."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    gate = threading.Event()
+
+    def blocking_frames():
+        gate.wait(5)   # the worker blocks here until the test releases it
+        yield from frames("." * 1000)
+
+    r = Recorder(s, frames=blocking_frames)
+    r.arm(hold=True)
+    task = asyncio.ensure_future(r.capture(max_s=30, hold=True))
+    r.finish()                       # same iteration: capture() body hasn't run yet
+    assert r._finish.is_set()        # honored, not dropped
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is None               # ended immediately on the pre-armed finish
+
+
+async def test_without_arm_same_iteration_finish_is_dropped(monkeypatch):
+    """Documents why arm() exists: the plain coroutine can't see a finish()
+    issued before its first step (it's a no-op since _capturing is False,
+    and capture() then clears any stale flag anyway)."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    r = Recorder(s, frames=lambda: _gated_frames("." * 500, 0, started, gate))
+    task = asyncio.ensure_future(r.capture(max_s=30, hold=True))
+    r.finish()
+    assert not r._finish.is_set()
+    await asyncio.to_thread(started.wait, 2)
+    assert not task.done()           # still capturing: the finish was lost
+    r.finish()
+    gate.set()
+    assert await asyncio.wait_for(task, timeout=2) is None
+
+
+async def test_arm_then_stop_same_iteration_returns_none(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    gate = threading.Event()
+
+    def blocking_frames():
+        gate.wait(5)
+        yield from frames("ssssssss" + "." * 100)
+
+    r = Recorder(s, frames=blocking_frames)
+    r.arm()
+    task = asyncio.ensure_future(r.capture(max_s=5))
+    r.stop()
+    gate.set()
+    assert await asyncio.wait_for(task, timeout=2) is None
+
+
+async def test_arm_is_consumed_by_one_capture_and_capture_self_arms(monkeypatch):
+    r = make("....ssssss.........", monkeypatch)
+    r.arm(hold=True)
+    assert r._armed and r._hold
+    pcm = await r.capture()          # consumes the arm; capture's own hold=False wins nothing here
+    assert pcm is not None
+    assert not r._armed and not r._capturing
+    r._finish.set()                  # stale
+    pcm = await r.capture()          # self-arms: stale flag cleared
+    assert pcm is not None and not r._finish.is_set()
