@@ -7,9 +7,13 @@ Two kinds of "update available":
   (the bundle's build.json sha) — i.e. someone pulled/committed while the app
   was running; a rebuild + restart is all it takes.
 
-`check()` never raises: any git failure (no remote, offline, not a repo)
-becomes `kind="none"` with a "Couldn't check: ..." detail, and a missing
-`origin` just skips the remote comparison. `update()` does raise
+`check()` never raises: a git failure reading HEAD (not a repo, no git)
+becomes `kind="none"` with a "Couldn't check: ..." detail; a failure in the
+remote phase (offline, no `origin/<branch>`) still falls through to the local
+comparison and only reports "Couldn't check" when there's no local update
+either. "remote" means `origin/<branch>` has commits HEAD lacks (`rev-list
+--count HEAD..origin/<branch>` > 0) — HEAD merely differing from (being ahead
+of) origin is not an update. `update()` does raise
 (`UpdateError`) so the caller can report the failure. `run`, `which` and
 `build` are injectable so tests never run real git/uv/build_app.
 """
@@ -76,17 +80,29 @@ def check(repo: Path, run=subprocess.run, info: dict | None = None) -> UpdateSta
     running_sha = info.get("sha") or ""
     head_sha = ""
     remote_sha: str | None = None
+    behind = 0
     try:
         head_sha = _git_out(run, repo, "rev-parse", "--short", "HEAD")
+    except _GitFailed as e:
+        return UpdateStatus(False, "none", f"Couldn't check: {e}", running_sha, head_sha, None)
+
+    # Remote phase, caught on its own: offline, no origin/<branch> (never
+    # pushed), fetch timeout… must not hide a local (rebuild-only) update.
+    remote_error: str | None = None
+    try:
         has_origin = _git(run, repo, "remote", "get-url", "origin").returncode == 0
         if has_origin:
             _git_out(run, repo, "fetch", "--quiet", "origin", timeout=FETCH_TIMEOUT_S)
             branch = _git_out(run, repo, "rev-parse", "--abbrev-ref", "HEAD")
             remote_sha = _git_out(run, repo, "rev-parse", "--short", f"origin/{branch}")
-    except _GitFailed as e:
-        return UpdateStatus(False, "none", f"Couldn't check: {e}", running_sha, head_sha, None)
+            # "remote" only when origin has commits HEAD lacks; HEAD being
+            # ahead of origin (unpushed work) is not an update.
+            count = _git_out(run, repo, "rev-list", "--count", f"HEAD..origin/{branch}")
+            behind = int(count or "0")
+    except (_GitFailed, ValueError) as e:
+        remote_error = str(e)
 
-    if remote_sha is not None and remote_sha != head_sha:
+    if remote_sha is not None and behind > 0:
         return UpdateStatus(
             True, "remote", f"A newer version is on origin ({remote_sha}).", running_sha, head_sha, remote_sha
         )
@@ -94,6 +110,8 @@ def check(repo: Path, run=subprocess.run, info: dict | None = None) -> UpdateSta
         return UpdateStatus(
             True, "local", f"Restart to run the latest code ({head_sha}).", running_sha, head_sha, remote_sha
         )
+    if remote_error is not None:
+        return UpdateStatus(False, "none", f"Couldn't check: {remote_error}", running_sha, head_sha, remote_sha)
     return UpdateStatus(False, "none", f"You're on the latest ({head_sha}).", running_sha, head_sha, remote_sha)
 
 

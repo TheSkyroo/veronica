@@ -18,6 +18,11 @@ GIT_BASE = {
     "git fetch --quiet origin": (0, "", ""),
     "git rev-parse --abbrev-ref HEAD": (0, "batch-d\n", ""),
     "git rev-parse --short origin/batch-d": (0, f"{HEAD}\n", ""),
+    "git rev-list --count HEAD..origin/batch-d": (0, "0\n", ""),
+}
+REMOTE_AHEAD = {
+    "git rev-parse --short origin/batch-d": (0, f"{REMOTE}\n", ""),
+    "git rev-list --count HEAD..origin/batch-d": (0, "2\n", ""),
 }
 
 
@@ -29,7 +34,7 @@ def _info(sha: str) -> dict:
 
 
 def test_check_remote_ahead():
-    run = FakeRun({**GIT_BASE, "git rev-parse --short origin/batch-d": (0, f"{REMOTE}\n", "")})
+    run = FakeRun({**GIT_BASE, **REMOTE_AHEAD})
     st = updater.check(REPO, run=run, info=_info(HEAD))
     assert st == UpdateStatus(
         available=True,
@@ -45,6 +50,7 @@ def test_check_remote_ahead():
         "git fetch --quiet origin",
         "git rev-parse --abbrev-ref HEAD",
         "git rev-parse --short origin/batch-d",
+        "git rev-list --count HEAD..origin/batch-d",
     ]
     assert all(kw.get("cwd") == REPO for kw in run.kwargs)
     fetch_kwargs = run.kwargs[2]
@@ -72,9 +78,38 @@ def test_check_none_when_everything_matches():
 
 
 def test_check_remote_wins_over_local():
-    run = FakeRun({**GIT_BASE, "git rev-parse --short origin/batch-d": (0, f"{REMOTE}\n", "")})
+    run = FakeRun({**GIT_BASE, **REMOTE_AHEAD})
     st = updater.check(REPO, run=run, info=_info("0ld0000"))
     assert st.kind == "remote"
+
+
+def test_check_head_ahead_of_origin_is_not_an_update():
+    # origin/<branch> differs from HEAD but has nothing HEAD lacks (local
+    # commits not pushed yet): not "remote"
+    run = FakeRun({**GIT_BASE, "git rev-parse --short origin/batch-d": (0, f"{REMOTE}\n", ""),
+                   "git rev-list --count HEAD..origin/batch-d": (0, "0\n", "")})
+    st = updater.check(REPO, run=run, info=_info(HEAD))
+    assert st.kind == "none" and st.available is False
+    assert st.remote_sha == REMOTE
+    st = updater.check(REPO, run=run, info=_info("0ld0000"))
+    assert st.kind == "local"
+
+
+def test_check_no_remote_branch_falls_through_to_local():
+    # origin exists but this branch was never pushed: rev-parse origin/<branch> fails
+    run = FakeRun({**GIT_BASE, "git rev-parse --short origin/batch-d": (128, "", "fatal: unknown revision")})
+    st = updater.check(REPO, run=run, info=_info("0ld0000"))
+    assert st.kind == "local" and st.available is True
+    assert st.remote_sha is None
+    st = updater.check(REPO, run=run, info=_info(HEAD))
+    assert st.kind == "none" and st.available is False
+    assert st.detail == "Couldn't check: fatal: unknown revision"
+
+
+def test_check_fetch_failure_still_reports_local_staleness():
+    run = FakeRun({**GIT_BASE, "git fetch --quiet origin": (128, "", "fatal: unable to access origin\n")})
+    st = updater.check(REPO, run=run, info=_info("0ld0000"))
+    assert st.kind == "local" and st.available is True
 
 
 def test_check_no_remote_still_computes_local():
