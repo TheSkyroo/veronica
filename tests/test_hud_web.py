@@ -82,3 +82,45 @@ def test_hud_robust_to_bad_events_and_clear():
         assert len(rendered) == 60
 
         browser.close()
+
+
+@pytest.mark.live
+def test_hud_setvisible_does_not_double_schedule_raf():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        # Instrument requestAnimationFrame to count calls over a fixed window.
+        page.evaluate(
+            """
+            () => {
+              window.__rafCount = 0;
+              const orig = window.requestAnimationFrame.bind(window);
+              window.requestAnimationFrame = (cb) => {
+                window.__rafCount++;
+                return orig(cb);
+              };
+            }
+            """
+        )
+
+        page.evaluate("window.__rafCount = 0")
+        page.wait_for_timeout(400)
+        baseline = page.evaluate("window.__rafCount")
+
+        # Rapid hide/show must not leave two rAF loops running concurrently.
+        page.evaluate("window.hud.setVisible(false)")
+        page.evaluate("window.hud.setVisible(true)")
+
+        page.evaluate("window.__rafCount = 0")
+        page.wait_for_timeout(400)
+        toggled = page.evaluate("window.__rafCount")
+
+        assert toggled <= baseline * 1.3, f"toggled={toggled} baseline={baseline}"
+
+        browser.close()

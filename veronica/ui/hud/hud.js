@@ -39,9 +39,10 @@
         i = Math.min(s.length, i + 2);           // ~40 chars/s at 20 fps ticks
         replyEl.textContent = start + s.slice(0, i);
         if (i < s.length) { pendingTimeout = setTimeout(step, 50); return; }
-      } finally {
-        if (i >= s.length) { typing = false; pendingTimeout = null; }
+      } catch (e) {
+        typing = false; pendingTimeout = null; console.error('hud typewriter step failed', e); typeNext(); return;
       }
+      typing = false; pendingTimeout = null;
       typeNext();
     };
     step();
@@ -87,9 +88,14 @@
     state() { return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready}; },
     setVisible(visible) {
       visible = !!visible;
-      if (visible === rafActive) return;
-      rafActive = visible;
-      if (visible) { t0 = performance.now(); requestAnimationFrame(frame); }
+      if (!visible) {
+        rafActive = false;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+        return;
+      }
+      if (rafActive) return;
+      rafActive = true;
+      if (!rafId) { t0 = performance.now(); rafId = requestAnimationFrame(frame); }
     },
   };
   window.hud = hud;
@@ -99,15 +105,20 @@
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = 150 * dpr; canvas.height = 150 * dpr; ctx.scale(dpr, dpr);
   const particles = Array.from({length: 28}, (_, i) => ({a: (i / 28) * Math.PI * 2, r: 52 + (i % 5) * 4, s: 0.2 + (i % 7) * 0.05}));
-  let t0 = performance.now(), rot = 0;
+  let t0 = performance.now(), rot = 0, rafId = 0;
   let rafActive = !(typeof document !== 'undefined' && document.visibilityState === 'hidden');
 
   if (typeof document !== 'undefined' && 'visibilityState' in document) {
     document.addEventListener('visibilitychange', () => {
       const visible = document.visibilityState !== 'hidden';
-      if (visible === rafActive) return;
-      rafActive = visible;
-      if (visible) { t0 = performance.now(); requestAnimationFrame(frame); }
+      if (!visible) {
+        rafActive = false;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+        return;
+      }
+      if (rafActive) return;
+      rafActive = true;
+      if (!rafId) { t0 = performance.now(); rafId = requestAnimationFrame(frame); }
     });
   }
 
@@ -118,6 +129,7 @@
   }
 
   function frame(now) {
+    rafId = 0;
     const dt = (now - t0) / 1000; t0 = now;
     const p = PALETTE[model.state] || PALETTE.idle;
     rot += dt * p.speed;
@@ -171,7 +183,7 @@
       ctx.beginPath(); ctx.arc(cx, cy, 58, rot * 2, rot * 2 + Math.PI * 0.6);
       ctx.lineWidth = 3; ctx.strokeStyle = p.ring; ctx.stroke();
     }
-    if (rafActive) requestAnimationFrame(frame);
+    if (rafActive && rafId === 0) rafId = requestAnimationFrame(frame);
   }
-  if (rafActive) requestAnimationFrame(frame);
+  if (rafActive && rafId === 0) rafId = requestAnimationFrame(frame);
 })();
