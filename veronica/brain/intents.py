@@ -46,6 +46,17 @@ QUIT_PHRASES = frozenset({
     "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely",
 })
 
+# Screen-awareness fast path: matched exactly like the other local intents
+# (whole-utterance, then clause-by-clause), but kept separate from
+# match_intent's Intent enum since it doesn't end the turn — it feeds the
+# brain a screenshot instead of skipping it.
+SCREEN_PHRASES = frozenset({
+    "whats on my screen", "what is on my screen", "what's on my screen",
+    "look at my screen", "look at the screen",
+    "summarize this page", "summarize this screen", "summarize my screen",
+    "what does this error say", "what does this say",
+})
+
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"
 
@@ -144,6 +155,124 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
                 return None
             return (kind, arg)
     return None
+
+
+# Music playback fast path: matched exactly like the other local intents.
+# Kept as its own function (rather than folded into Intent) since it carries
+# no payload beyond which action to take, and never touches the brain.
+MusicAction = Literal["play", "pause", "next", "prev", "now_playing"]
+
+_MUSIC_PLAY_PHRASES = frozenset({"resume", "resume music", "play music", "unpause", "unpause music"})
+_MUSIC_PAUSE_PHRASES = frozenset({"pause", "pause music", "stop the music", "stop music"})
+_MUSIC_NEXT_PHRASES = frozenset({"next song", "next track", "skip", "skip song", "skip track"})
+# "go back" deliberately absent: far too generic (navigation, undo, "go
+# back to what you were saying") to hijack as a music command.
+_MUSIC_PREV_PHRASES = frozenset({"previous song", "previous track", "previous", "last song"})
+_MUSIC_NOW_PLAYING_PHRASES = frozenset({
+    "whats playing", "what is playing", "what's playing",
+    "what song is this", "what song is playing", "whats this song",
+})
+
+
+def _match_music_candidate(candidate: str) -> MusicAction | None:
+    if candidate in _MUSIC_PLAY_PHRASES:
+        return "play"
+    if candidate in _MUSIC_PAUSE_PHRASES:
+        return "pause"
+    if candidate in _MUSIC_NEXT_PHRASES:
+        return "next"
+    if candidate in _MUSIC_PREV_PHRASES:
+        return "prev"
+    if candidate in _MUSIC_NOW_PLAYING_PHRASES:
+        return "now_playing"
+    return None
+
+
+def match_music_intent(text: str) -> MusicAction | None:
+    """Match a heard utterance against the music-control phrase sets (see
+    A3): "pause"/"pause music", "resume"/"play music", "next song"/"skip",
+    "previous"/"previous song", "what's playing". Matched the same way as
+    match_intent (whole utterance, then each clause)."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        result = _match_music_candidate(candidate)
+        if result is not None:
+            return result
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            result = _match_music_candidate(candidate)
+            if result is not None:
+                return result
+    return None
+
+
+def match_screen_intent(text: str) -> bool:
+    """True if `text` (as-spoken) asks Veronica to look at the screen —
+    matched the same way as match_intent (whole utterance, then each
+    clause), against SCREEN_PHRASES."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        if candidate in SCREEN_PHRASES:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in SCREEN_PHRASES:
+                return True
+    return False
+
+
+# Note-taking and dictation (A4) — matched with their own functions (like
+# match_memory_intent) since they carry a payload / aren't in the plain
+# Intent enum.
+_TAKE_NOTE_RE = re.compile(r"^take a note[:,]?\s+(.+)$", re.IGNORECASE)
+_NOTE_THAT_RE = re.compile(r"^note that\s+(.+)$", re.IGNORECASE)
+
+DICTATE_PHRASES = frozenset({"dictate", "start dictation", "begin dictation"})
+STOP_DICTATION_PHRASES = frozenset({"stop dictation", "stop dictating", "end dictation"})
+
+
+def match_note_intent(text: str) -> str | None:
+    """Match "take a note: X" / "take a note X" / "note that X" against a
+    heard utterance, returning X (original casing/punctuation preserved,
+    only a trailing sentence-ending period stripped) or None."""
+    raw = (text or "").strip()
+    raw = _MEMORY_LEAD_RE.sub("", raw, count=1).strip()
+    for pattern in (_TAKE_NOTE_RE, _NOTE_THAT_RE):
+        m = pattern.match(raw)
+        if m:
+            arg = m.group(1).strip().rstrip(".!?").strip()
+            if arg:
+                return arg
+    return None
+
+
+def match_dictation_intent(text: str) -> bool:
+    """True if `text` asks Veronica to start dictating — matched the same
+    way as match_intent (whole utterance, then each clause)."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        if candidate in DICTATE_PHRASES:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in DICTATE_PHRASES:
+                return True
+    return False
+
+
+def is_stop_dictation(text: str) -> bool:
+    """True if `text` is the "stop dictation" utterance that ends an
+    in-progress dictation capture."""
+    return normalize(text) in STOP_DICTATION_PHRASES
 
 
 def match_intent(text: str) -> Intent | None:

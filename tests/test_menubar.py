@@ -112,6 +112,30 @@ class FakeOrch:
         await asyncio.Event().wait()
 
 
+class FakeHotkeyMonitor:
+    """Stand-in for veronica.audio.hotkey.HotkeyMonitor: no real Quartz
+    CGEventTap, no real thread — just records what it was asked to do so
+    tests can drive on_press/on_release directly."""
+    instances = []
+    available_on_start = True
+
+    def __init__(self, on_press, on_release, keycode=61):
+        self.on_press = on_press
+        self.on_release = on_release
+        self.keycode = keycode
+        self.available = True
+        self.started_with_loop = None
+        self.stopped = False
+        FakeHotkeyMonitor.instances.append(self)
+
+    def start(self, loop=None):
+        self.started_with_loop = loop
+        self.available = FakeHotkeyMonitor.available_on_start
+
+    def stop(self):
+        self.stopped = True
+
+
 @pytest.fixture
 def fake_env(monkeypatch, tmp_home, request):
     # `class VeronicaApp(rumps.App)` binds its base class at class-definition
@@ -159,6 +183,9 @@ def fake_env(monkeypatch, tmp_home, request):
 
     monkeypatch.setattr(menubar, "build_orchestrator", fake_build_orchestrator)
     monkeypatch.setattr(menubar, "HudWindow", FakeHud)
+    FakeHotkeyMonitor.instances = []
+    FakeHotkeyMonitor.available_on_start = True
+    monkeypatch.setattr(menubar, "HotkeyMonitor", FakeHotkeyMonitor)
     return menubar, fake_rumps, orch_holder
 
 
@@ -618,6 +645,92 @@ def test_popup_menu_handler_forwards_to_app_callbacks(fake_env):
     handler.onQuit_(None)
     app._thread.join(timeout=2)
     assert fake_rumps.quit_called is True
+
+
+# -- push-to-talk (A2) --------------------------------------------------------
+
+def test_ptt_hotkey_started_with_background_loop_when_enabled(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    monkeypatch.setattr(menubar.settings, "ptt_enabled", True)
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert len(FakeHotkeyMonitor.instances) == 1
+        mon = FakeHotkeyMonitor.instances[0]
+        assert mon.started_with_loop is app._loop
+        assert mon.keycode == menubar.settings.ptt_keycode
+        assert app._ptt_item is None  # available: no "enable accessibility" item
+    finally:
+        _quit_and_join(app)
+    assert mon.stopped is True
+
+
+def test_ptt_hotkey_not_created_when_disabled(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    monkeypatch.setattr(menubar.settings, "ptt_enabled", False)
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert FakeHotkeyMonitor.instances == []
+        assert app._hotkey is None
+        assert app._ptt_item is None
+    finally:
+        _quit_and_join(app)
+
+
+def test_ptt_unavailable_adds_accessibility_menu_item(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    monkeypatch.setattr(menubar.settings, "ptt_enabled", True)
+    FakeHotkeyMonitor.available_on_start = False
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert app._ptt_item is not None
+        assert "Accessibility" in app._ptt_item.title
+        assert app._ptt_item in app.menu
+    finally:
+        _quit_and_join(app)
+
+
+def test_open_accessibility_settings_calls_open(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    calls = []
+    monkeypatch.setattr(menubar.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app.open_accessibility_settings(None)
+        assert calls == [["open", menubar.ACCESSIBILITY_PANE_URL]]
+    finally:
+        _quit_and_join(app)
+
+
+def test_ptt_press_and_release_call_orchestrator(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        started = threading.Event()
+        ended = threading.Event()
+
+        def ptt_start():
+            started.set()
+
+        def ptt_end():
+            ended.set()
+
+        orch.ptt_start = ptt_start
+        orch.ptt_end = ptt_end
+        mon = FakeHotkeyMonitor.instances[0]
+
+        app._loop.call_soon_threadsafe(mon.on_press)
+        assert started.wait(2)
+        app._loop.call_soon_threadsafe(mon.on_release)
+        assert ended.wait(2)
+    finally:
+        _quit_and_join(app)
+
+
+def test_ptt_callbacks_noop_before_orch_exists(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app = menubar.VeronicaApp.__new__(menubar.VeronicaApp)
+    app._on_ptt_press()   # must not raise: no self._orch set
+    app._on_ptt_release()
 
 
 def test_real_rumps_restored_after_fixture_teardown():

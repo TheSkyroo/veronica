@@ -29,7 +29,10 @@ class Recorder:
         self._frames = frames or self._mic_frames
         self._vad = self._vad_cls(settings.vad_aggressiveness)
         self._stop = threading.Event()
+        self._finish = threading.Event()
         self._capturing = False
+        self._hold = False
+        self._armed = False
         self._on_level = on_level
         self._level_error_logged = False
         # Public, reassignable: Orchestrator wires this up after construction
@@ -56,12 +59,25 @@ class Recorder:
         if self._capturing:
             self._stop.set()
 
+    def finish(self) -> None:
+        """Request that the in-flight hold-mode capture() (`hold=True`, e.g.
+        push-to-talk) end now, gracefully returning whatever has been
+        recorded so far — unlike stop(), which discards it. A no-op unless
+        a *hold-mode* capture is actually running: a finish() aimed at a
+        normal capture (or one that lands between captures) is dropped
+        rather than left lingering to cut short the next hold capture —
+        and capture() clears both flags on entry anyway, as a belt-and-
+        braces guard against the same race."""
+        if self._capturing and self._hold:
+            self._finish.set()
+
     async def capture(
         self,
         max_s: int | None = None,
         preroll: np.ndarray | None = None,
         partial: bool = False,
         skip_ms: int = 0,
+        hold: bool = False,
     ) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
 
@@ -82,16 +98,52 @@ class Recorder:
                      unaffected). Used by the follow-up capture to drop the
                      tail/echo of Veronica's own just-spoken audio, which
                      would otherwise get endpointed as a false speech onset.
+            hold: "hold to talk" mode (push-to-talk): the VAD silence
+                  endpoint is ignored — recording continues until finish()
+                  is called, at which point whatever's been captured so far
+                  is returned (even if shorter than min_speech_ms). The
+                  whole capture — waiting for onset *and* recording — is
+                  hard-capped at max_s of live audio (max_utterance_s if
+                  max_s is None), so a key that never comes back up (or a
+                  release that got lost) can't leave the mic open forever.
 
         Returns:
-            int16 mono PCM array or None if speech shorter than min_speech_ms / no speech before max_s.
+            int16 mono PCM array, or None if nothing was captured (no speech
+            before max_s, or — outside hold mode — total speech shorter
+            than min_speech_ms).
         """
-        # Set on the event-loop thread, before handing off to the worker, so
-        # a stop() issued in the (tiny) window between a caller flipping its
-        # own "capturing" bookkeeping (e.g. Orchestrator._confirm_capturing)
-        # and the worker thread actually starting is not a no-op.
+        # capture() is a coroutine: this body only runs on the task's first
+        # step, one loop iteration after ensure_future(). Callers that
+        # schedule a capture and may receive a stop()/finish() in that same
+        # iteration must arm() synchronously first (Orchestrator._capture
+        # does); arm() here is then an idempotent no-op.
+        if not self._armed:
+            self.arm(hold)
+        self._armed = False
+        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold)
+
+    def arm(self, hold: bool = False) -> None:
+        """Synchronously mark a capture as in flight *before* its coroutine
+        gets its first step, so a stop()/finish() that lands in the gap
+        between scheduling capture() and the worker thread actually
+        starting is honored rather than silently dropped (a dropped
+        finish() on a push-to-talk quick tap would leave the mic open for
+        the whole ptt_max_s). Also discards any stale stop()/finish() left
+        over from a previous capture (one that raced its natural end) so it
+        can't cut this capture short. capture() arms itself unless the
+        caller already did (so an explicit arm() is consumed by exactly one
+        capture())."""
+        self._stop.clear()
+        self._finish.clear()
+        self._hold = hold
         self._capturing = True
-        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms)
+        self._armed = True
+
+    def disarm(self) -> None:
+        """Undo arm() when the capture it was meant for never got scheduled."""
+        self._capturing = False
+        self._armed = False
+        self._hold = False
 
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000
@@ -135,12 +187,16 @@ class Recorder:
         preroll: np.ndarray | None = None,
         partial: bool = False,
         skip_ms: int = 0,
+        hold: bool = False,
     ) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
         min_speech_frames = self.s.min_speech_ms // fm
         max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
+        # Hold mode: hard cap on *total* live frames from capture start
+        # (onset wait + recording), so a lost key-up can't hold the mic open.
+        hold_cap_frames = (wait_frames if wait_frames is not None else max_frames) if hold else None
         extra_frames = int(self.s.capture_extra_s * 1000 // fm)
         hop_frames = max(1, int(self.s.partial_hop_s * 1000 / fm))
         skip_frames = skip_ms // fm
@@ -185,11 +241,16 @@ class Recorder:
                     # finish, bounded only by max_frames below, not cut short
                     # by this onset-wait cap.
                     elapsed += 1
+                    if hold_cap_frames is not None and elapsed > hold_cap_frames:
+                        break
                     if not started and wait_frames is not None and elapsed >= wait_frames + extra_frames:
                         return None
                 if self._stop.is_set():
                     self._stop.clear()
                     return None
+                if hold and self._finish.is_set():
+                    self._finish.clear()
+                    break
                 is_speech = self._vad.is_speech(frame, self.s.sample_rate)
                 if self._on_level is not None:
                     try:
@@ -225,9 +286,9 @@ class Recorder:
                                     self._audio_error_logged = True
                 else:
                     silence_run += 1
-                if silence_run >= silence_frames_needed or len(buf) >= max_frames:
+                if (not hold and silence_run >= silence_frames_needed) or len(buf) >= max_frames:
                     has_wait_budget_left = wait_frames is not None and waited < wait_frames
-                    if speech_frames < min_speech_frames and (onset_from_preroll or has_wait_budget_left):
+                    if not hold and speech_frames < min_speech_frames and (onset_from_preroll or has_wait_budget_left):
                         # Too little real speech to count as an utterance —
                         # either it was just the tail of the wake word caught
                         # in the pre-roll, or a brief false onset (e.g. the
@@ -248,6 +309,8 @@ class Recorder:
         finally:
             self._capturing = False
 
-        if speech_frames < min_speech_frames:
+        if not hold and speech_frames < min_speech_frames:
+            return None
+        if not buf:
             return None
         return np.frombuffer(b"".join(buf), dtype=np.int16)

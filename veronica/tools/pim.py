@@ -4,6 +4,7 @@ through `osascript` (Apple Events), same argv-only pattern as `tools/mac.py`.
 """
 import asyncio
 import datetime as dt
+import html
 import math
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -450,6 +451,34 @@ async def reminder_create(args: dict) -> dict:
     return await _osascript(script, ok_text=f"Created reminder '{title}'")
 
 
+# -- notes -----------------------------------------------------------------
+@tool("notes_create", "Create a note in Notes.app", {"title": str, "body": str})
+@_guard
+async def notes_create(args: dict) -> dict:
+    title = str(args.get("title", "")).strip()
+    if not title:
+        return _err("title is required")
+    body = str(args.get("body", "") or "")
+    # Notes.app note bodies are HTML: escape the user's text so "<b>" /
+    # "&" render literally, and turn newlines into <br> so line breaks
+    # survive. The title is escaped too — Notes derives the note's name
+    # from the body's first line when a name isn't given, and treats the
+    # name as HTML-ish text as well.
+    # quote=False: a literal " is fine in HTML text content, and _q()
+    # already escapes it for the AppleScript string literal.
+    html_body = html.escape(body, quote=False).replace("\n", "<br>")
+    html_title = html.escape(title, quote=False)
+    # No `at folder "Notes"`: the default account's folder may be named
+    # differently (localized, or iCloud "Notes" vs "On My Mac"); creating
+    # in the default folder works everywhere.
+    script = (
+        'tell application "Notes"\n'
+        f'make new note with properties {{name:"{_q(html_title)}", body:"{_q(html_body)}"}}\n'
+        "end tell\n"
+    )
+    return await _osascript(script, ok_text=f"Created note '{title}'")
+
+
 # -- timers -----------------------------------------------------------------
 service = None  # bound by build_orchestrator via bind()
 
@@ -508,6 +537,7 @@ TOOLS = [
     calendar_events, calendar_create,
     mail_unread, mail_search, mail_send,
     reminder_create, reminders_due,
+    notes_create,
     timer_set, timer_list, timer_cancel,
 ]
 PIM_TOOL_NAMES = [t.name for t in TOOLS]

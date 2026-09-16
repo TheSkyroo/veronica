@@ -112,6 +112,31 @@ async def applescript(args: dict) -> dict:
     return await asyncio.to_thread(run, ["osascript", "-e", str(args.get("script", ""))], None)
 
 
+def _keystroke_argv(text: str) -> list[str]:
+    """Build the `osascript` argv that types `text` into the frontmost app
+    via System Events (Accessibility permission required). Splits on
+    newlines into separate `keystroke "<line>"` calls joined by
+    `keystroke return`, since a literal newline can't be smuggled through a
+    single AppleScript string literal."""
+    lines = text.split("\n")
+    parts = []
+    for i, line in enumerate(lines):
+        if i > 0:
+            parts.append("keystroke return")
+        parts.append(f'keystroke "{_q(line)}"')
+    body = "\n".join(parts)
+    script = f'tell application "System Events"\n{body}\nend tell'
+    return ["osascript", "-e", script]
+
+
+def dictate_type(text: str) -> dict:
+    """Type `text` into whatever app is currently focused (dictation, A4).
+    Not exposed as a Claude tool — the orchestrator calls this directly for
+    the local "dictate"/"stop dictation" intent, never via the brain.
+    Synchronous; call via asyncio.to_thread."""
+    return run(_keystroke_argv(text))
+
+
 TOOLS = [open_app, open_url, clipboard_read, clipboard_write, notify, volume_get, volume_set, applescript]
 MAC_TOOL_NAMES = [t.name for t in TOOLS]
 mac_server = create_sdk_mcp_server(name="mac", version="1.0.0", tools=TOOLS)

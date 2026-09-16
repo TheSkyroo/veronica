@@ -45,6 +45,9 @@ def test_defaults(tmp_home):
     assert s.memory_enabled is True
     assert s.memory_recent_turns == 6
     assert s.memory_path == tmp_home / "memory.db"
+    assert s.ptt_enabled is True
+    assert s.ptt_keycode == 61
+    assert s.dictation_max_s == 60
 
 
 def test_dirs_created(tmp_home):

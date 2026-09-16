@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import datetime as dt
 import logging
 import os
@@ -20,15 +21,25 @@ from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
+from veronica.tools.music import music_server
 from veronica.tools.pim import pim_server
+from veronica.tools.screen import latest_screenshot_path, screen_server
 
 log = logging.getLogger("veronica.brain")
+
+
+def _image_media_type(data: bytes) -> str:
+    """image/jpeg for JPEG magic bytes (an oversized capture re-encoded by
+    tools/screen.py), else image/png."""
+    return "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
 
 Confirm = Callable[[str, str], Awaitable[bool]]
 
 MAC_PREFIX = "mcp__mac__"
 PIM_PREFIX = "mcp__pim__"
 MEMORY_PREFIX = "mcp__memory__"
+SCREEN_PREFIX = "mcp__screen__"
+MUSIC_PREFIX = "mcp__music__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -76,6 +87,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return f"Create reminder {input.get('title', '')}"
         if short == "reminders_due":
             return "Check reminders"
+        if short == "notes_create":
+            return f"Create note {input.get('title', '')}"
         if short == "timer_set":
             return f"Set timer {input.get('minutes', '')} min"
         if short == "timer_list":
@@ -93,6 +106,24 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return f"Remember {input.get('text', '')}"
         if short == "fact_delete":
             return f"Forget {input.get('text', '')}"
+        return short
+    if tool_name.startswith(SCREEN_PREFIX):
+        return "Look at screen"
+    if tool_name.startswith(MUSIC_PREFIX):
+        short = tool_name[len(MUSIC_PREFIX):]
+        if short == "music_play":
+            q = input.get("query", "")
+            return f"Play {q}" if q else "Play music"
+        if short == "music_pause":
+            return "Pause music"
+        if short == "music_next":
+            return "Next track"
+        if short == "music_prev":
+            return "Previous track"
+        if short == "music_now_playing":
+            return "What's playing"
+        if short == "music_volume":
+            return f"Set music volume {input.get('level', '')}"
         return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
@@ -169,7 +200,10 @@ class Brain:
             permission_mode="default",
             can_use_tool=self._can_use_tool,
             resume=resume,
-            mcp_servers={"mac": mac_server, "pim": pim_server, "memory": memory_server},
+            mcp_servers={
+                "mac": mac_server, "pim": pim_server, "memory": memory_server,
+                "screen": screen_server, "music": music_server,
+            },
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool
             # Only our confirmation gate may allow tools; ignore any
@@ -204,8 +238,47 @@ class Brain:
         self._client = client
         return self._client
 
+    def _build_prompt(self, text: str, images: tuple[bytes, ...]):
+        """Return `text` as-is for a plain query, or — when `images` is
+        non-empty — an async iterable yielding one user message whose
+        content is a list of blocks (text + one image block per image), per
+        the SDK's streaming-input message shape (see ClaudeSDKClient.query
+        docstring / client.py: `prompt: str | AsyncIterable[dict]`)."""
+        if not images:
+            return text
+
+        async def _stream():
+            content: list[dict] = [{"type": "text", "text": text}]
+            for image_bytes in images:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": _image_media_type(image_bytes),
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    },
+                })
+            # parent_tool_use_id: None for parity with the SDK's own user
+            # message shape (see claude_agent_sdk client.py's streaming
+            # example); some SDK versions read it unconditionally.
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "parent_tool_use_id": None,
+            }
+
+        return _stream()
+
+    @staticmethod
+    def _image_fallback_text(text: str) -> str:
+        return (
+            f"{text}\n\n(A screenshot of the screen was taken but could not be "
+            f"attached to this message; it is saved at {latest_screenshot_path()} "
+            "— use the Read tool to look at it.)"
+        )
+
     # -- public ---------------------------------------------------------------
-    async def ask(self, text: str) -> AsyncIterator[str]:
+    async def ask(self, text: str, images: list[bytes] = ()) -> AsyncIterator[str]:
         client = await self._ensure_client()
         splitter = SentenceSplitter()
         try:
@@ -219,7 +292,17 @@ class Brain:
             # the turn actually ends (a ResultMessage is seen, in close(), or
             # after interrupt()'s drain completes).
             self._in_flight = True
-            await client.query(text)
+            try:
+                await client.query(self._build_prompt(text, tuple(images)))
+            except Exception:
+                if not images:
+                    raise
+                # The image content-block message shape is the least
+                # battle-tested path through the SDK; rather than failing
+                # the whole turn, fall back to a plain text query that
+                # points Claude's Read tool at the saved capture.
+                log.exception("image query failed; falling back to text-only")
+                await client.query(self._image_fallback_text(text))
             it = client.receive_response().__aiter__()
             while True:
                 try:

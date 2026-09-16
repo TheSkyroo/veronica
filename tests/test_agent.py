@@ -188,8 +188,83 @@ async def test_options_wired(brain):
     assert "mac" in o.mcp_servers
     assert "pim" in o.mcp_servers
     assert "memory" in o.mcp_servers
+    assert "screen" in o.mcp_servers
+    assert "music" in o.mcp_servers
     assert not o.allowed_tools
     assert o.cwd == str(Path.home())
+
+
+async def test_ask_with_images_sends_content_block_message(brain):
+    out = [s async for s in brain.ask("what's on my screen", images=[b"\x89PNG-fake"])]
+    assert out == ["Hello there.", "How are you?"]
+    prompt = FakeClient.instances[0].queries[0]
+    # Not a plain string: the SDK's query() accepts str | AsyncIterable[dict]
+    # and treats an AsyncIterable specially, so images must be sent that way.
+    assert not isinstance(prompt, str)
+    messages = [m async for m in prompt]
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg["type"] == "user"
+    content = msg["message"]["content"]
+    assert content[0] == {"type": "text", "text": "what's on my screen"}
+    img = content[1]
+    assert img["type"] == "image"
+    assert img["source"]["type"] == "base64"
+    assert img["source"]["media_type"] == "image/png"
+    import base64
+    assert base64.b64decode(img["source"]["data"]) == b"\x89PNG-fake"
+    # T6: parity with the SDK's own user-message shape
+    assert "parent_tool_use_id" in msg and msg["parent_tool_use_id"] is None
+
+
+async def test_ask_with_jpeg_image_uses_jpeg_media_type(brain):
+    [s async for s in brain.ask("look", images=[b"\xff\xd8\xff\xe0JFIF-fake"])]
+    prompt = FakeClient.instances[0].queries[0]
+    messages = [m async for m in prompt]
+    assert messages[0]["message"]["content"][1]["source"]["media_type"] == "image/jpeg"
+
+
+async def test_ask_with_images_falls_back_to_text_when_image_query_fails(brain, caplog):
+    """T6: if the SDK rejects the image content-block message, the turn
+    isn't lost — a text-only query mentioning the saved capture path (for
+    the Read tool) goes out instead."""
+    from veronica.tools.screen import latest_screenshot_path
+
+    async def query(self, prompt):
+        self.queries.append(prompt)
+        if not isinstance(prompt, str):
+            raise RuntimeError("streaming input not supported")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(FakeClient, "query", query)
+        with caplog.at_level("ERROR", logger="veronica.brain"):
+            out = [s async for s in brain.ask("what's on my screen", images=[b"\x89PNG-fake"])]
+    assert out == ["Hello there.", "How are you?"]
+    queries = FakeClient.instances[0].queries
+    assert len(queries) == 2
+    assert not isinstance(queries[0], str)
+    assert isinstance(queries[1], str)
+    assert queries[1].startswith("what's on my screen")
+    assert str(latest_screenshot_path()) in queries[1]
+    assert "Read tool" in queries[1]
+    assert any("falling back to text-only" in r.message for r in caplog.records)
+
+
+async def test_ask_without_images_does_not_fall_back_on_query_failure(brain):
+    async def query(self, prompt):
+        self.queries.append(prompt)
+        raise RuntimeError("boom")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(FakeClient, "query", query)
+        with pytest.raises(RuntimeError):
+            [s async for s in brain.ask("hi")]
+    assert FakeClient.instances[0].queries == ["hi"]
+
+
+async def test_ask_without_images_sends_plain_string(brain):
+    [s async for s in brain.ask("hi")]
+    assert FakeClient.instances[0].queries[0] == "hi"
 
 
 class FakeMemory:
@@ -400,6 +475,18 @@ def test_summarize_tool_ignores_blank_or_missing_description():
 def test_summarize_detail_always_raw():
     assert summarize_detail("Write", {"file_path": "/x/notes.txt", "description": "Save notes"}) == "Write file /x/notes.txt"
     assert summarize_detail("Foo", {"a": 1}) == "Foo"
+
+
+def test_summarize_screen_and_music_tools():
+    assert summarize_detail("mcp__screen__screenshot", {"region": "screen"}) == "Look at screen"
+    assert summarize_tool("mcp__screen__screenshot", {"region": "window"}) == "Look at screen"
+    assert summarize_detail("mcp__music__music_play", {"query": "jazz"}) == "Play jazz"
+    assert summarize_detail("mcp__music__music_play", {}) == "Play music"
+    assert summarize_detail("mcp__music__music_pause", {}) == "Pause music"
+    assert summarize_detail("mcp__music__music_next", {}) == "Next track"
+    assert summarize_detail("mcp__music__music_prev", {}) == "Previous track"
+    assert summarize_detail("mcp__music__music_now_playing", {}) == "What's playing"
+    assert summarize_detail("mcp__music__music_volume", {"level": 50}) == "Set music volume 50"
 
 
 def test_summarize_mac_tools():

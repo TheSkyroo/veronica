@@ -152,6 +152,44 @@ async def test_handlers_do_not_block_loop(monkeypatch):
     assert len(ticks) >= 2
 
 
+# -- dictate_type (A4 dictation; not a Claude tool, called directly) ----------
+
+def test_dictate_type_single_line(fake_run):
+    res = mac.dictate_type("hello world")
+    assert fake_run[0][0][:2] == ["osascript", "-e"]
+    script = fake_run[0][0][2]
+    assert 'tell application "System Events"' in script
+    assert 'keystroke "hello world"' in script
+    assert "keystroke return" not in script
+    assert not res.get("is_error")
+
+
+def test_dictate_type_multiline_uses_keystroke_return(fake_run):
+    mac.dictate_type("line one\nline two\nline three")
+    script = fake_run[0][0][2]
+    assert 'keystroke "line one"' in script
+    assert 'keystroke "line two"' in script
+    assert 'keystroke "line three"' in script
+    assert script.count("keystroke return") == 2
+    # ordering: line, return, line, return, line
+    idx1 = script.index('keystroke "line one"')
+    idxr1 = script.index("keystroke return")
+    idx2 = script.index('keystroke "line two"')
+    assert idx1 < idxr1 < idx2
+
+
+def test_dictate_type_escapes_quotes(fake_run):
+    mac.dictate_type('she said "hi"')
+    script = fake_run[0][0][2]
+    assert '\\"hi\\"' in script
+
+
+def test_dictate_type_error_propagates(monkeypatch):
+    monkeypatch.setattr(mac.subprocess, "run", lambda *a, **k: Done(rc=1, err="no access"))
+    res = mac.dictate_type("hi")
+    assert res["is_error"] and "no access" in res["content"][0]["text"]
+
+
 def test_server_and_names():
     assert mac.mac_server["name"] == "mac"
     assert set(mac.MAC_TOOL_NAMES) == {

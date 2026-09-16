@@ -2,14 +2,18 @@ import asyncio
 import contextlib
 import logging
 import queue
+import subprocess
 import threading
 
 import rumps
 
 from veronica.__main__ import build_orchestrator
+from veronica.audio.hotkey import HotkeyMonitor
 from veronica.config import settings
 from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
+
+ACCESSIBILITY_PANE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
 
@@ -95,9 +99,8 @@ class VeronicaApp(rumps.App):
         self._quitting = False
         hud_mode_item = rumps.MenuItem("HUD: Full", callback=self.toggle_hud_mode)
         login_item_item = self._make_login_item()
-        self.menu = [
+        menu_items = [
             rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, login_item_item, None,
-            rumps.MenuItem("Quit", callback=self.quit),
         ]
         self._hud_mode_item = hud_mode_item
         self._login_item_item = login_item_item
@@ -105,9 +108,26 @@ class VeronicaApp(rumps.App):
         self._hud = hud if (hud is not None and hud.available) else _NoopHud()
         self._hud.on_menu = self._popup_menu_at
         self._popup_menu_handler = None  # strong ref for the fallback menu's target
-        self._refresh_hud_mode_item()
         self._events: queue.Queue = queue.Queue()
         self._loop = asyncio.new_event_loop()
+
+        # push-to-talk (A2): the monitor needs `self._loop` (the background
+        # orchestrator loop, not yet running) to marshal its callbacks onto,
+        # since it's started here on the AppKit main thread.
+        self._hotkey: HotkeyMonitor | None = None
+        self._ptt_item: rumps.MenuItem | None = None
+        if settings.ptt_enabled:
+            self._hotkey = HotkeyMonitor(self._on_ptt_press, self._on_ptt_release, keycode=settings.ptt_keycode)
+            self._hotkey.start(loop=self._loop)
+            if not self._hotkey.available:
+                self._ptt_item = rumps.MenuItem(
+                    "Enable Push-to-talk… (Accessibility)", callback=self.open_accessibility_settings
+                )
+                menu_items.append(self._ptt_item)
+
+        menu_items.append(rumps.MenuItem("Quit", callback=self.quit))
+        self.menu = menu_items
+        self._refresh_hud_mode_item()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         self._timer = rumps.Timer(self._refresh, 0.25)
@@ -219,6 +239,26 @@ class VeronicaApp(rumps.App):
             login_item.enable(app_path)
         item.state = login_item.is_enabled()
 
+    # -- push-to-talk (A2) --------------------------------------------------------
+    def _on_ptt_press(self) -> None:
+        # Called via HotkeyMonitor's call_soon_threadsafe, so this already
+        # runs on the orchestrator's background loop thread. ptt_start()/
+        # ptt_end() are synchronous signals (they set an asyncio.Event /
+        # finish the in-flight capture); the push-to-talk turn itself is
+        # run by the orchestrator's own run_forever loop, so there's no
+        # fire-and-forget task to keep a reference to here.
+        orch = getattr(self, "_orch", None)
+        if orch is not None:
+            orch.ptt_start()
+
+    def _on_ptt_release(self) -> None:
+        orch = getattr(self, "_orch", None)
+        if orch is not None:
+            orch.ptt_end()
+
+    def open_accessibility_settings(self, _item: rumps.MenuItem) -> None:
+        subprocess.run(["open", ACCESSIBILITY_PANE_URL])
+
     def toggle_mute(self, item: rumps.MenuItem) -> None:
         self._muted = not self._muted
         item.state = self._muted
@@ -283,6 +323,8 @@ class VeronicaApp(rumps.App):
     def quit(self, _item) -> None:
         self._quitting = True
         self._hud.close()
+        if self._hotkey is not None:
+            self._hotkey.stop()
         orch = getattr(self, "_orch", None)
         if orch is not None:
             orch.player.close()

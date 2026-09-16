@@ -46,6 +46,10 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "mail_send": "confirm",
         "reminder_create": "confirm",
         "reminders_due": "allow",
+        # Append-only and harmless (a mistaken note is trivially deleted in
+        # Notes.app), so — unlike calendar_create/mail_send/reminder_create
+        # — this doesn't need a confirm gate.
+        "notes_create": "allow",
         "timer_set": "allow",
         "timer_list": "allow",
         "timer_cancel": "allow",
@@ -59,6 +63,19 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         # standing state rather than just answering the current turn.
         "fact_add": "confirm",
         "fact_delete": "confirm",
+    },
+    "screen": {
+        # Read-only and local: no network, no file changes outside our own
+        # scratch dir.
+        "screenshot": "allow",
+    },
+    "music": {
+        "music_play": "allow",
+        "music_pause": "allow",
+        "music_next": "allow",
+        "music_prev": "allow",
+        "music_now_playing": "allow",
+        "music_volume": "allow",
     },
 }
 
