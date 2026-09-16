@@ -6,14 +6,17 @@ WHOLE utterance (after normalize() plus the same wrapper/filler stripping
 the local intents use; no clause splitting), so a longer request that merely
 contains "hello" or "time" still goes to the brain.
 
-Math is evaluated with a small recursive-descent parser over a whitelisted
-token set -- never eval()."""
+Math is the one matcher that does NOT use normalize(): that strips ".",
+"-", "," and the symbol operators, which turned "3.14 times 2" into
+"314 times 2" and "10-3" into "103". It runs on the raw text instead (see
+_math_prep) and is evaluated with a small recursive-descent parser over a
+whitelisted token set -- never eval()."""
 import datetime as dt
 import random
 import re
 from collections.abc import Callable
 
-from veronica.brain.intents import _candidates_for, normalize
+from veronica.brain.intents import _FILLERS_BY_LEN, _candidates_for, normalize
 
 QuickReply = tuple[str, str]
 _rng = random.Random()
@@ -73,20 +76,35 @@ def format_number(x: float) -> str:
 # -- math ---------------------------------------------------------------------
 _MATH_LEAD = re.compile(r"^(?:whats|what is|calculate|compute|how much is|tell me)\s+")
 _MATH_TRAIL_HI = re.compile(r"\s+(?:kitna hota hai|kya hota hai)$")
-# (normalized phrase, token, spoken en, spoken hi). Multi-word phrases come
-# first so "to the power of" isn't half-rewritten by a later single word.
+# Raw-text stand-ins for normalize()+_strip_wrapper: the wake-word prefix,
+# a trailing "please", trailing sentence punctuation.
+_MATH_WAKE_RE = re.compile(r"^(?:hey\s+)?veronica[\s,]+")
+_MATH_PLEASE_RE = re.compile(r"[\s,]*\bplease$")
+_MATH_TRAIL_PUNCT_RE = re.compile(r"[\s.!?]+$")
+# A digit touching . , : is a decimal, thousands separator or clock time --
+# the parser is integers only, so those go to the brain.
+_MATH_NON_INTEGER_RE = re.compile(r"\d[.,:]|[.,:]\d")
+_MATH_FILLER_RE = re.compile(r"^(?:" + "|".join(re.escape(f) for f in _FILLERS_BY_LEN) + r")[\s,]+")
+_MATH_SYMBOL_SPACING_RE = re.compile(r"([-+*/^%()])")
+_MATH_UNICODE_OPS = str.maketrans({"×": "*", "÷": "/", "−": "-", "–": "-", "—": "-"})
+# (phrase, token, spoken en, spoken hi). Multi-word phrases come first so
+# "to the power of" isn't half-rewritten by a later single word. The
+# symbol rows are identity for the tokenizer but give _spoken its words
+# ("5 + 5" is read back as "5 plus 5").
 _OPS = [
     ("to the power of", "^", "to the power of", "ki power"),
     ("multiplied by", "*", "times", "guna"),
     ("divided by", "/", "divided by", "bhaag"),
     ("percent of", "%", "percent of", "percent of"),
+    ("% of", "%", "percent of", "percent of"),
     ("square root of", "sqrt", "square root of", "square root of"),
     ("plus", "+", "plus", "jama"), ("jama", "+", "plus", "jama"),
     ("minus", "-", "minus", "ghata"), ("ghata", "-", "minus", "ghata"),
     ("times", "*", "times", "guna"), ("guna", "*", "times", "guna"), ("x", "*", "times", "guna"),
     ("over", "/", "divided by", "bhaag"), ("bhaag", "/", "divided by", "bhaag"), ("bhag", "/", "divided by", "bhaag"),
     ("squared", "sq", "squared", "ka square"),
-    ("+", "+", "plus", "jama"), ("-", "-", "minus", "ghata"), ("*", "*", "times", "guna"), ("/", "/", "divided by", "bhaag"),
+    ("+", "+", "plus", "jama"), ("-", "-", "minus", "ghata"), ("*", "*", "times", "guna"),
+    ("/", "/", "divided by", "bhaag"), ("^", "^", "to the power of", "ki power"), ("%", "%", "percent of", "percent of"),
 ]
 _TOKEN_RE = re.compile(r"\d{1,12}|[-+*/^%()]|sqrt|sq|\S+")
 _SYMBOLS = frozenset("+-*/^%()")
@@ -96,7 +114,8 @@ _MAX_OPERATORS = 6
 
 def _tokenize(expr: str) -> list[str] | None:
     """Spoken operators -> symbols, then split. None if any token isn't a
-    number/operator (so "5 plus 5 in binary" is left to the brain) or the
+    number/operator (so "5 plus 5 in binary" is left to the brain), there is
+    no operator at all (a bare "5" or "2024" is an answer, not a sum), or the
     expression has more than _MAX_OPERATORS operators."""
     s = f" {expr} "
     for phrase, tok, _, _ in _OPS:
@@ -105,7 +124,8 @@ def _tokenize(expr: str) -> list[str] | None:
     for t in toks:
         if not (t.isdigit() or t in _SYMBOLS or t in _WORD_TOKENS):
             return None
-    if sum(1 for t in toks if not t.isdigit() and t not in "()") > _MAX_OPERATORS:
+    n_ops = sum(1 for t in toks if not t.isdigit() and t not in "()")
+    if n_ops == 0 or n_ops > _MAX_OPERATORS:
         return None
     return toks
 
@@ -207,9 +227,32 @@ def _spoken(expr: str, hi: bool) -> str:
     return " ".join(s.split())
 
 
-def _match_math(norm: str) -> QuickReply | None:
-    hi = bool(_MATH_TRAIL_HI.search(norm))
-    body = _MATH_TRAIL_HI.sub("", norm) if hi else _MATH_LEAD.sub("", norm)
+def _math_prep(text: str) -> str:
+    """The raw-text counterpart of normalize()+_strip_wrapper for math:
+    lowercase, drop apostrophes ("what's" -> "whats"), strip a leading
+    "veronica,"/"hey veronica", one leading filler ("okay", "can you"),
+    a trailing "please" and trailing sentence punctuation, normalise the
+    unicode operator glyphs, and put spaces around symbol operators so
+    "10-3" tokenizes as 10 - 3. Digits, ".", "," and ":" are otherwise
+    left alone so _match_math can see a decimal or clock time and bail."""
+    s = (text or "").lower().replace("'", "").replace("’", "").translate(_MATH_UNICODE_OPS)
+    s = " ".join(s.split())
+    s = _MATH_WAKE_RE.sub("", s)
+    s = _MATH_TRAIL_PUNCT_RE.sub("", s)
+    s = _MATH_PLEASE_RE.sub("", s)
+    s = _MATH_TRAIL_PUNCT_RE.sub("", s)
+    s = _MATH_FILLER_RE.sub("", s)
+    return " ".join(_MATH_SYMBOL_SPACING_RE.sub(r" \1 ", s).split())
+
+
+def _match_math(text: str) -> QuickReply | None:
+    """Arithmetic over the RAW utterance (see _math_prep), not normalize()d
+    text, so symbols and decimals stay visible. Integers only."""
+    s = _math_prep(text)
+    if not s or _MATH_NON_INTEGER_RE.search(s):
+        return None
+    hi = bool(_MATH_TRAIL_HI.search(s))
+    body = _MATH_TRAIL_HI.sub("", s) if hi else _MATH_LEAD.sub("", s)
     words = body.split()
     # Must contain a digit and end in an operand ("set a timer for 5 minutes"
     # ends in "minutes" -> not math).
@@ -300,8 +343,4 @@ def match_quick(text: str, *, now: Callable[[], dt.datetime] = dt.datetime.now, 
         use_hi = pick(en_set, hi_set)
         if use_hi is not None:
             return ("social", _rng.choice(hi_replies if use_hi else en_replies))
-    for c in candidates:
-        m = _match_math(c)
-        if m is not None:
-            return m
-    return None
+    return _match_math(text)

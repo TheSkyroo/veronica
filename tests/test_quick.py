@@ -64,9 +64,32 @@ def test_social_choice_is_seeded():
     ("what's 10 minus 15", "10 minus 15 is -5."),
     ("12 guna 8 kitna hota hai", "12 guna 8, 96 hota hai."),
     ("100 bhaag 4 kya hota hai", "100 bhaag 4, 25 hota hai."),
+    # symbol operators survive now that math runs on the raw text
+    ("what's 10 - 3", "10 minus 3 is 7."),
+    ("whats 10-3", "10 minus 3 is 7."),
+    ("5 + 5", "5 plus 5 is 10."),
+    ("what's 5 + 5?", "5 plus 5 is 10."),
+    ("15% of 80", "15 percent of 80 is 12."),
+    ("12 * 8", "12 times 8 is 96."),
+    ("12 × 8", "12 times 8 is 96."),
+    ("100 / 8", "100 divided by 8 is 12.5."),
+    ("2^10", "2 to the power of 10 is 1024."),
+    ("Veronica, what's 5 + 5, please?", "5 plus 5 is 10."),
+    ("Okay, what's 6 times 7.", "6 times 7 is 42."),
 ])
 def test_math(text, reply):
     assert at(text) == ("math", reply)
+
+
+@pytest.mark.parametrize("text", [
+    # integers only: a digit next to . , : is a decimal / thousands / clock time
+    "3.14 times 2", "12.5 plus 1", "1,000 plus 1", "at 5:30 plus 10", "what's 3.14 times 2?",
+    # bare numbers (follow-up answers like "3") are not arithmetic
+    "5", "2024", "3", "what's 5", "5.", "(5)",
+    "twenty-five plus 1",
+])
+def test_math_no_match(text):
+    assert at(text) is None
 
 
 @pytest.mark.parametrize("text", [

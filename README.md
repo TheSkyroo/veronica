@@ -195,8 +195,10 @@ utterance is one of these (a longer request that merely contains "time" still go
 - **Battery and volume** — "battery level", "how much battery do I have", "what's the volume" ("battery kitni
   hai", "volume kitna hai").
 - **Arithmetic** — "what's 12 times 8", "144 divided by 12", "2 to the power of 10", "20 percent of 50"
-  ("12 guna 8 kitna hota hai"). A tiny parser over numbers and operators, never `eval()`; anything fancier
-  ("5 plus 5 in binary") goes to the brain.
+  ("12 guna 8 kitna hota hai"), and the symbols whisper writes: "5 + 5", "10 - 3", "12 x 8", "100 / 8", "2^10",
+  "15% of 80" (read back in words: "5 plus 5 is 10."). A tiny integer parser over numbers and operators, never
+  `eval()`; decimals, clock times ("5:30 plus 10"), bare numbers and anything fancier ("5 plus 5 in binary") go
+  to the brain.
 - **Small talk** — hello / thanks / bye / how are you / who are you / what can you do / good morning / good night
   (and namaste, shukriya, alvida, kaise ho, tum kaun ho, shubh ratri).
 
