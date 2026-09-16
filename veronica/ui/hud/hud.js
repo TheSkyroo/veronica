@@ -115,6 +115,19 @@
     step();
   }
 
+  // Icon-render mode (?icon=1): used by scripts/make_icon.py to screenshot
+  // the orb alone (no card/text/caption) at a large size for the app icon.
+  // Applied as a body class so hud.css can hide the card chrome and scale
+  // the orb canvas to fill the viewport via CSS; the canvas's own pixel
+  // backing store still comes from SIZE * devicePixelRatio below, so
+  // make_icon.py raises deviceScaleFactor to get a crisp render.
+  const ICON_MODE = (() => {
+    try {
+      return new URLSearchParams(location.search).get('icon') === '1';
+    } catch (e) { return false; }
+  })();
+  if (ICON_MODE) document.body.classList.add('icon-mode');
+
   const hud = {
     push(ev) {
       const payload = ev && ev.payload;
@@ -249,6 +262,8 @@
     },
   };
   window.hud = hud;
+
+  if (ICON_MODE) hud.push({kind: 'state', payload: 'speaking'});
 
   // ---- orb renderer: JARVIS-style golden wireframe holo-globe --------------
   const SIZE = 170, CX = SIZE / 2, CY = SIZE / 2, R = 66;

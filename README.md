@@ -110,6 +110,34 @@ Disable memory entirely (no DB, no injection, no remember/forget intents) with:
     uv run python -m veronica                 # menu bar app
     uv run python -m veronica --text "hello"  # no audio, debug
 
+## Install as an app
+
+Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a terminal:
+
+    make app          # writes dist/Veronica.app, ad-hoc codesigned
+    open dist/Veronica.app
+
+(`make icon` re-renders `assets/Veronica.icns` from the HUD orb first, if you want a fresh icon — the built
+one is already committed, so this is optional.)
+
+On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail, or
+Reminders it asks for **Automation** access to that app — approve both (System Settings → Privacy & Security).
+Because the bundle is ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier
+(`io.manik.veronica`) doesn't change.
+
+The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
+`.venv` (and `.env`, models, `claude auth login`) you set up for `uv run` — there's no separate install step.
+`VERONICA_HOME` (default `~/.veronica`) is unchanged when running as a bundle.
+
+**Start at Login** — the menu bar's "Start at Login" item writes a `LaunchAgent` at
+`~/Library/LaunchAgents/io.manik.veronica.plist` that relaunches `dist/Veronica.app` at login. It's greyed out
+("Start at Login (build the app first)") until you launch Veronica from the built `.app` at least once — it needs
+a real bundle path to point the LaunchAgent at.
+
+Logs: `~/.veronica/logs/veronica.log` (the app's own log; when running from the bundle, stdout isn't a TTY, so
+only the file handler is attached — nothing is lost, it's just not duplicated to a terminal) and
+`~/.veronica/logs/launchd.log` (stdout/stderr captured by launchd when started via "Start at Login").
+
 ## Test
     uv run pytest            # unit
     uv run pytest -m live    # needs mic/speaker/models/login

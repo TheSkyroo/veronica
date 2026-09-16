@@ -92,3 +92,10 @@ body.mini #caption.hidden{display:none}
 #caption[data-state="speaking"] .dot{background:#f0c36c}
 #caption[data-state="confirming"] .dot{background:#ff8a3c}
 #caption[data-state="error"] .dot{background:#ff5a5a}
+
+/* ---- icon-render mode (?icon=1): orb only, transparent, fills viewport --- */
+body.icon-mode{background:transparent}
+body.icon-mode #card{width:100vw;height:100vh;padding:0;margin:0;display:flex;align-items:center;justify-content:center;
+  background:transparent;border:none;border-radius:0;box-shadow:none;backdrop-filter:none}
+body.icon-mode #text,body.icon-mode #caption{display:none !important}
+body.icon-mode #orb{width:100vw;height:100vh;flex:0 0 auto}
