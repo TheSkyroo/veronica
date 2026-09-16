@@ -591,7 +591,13 @@ async def test_barge_listener_receives_suppress_callback():
     o.wake = BargeWake(barge_on_call=None)
     await o.one_turn()
     assert callable(o.wake.received_suppress)
-    assert o.wake.received_suppress() == ""  # nothing being spoken once play() returns
+    # immediately after speaking, the post-playback suppression window (see
+    # test_now_speaking_set_during_play_and_cleared_after / _finished_speaking)
+    # is still active, so the last-spoken text is still offered
+    assert "Done." in o.wake.received_suppress()
+    # once that window has elapsed, suppress() reverts to just _now_speaking
+    o._last_spoken_until = 0.0
+    assert o.wake.received_suppress() == ""
 
 
 async def test_now_speaking_set_during_play_and_cleared_after():
@@ -621,6 +627,26 @@ async def test_now_speaking_set_during_play_and_cleared_after():
     await o.confirm("do a thing")
     assert seen == ["Run do a thing?"]
     assert o._now_speaking == ""
+
+
+async def test_suppress_stays_active_for_wake_window_after_playback():
+    """The mic's rolling wake-analysis window (wake_window_s + wake_hop_s) can
+    still hold the tail of a just-finished sentence after _now_speaking is
+    cleared, so suppress() must keep returning text mentioning it until that
+    window has elapsed."""
+    o, _ = build()
+    now = [1000.0]
+    o._clock = lambda: now[0]
+    await o.say("I am Veronica.")
+    assert o._now_speaking == ""
+
+    # still within wake_window_s (1.6) + wake_hop_s (0.6) = 2.2 s of playback ending
+    now[0] += 1.0
+    assert "veronica" in o._suppress_text().lower()
+
+    # past the window: no longer suppressed
+    now[0] += 2.0  # total 3.0s elapsed
+    assert o._suppress_text() == ""
 
 
 class SlowBrain:

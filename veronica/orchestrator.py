@@ -49,6 +49,15 @@ class Orchestrator:
         self._confirm_capturing = False
         self._barged = False
         self._now_speaking = ""
+        # Own-speech suppression for the whisper wake engine: the mic's rolling
+        # analysis window can still hold the tail of a just-finished sentence
+        # (e.g. "...I'm Veronica") for up to wake_window_s + wake_hop_s after
+        # _now_speaking is cleared, so we keep offering the last-spoken text to
+        # the suppress check for that long too. self._clock is overridable in
+        # tests to fake time.
+        self._last_spoken = ""
+        self._last_spoken_until = 0.0
+        self._clock = time.monotonic
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -78,6 +87,19 @@ class Orchestrator:
             log.exception("on_event failed for %s", kind)
 
     # -- speaking -------------------------------------------------------------
+    def _finished_speaking(self, text: str) -> None:
+        """Called right after a play() of `text` returns: keep offering it to
+        the suppress check for wake_window_s + wake_hop_s more, since the
+        mic's rolling analysis window can still hold its audio tail."""
+        self._last_spoken = text
+        self._last_spoken_until = self._clock() + self.s.wake_window_s + self.s.wake_hop_s
+        self._now_speaking = ""
+
+    def _suppress_text(self) -> str:
+        if self._clock() < self._last_spoken_until:
+            return f"{self._now_speaking} {self._last_spoken}"
+        return self._now_speaking
+
     async def _say_unlocked(self, text: str, kind: str = "sentence") -> None:
         # Called only while _speech_lock is already held (by say()/confirm()).
         # Emit right before play so a listener never sees "sentence"/"voice"
@@ -90,7 +112,7 @@ class Orchestrator:
         try:
             await self.player.play(samples)
         finally:
-            self._now_speaking = ""
+            self._finished_speaking(text)
 
     async def say(self, text: str) -> None:
         if self.muted:
@@ -186,7 +208,7 @@ class Orchestrator:
                             try:
                                 await self.player.play(samples)
                             finally:
-                                self._now_speaking = ""
+                                self._finished_speaking(sent)
                 finally:
                     # Accounted for whether this item played cleanly, raised,
                     # or we were cancelled mid-item — unfinished_tasks must
@@ -285,7 +307,7 @@ class Orchestrator:
         """Run a turn coroutine; return True if the wake word interrupted it."""
         turn = asyncio.ensure_future(coro)
         listener = asyncio.create_task(
-            self.wake.wait(threshold=self.s.barge_threshold, suppress=lambda: self._now_speaking)
+            self.wake.wait(threshold=self.s.barge_threshold, suppress=self._suppress_text)
         )
         try:
             done, _ = await asyncio.wait({turn, listener}, return_when=asyncio.FIRST_COMPLETED)
