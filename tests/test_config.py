@@ -12,6 +12,8 @@ def test_defaults(tmp_home):
     assert s.confirm_listen_s == 5
     assert s.listen_wait_s == 6
     assert s.wake_retry_s == 10
+    assert s.wake_threshold == 0.35
+    assert s.wake_hits == 2
     assert s.brain_timeout_s == 60
     assert s.wake_model == "hey_veronica"
     assert s.session_file == tmp_home / "session"

@@ -24,7 +24,8 @@ class Settings(BaseSettings):
 
     # wake word
     wake_model: str = "hey_veronica"
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.35
+    wake_hits: int = 2
     wake_retry_s: int = 10
     barge_threshold: float = 0.8
 

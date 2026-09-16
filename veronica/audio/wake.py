@@ -75,6 +75,7 @@ class WakeWord:
 
     def _wait(self, threshold: float) -> bool:
         self._model.reset()
+        hits = 0
         for frame in self._frames():
             if self._stop.is_set():
                 self._stop.clear()
@@ -82,5 +83,9 @@ class WakeWord:
             chunk = np.frombuffer(frame, dtype=np.int16)
             scores = self._model.predict(chunk)
             if scores[self._key] >= threshold:
-                return True
+                hits += 1
+                if hits >= self.s.wake_hits:
+                    return True
+            else:
+                hits = 0
         return False

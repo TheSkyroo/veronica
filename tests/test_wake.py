@@ -28,7 +28,7 @@ def frames(pattern):
 @pytest.mark.asyncio
 async def test_wait_returns_on_detection(monkeypatch):
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
-    w = WakeWord(Settings(), frames=lambda: frames("...w"))
+    w = WakeWord(Settings(), frames=lambda: frames("...ww"))
     assert await w.wait() is True  # must return, not hang
 
 
@@ -38,19 +38,28 @@ async def test_threshold_respected(monkeypatch):
     seen = []
 
     def f():
-        for ch in "..w":
+        for ch in "..ww":
             seen.append(ch)
             yield np.full(CHUNK, 1000 if ch == "w" else 0, dtype=np.int16).tobytes()
 
     w = WakeWord(Settings(wake_threshold=0.5), frames=f)
     assert await w.wait() is True
-    assert seen == [".", ".", "w"]
+    assert seen == [".", ".", "w", "w"]
 
 
 async def test_wait_returns_true_on_detection(monkeypatch):
     monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
-    w = WakeWord(Settings(), frames=lambda: frames("..w"))
+    w = WakeWord(Settings(), frames=lambda: frames("..ww"))
     assert await w.wait() is True
+
+
+async def test_single_frame_spike_is_ignored(monkeypatch):
+    monkeypatch.setattr(WakeWord, "_model_cls", FakeModel)
+    import asyncio
+    w = WakeWord(Settings(), frames=lambda: frames("..w..."))
+    task = asyncio.create_task(w.wait())
+    w.stop()
+    assert await asyncio.wait_for(task, 2) is False
 
 
 async def test_stop_returns_false(monkeypatch):
@@ -80,7 +89,7 @@ async def test_stop_is_consumed(monkeypatch):
     assert await asyncio.wait_for(task, 2) is False
 
     # a stale stop flag must not poison the next wait()
-    w._frames = lambda: frames("..w")
+    w._frames = lambda: frames("..ww")
     assert await w.wait() is True
 
 
