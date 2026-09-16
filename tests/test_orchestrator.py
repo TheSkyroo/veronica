@@ -890,6 +890,12 @@ async def test_events_confirm_ask_then_allowed_and_declined():
         {"summary": "Bash: rm y", "decision": "declined"},
     ]
     assert ("prompt", "Run Bash: rm x?") in ev
+    kinds = [k for k, _ in ev]
+    # the "ask" tool event is emitted after the question is spoken (the
+    # "prompt" event), not at confirm()'s entry.
+    first_ask_idx = next(i for i, (k, p) in enumerate(ev) if k == "tool" and p.get("decision") == "ask")
+    first_prompt_idx = kinds.index("prompt")
+    assert first_prompt_idx < first_ask_idx
 
 
 async def test_events_confirm_no_speech_declined():

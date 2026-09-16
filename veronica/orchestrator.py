@@ -213,10 +213,6 @@ class Orchestrator:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
             return False
-        self._emit("tool", {
-            "summary": summary, "detail": detail, "decision": "ask",
-            "timeout_ms": self.s.confirm_listen_s * 1000,
-        })
         prev = self.state
         self._set("confirming")
         result = False
@@ -248,6 +244,14 @@ class Orchestrator:
                     # barged while the prompt was being spoken.
                     log.info("confirm aborted by barge")
                     return result
+                # Emitted only now (after the question has actually been
+                # spoken, immediately before we start listening) so the
+                # listening window's countdown starts from when the user
+                # could first respond, not from confirm()'s entry.
+                self._emit("tool", {
+                    "summary": summary, "detail": detail, "decision": "ask",
+                    "timeout_ms": self.s.confirm_listen_s * 1000,
+                })
                 self._confirm_capturing = True
                 try:
                     pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))
