@@ -54,15 +54,20 @@ class Orchestrator:
     # approve a tool. Devanagari forms are for pinned Hindi mode, where
     # whisper emits the script rather than romanized Hindi.
     CONFIRM_WORDS = frozenset({
-        "yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure",
-        "haan", "ji", "haanji", "ji haan", "theek hai", "karo",
-        "हाँ", "हां", "जी", "जी हाँ", "ठीक है", "करो",
+        "yes", "yeah", "yep", "yup", "do it", "go ahead", "confirm", "sure",
+        "ok", "okay", "alright", "fine", "absolutely", "please do", "go for it",
+        "of course", "correct",
+        "haan", "ji", "haanji", "ji haan", "theek hai", "karo", "bilkul", "kar do",
+        "हाँ", "हां", "जी", "जी हाँ", "ठीक है", "ठीक", "करो", "बिल्कुल", "कर दो",
     })
     DENY_WORDS = frozenset({
         "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
         "nahi", "nahin", "mat", "rehne",
         "नहीं", "नही", "मत", "रहने",
     })
+    # A confirm phrase directly after one of these is negated ("not okay",
+    # "don't do it", "mat karo") rather than counted as a yes.
+    _NEGATORS = frozenset({"not", "dont", "never", "no", "nahi", "nahin", "mat", "नहीं", "नही", "मत"})
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
     # Word characters for is_confirmation: Latin letters plus the Devanagari
     # block (U+0900-U+097F, which includes the vowel signs and chandrabindu).
@@ -74,17 +79,30 @@ class Orchestrator:
 
     @staticmethod
     def is_confirmation(heard: str) -> bool:
+        """True only if a confirm phrase is the *last decisive* thing said.
+
+        Scans left to right: a deny word anywhere after the last confirm
+        phrase wins ("yes… actually no" → False), but a deny before a later
+        confirm does not ("no no, I said yes, do it" → True). A confirm
+        phrase immediately preceded by a negator ("not okay", "don't do
+        it") is not a confirm. With no confirm phrase at all the answer is
+        always False — never default to yes."""
         no_apostrophes = heard.lower().replace("'", "").replace("’", "")
         words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
-        if any(w in Orchestrator.DENY_WORDS for w in words):
-            return False
+        last_confirm = -1
+        last_deny = -1
+        for idx, w in enumerate(words):
+            if w in Orchestrator.DENY_WORDS:
+                last_deny = idx
         for phrase in Orchestrator.CONFIRM_WORDS:
             phrase_words = phrase.split()
             n = len(phrase_words)
             for i in range(len(words) - n + 1):
                 if words[i:i + n] == phrase_words:
-                    return True
-        return False
+                    if i > 0 and words[i - 1] in Orchestrator._NEGATORS:
+                        continue
+                    last_confirm = max(last_confirm, i + n - 1)
+        return last_confirm >= 0 and last_confirm > last_deny
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  partial_stt=None, store=None,

@@ -3280,3 +3280,20 @@ async def test_hindi_voice_pick_in_auto_mode_keeps_mode(monkeypatch):
     o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
     await o.one_turn()
     assert o.tts.hindi_voice == "hm_omega" and o.language == "auto" and made == []
+
+
+@pytest.mark.parametrize("heard,ok", [
+    # last decisive phrase wins
+    ("no no, I said yes, do it", True), ("yes… actually no", False), ("not now", False),
+    ("yes", True), ("no", False), ("", False), ("maybe", False),
+    # negated confirms
+    ("not okay", False), ("don't do it", False), ("mat karo", False), ("that's not fine", False),
+    # new affirmatives
+    ("ok", True), ("okay", True), ("yup", True), ("yeah yeah", True), ("alright", True), ("fine", True),
+    ("absolutely", True), ("please do", True), ("go for it", True), ("of course", True), ("correct", True),
+    ("bilkul", True), ("haan haan", True), ("kar do", True), ("ठीक", True), ("बिल्कुल", True), ("कर दो", True),
+    # still never on laughter / stop
+    ("ha ha", False), ("stop", False), ("okay stop", False), ("cancel that, yes", True),
+])
+def test_is_confirmation_last_decisive_wins(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
