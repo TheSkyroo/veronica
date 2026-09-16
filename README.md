@@ -242,6 +242,50 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
 fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
 
+## Settings window
+
+A normal macOS window (tabs: General, Voice, Listening, Briefings, Brain, History, About) for everything that
+used to need an environment variable or a voice command.
+
+- **Open it** — say "open settings" / "settings" / "preferences" / "settings kholo", pick "Settings…" from the menu
+  bar, or click the HUD orb and choose "Settings…". "Show history" / "what did I ask you" / "history dikhao" opens
+  it straight on the History tab.
+- **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
+  spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
+  utterance limits, briefing/nudge schedule, start at login, push-to-talk.
+- **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
+  brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
+  Restart button (from the built `.app` it relaunches itself; from a terminal it quits and says "Restart me from
+  the terminal.").
+
+Values you set here override the environment/`.env` defaults (they're stored in `~/.veronica/prefs.json`).
+
+## History
+
+The History tab lists past turns (what you said, what she replied) from the local memory database, with a search
+box. Each row has a Forget button; "Clear history" removes them all. Facts you asked her to remember are separate
+(see Memory) and aren't touched by clearing history. With memory disabled the tab just says so.
+
+## Version & updates
+
+- **"What version are you"** / "version" / "kaunsa version hai" — says e.g. "Veronica 0.1.0 (a517483, 17 Sep)":
+  the package version plus the commit that's actually running (from the bundle's `build.json` when launched as
+  the app, else live from git). The same line sits at the top of the menu bar menu ("About Veronica — …") and on
+  the About tab.
+- **"Update yourself"** / "update now" / "check for updates" / "apna update karo" — checks the repo: if
+  `origin` has newer commits it says "Updating, back in a moment.", runs `git pull --ff-only`, `uv sync --frozen`
+  and rebuilds `dist/Veronica.app`, then relaunches. If there's no remote (or nothing new upstream) but the running
+  build is behind the checked-out code, "update" just rebuilds and restarts you onto the latest local code. Already
+  current: "You're already on the latest." Anything failing: "The update failed, check the log."
+- **Menu bar** — "Check for Updates…" runs the same check and posts a notification; when something newer exists
+  the item below it becomes "Update available — Restart to update" (click to install). Veronica also checks quietly
+  once an hour and only flips that item, no notification. The About tab has "Check now", "Update & restart",
+  "Restart" and "Open log".
+
+Updates are refused while a conversation is in progress from the window/menu ("Busy, try again in a moment."); the
+spoken "update yourself" is itself the turn, so it just runs. There are no API keys involved — updating is a git
+pull plus rebuild of the local checkout.
+
 ## Permissions
 
 Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
