@@ -10,10 +10,11 @@ from veronica.tools import memory_tools
 
 
 class _FakeSynthesizer:
-    def __init__(self, voice, models_dir, speed=1.0):
+    def __init__(self, voice, models_dir, speed=1.0, hindi_voice="hf_alpha"):
         self.voice = voice
         self.models_dir = models_dir
         self.speed = speed
+        self.hindi_voice = hindi_voice
 
 
 class _FakeBrain:
@@ -117,8 +118,10 @@ def _fake_make_wake(settings, frames=None):
 
 
 class _FakeTranscriber:
-    def __init__(self, model):
+    def __init__(self, model, language="en"):
         self.model = model
+        self.model_name = model
+        self.language = language
 
 
 class _FakeRecorder:
@@ -420,4 +423,107 @@ async def test_proactive_adapters_raise_on_pim_error(monkeypatch, tmp_home):
     assert "Nothing on your calendar" not in text
     assert "Reminders due" not in text
     assert text.startswith("Good ")
+    memory_tools.bind(None)
+
+
+# -- batch C: language mode ---------------------------------------------------
+
+def _patch_audio_fakes(monkeypatch, saved):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: saved)
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+
+
+async def test_build_orchestrator_hindi_language_pref_picks_multilingual_models(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {"language": "hi"})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "hi"
+    assert (orch.stt.model_name, orch.stt.language) == ("small", "hi")
+    assert (orch.partial_stt.model_name, orch.partial_stt.language) == ("tiny", "hi")
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_auto_language_pref_lets_whisper_detect(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {"language": "auto"})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "auto"
+    assert (orch.stt.model_name, orch.stt.language) == ("small", None)
+    assert (orch.partial_stt.model_name, orch.partial_stt.language) == ("tiny", None)
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_default_language_is_english_models(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "en"
+    assert (orch.stt.model_name, orch.stt.language) == ("small.en", "en")
+    assert (orch.partial_stt.model_name, orch.partial_stt.language) == ("tiny.en", "en")
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_ignores_unknown_language_pref(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {"language": "fr"})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "en"
+    assert orch.stt.model_name == "small.en"
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_falls_back_to_english_when_multilingual_stt_fails(monkeypatch, tmp_home, caplog):
+    _patch_audio_fakes(monkeypatch, {"language": "hi"})
+    saved_calls = []
+    monkeypatch.setattr(main_mod.prefs, "save", lambda d: saved_calls.append(d))
+
+    class _Flaky(_FakeTranscriber):
+        def __init__(self, model, language="en"):
+            if model in ("small", "tiny"):
+                raise RuntimeError("model download failed")
+            super().__init__(model, language)
+
+    monkeypatch.setattr(main_mod, "Transcriber", _Flaky)
+    with caplog.at_level("ERROR", logger="veronica"):
+        orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "en"
+    assert (orch.stt.model_name, orch.stt.language) == ("small.en", "en")
+    assert (orch.partial_stt.model_name, orch.partial_stt.language) == ("tiny.en", "en")
+    assert any("model download failed" in r.getMessage() or "download failed" in (r.exc_text or "") for r in caplog.records)
+    assert saved_calls == []     # the saved "hi" pref is left intact for the next launch
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_english_stt_failure_still_raises(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {})
+
+    def boom(model, language="en"):
+        raise RuntimeError("no models at all")
+
+    monkeypatch.setattr(main_mod, "Transcriber", boom)
+    with pytest.raises(RuntimeError, match="no models at all"):
+        main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_stt_factory_builds_transcribers(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert callable(orch.stt_factory)
+    t = orch.stt_factory("small", "hi")
+    assert isinstance(t, _FakeTranscriber) and (t.model_name, t.language) == ("small", "hi")
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_applies_saved_hindi_voice(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {"tts_hindi_voice": "hm_omega"})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+    assert orch.tts.hindi_voice == "hm_omega"
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_ignores_bad_hindi_voice(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {"tts_hindi_voice": "af_sarah"})
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+    assert orch.tts.hindi_voice == "hf_alpha"
     memory_tools.bind(None)

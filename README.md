@@ -16,7 +16,9 @@ Wake word not triggering? Run `uv run python scripts/wake_scores.py`, say the ph
 Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is ignored if set).
 
 - macOS will ask for Microphone access for your terminal app on first run (System Settings → Privacy & Security → Microphone).
-- First run downloads the whisper `small.en` model (~470 MB).
+- First run downloads the whisper `small.en` model (~470 MB). Hindi mode needs the multilingual `small`/`tiny`
+  models too (~500 MB more) — fetched the first time you say "speak hindi", or ahead of time with
+  `uv run python scripts/download_models.py --hindi`.
 - Say the wake word while Veronica is talking to interrupt her (barge-in).
 - Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
 - A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
@@ -173,7 +175,8 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 
 - **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
   (Sarah, Bella, Nicole, Sky, Adam, Michael, Emma, Isabella, George, Lewis), picked by name or by descriptor
-  (british/american, male/female); "use the default voice" goes back to the configured one. "Change your voice" /
+  (british/american, male/female), plus the four Hindi voices (see *Hindi & Hinglish*); "use the default voice"
+  goes back to the configured one. "Change your voice" /
   "different voice" cycles to the next one. She confirms in the new voice ("Okay, this is George.") so you hear it
   straight away; an unknown name gets the list back.
 - **Speed** — "speak faster" / "speak slower" / "normal speed" nudge the speaking rate in 0.15x steps (0.7x–1.5x)
@@ -181,6 +184,46 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 
 Both are handled locally (no round-trip to Claude), persist across restarts in `~/.veronica/prefs.json`, and are
 also in the menu bar / orb popup under **Voice** (the voice list plus Faster / Slower / Normal speed).
+
+## Quick replies
+
+Trivial questions are answered locally, instantly, without a round-trip to Claude — only when the whole
+utterance is one of these (a longer request that merely contains "time" still goes to the brain):
+
+- **Time, date, day** — "what time is it", "what's the date", "what day is it" (Hinglish: "kitne baje hain",
+  "aaj kya tareekh hai", "aaj kya din hai").
+- **Battery and volume** — "battery level", "how much battery do I have", "what's the volume" ("battery kitni
+  hai", "volume kitna hai").
+- **Arithmetic** — "what's 12 times 8", "144 divided by 12", "2 to the power of 10", "20 percent of 50"
+  ("12 guna 8 kitna hota hai"), and the symbols whisper writes: "5 + 5", "10 - 3", "12 x 8", "100 / 8", "2^10",
+  "15% of 80" (read back in words: "5 plus 5 is 10."). A tiny integer parser over numbers and operators, never
+  `eval()`; decimals, clock times ("5:30 plus 10"), bare numbers and anything fancier ("5 plus 5 in binary") go
+  to the brain.
+- **Small talk** — hello / thanks / bye / how are you / who are you / what can you do / good morning / good night
+  (and namaste, shukriya, alvida, kaise ho, tum kaun ho, shubh ratri).
+
+Quick replies show up as a "Quick reply" tool card in the HUD and are logged to memory like any other turn.
+
+## Hindi & Hinglish
+
+- **Switch** — "speak hindi" / "hindi mein bolo" pins her to Hindi; "speak english" / "english mein bolo" goes
+  back; "understand both" / "dono bhasha" lets whisper detect the language per utterance. She confirms in the new
+  language ("Ab Hindi mein baat karte hain." / "Okay, English it is." / "Theek hai, dono chalega."), and the mode
+  persists in `~/.veronica/prefs.json`. In pinned Hindi mode everything you say is treated as Hindi and spoken with
+  the Hindi voice; say "understand both" / "dono bhasha" if you mix English and Hindi.
+- **What to expect** — Hindi and auto mode swap the English-only whisper models for the multilingual ones; the
+  first switch downloads them (~500 MB) after an "Ek minute, Hindi load kar rahi hoon." Replies follow your
+  language: Hinglish in, Hinglish out (Latin letters); pure Hindi in, Devanagari out; English in, English out.
+  Hindi replies are spoken with a Hindi voice; timers, briefings and other announcements keep the English voice
+  unless they contain Devanagari.
+- **Hinglish commands** — the local intents understand romanized Hindi too: "bas karo" / "chup" ends the turn,
+  "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "ji" / "nahi" answer a
+  "Run …?" confirmation, plus the quick replies above. In pinned Hindi mode whisper writes Devanagari, so the
+  common ones are understood in script as well ("बस करो", "हाँ" / "नहीं", "समय क्या है").
+- **Hindi voices** — Alpha, Beta (female), Omega, Psi (male). "Use a hindi voice" / "use the omega voice" picks
+  the voice Hindi replies use (the English voice is untouched, so both show a checkmark in the **Voice** menu),
+  confirmed with "Theek hai, ab main aise bolungi." Prefetch the models without switching:
+  `uv run python scripts/download_models.py --hindi`.
 
 ## Briefings & nudges
 

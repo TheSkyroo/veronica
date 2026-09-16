@@ -41,7 +41,7 @@ class Brain:
 
 class TTS:
     def __init__(self): self.said = []
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.said.append(text)
         return np.zeros(10, dtype=np.float32), 24000
 
@@ -72,7 +72,7 @@ async def test_handle_text_speaks_each_sentence():
 
 
 async def test_chime_after_wake_and_on_followup():
-    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     await o.one_turn()
     # chime samples go through player.play like speech; count plays: wake chime + 2 sentences + followup chime
     assert o.player.played == 4
@@ -81,7 +81,7 @@ async def test_chime_after_wake_and_on_followup():
 async def test_wake_chime_skipped_when_preroll_has_speech():
     o, _ = build()
     o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=True)
-    o.stt = STT(["hi"])
+    o.stt = STT(["tell me a joke"])
     await o.one_turn()
     # wake chime skipped (preroll already has speech), so: 2 sentences + followup chime
     assert o.player.played == 3
@@ -90,7 +90,7 @@ async def test_wake_chime_skipped_when_preroll_has_speech():
 async def test_wake_chime_played_when_preroll_has_no_speech():
     o, _ = build()
     o.recorder = Rec([np.zeros(1, np.int16), None], has_speech=False)
-    o.stt = STT(["hi"])
+    o.stt = STT(["tell me a joke"])
     await o.one_turn()
     # wake chime + 2 sentences + followup chime
     assert o.player.played == 4
@@ -184,9 +184,9 @@ async def test_empty_transcript_prompts_retry():
 
 
 async def test_full_turn():
-    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     await o.one_turn()
-    assert o.brain.asked == ["what time is it"]
+    assert o.brain.asked == ["tell me a joke"]
     assert states == ["listening", "thinking", "speaking", "followup", "idle"]
 
 
@@ -223,7 +223,7 @@ async def test_run_forever_survives_reporting_failure():
             yield  # pragma: no cover - makes this an async generator function
 
     class RaisingTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             raise RuntimeError("tts boom")
 
     class WakeOnceThenCancel:
@@ -273,7 +273,7 @@ class TrackingTTS:
         self.max_in_progress = 0
         self._texts_by_index = []
 
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.in_progress += 1
         self.max_in_progress = max(self.max_in_progress, self.in_progress)
         self.said.append(text)
@@ -466,7 +466,7 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
 
     o = Orchestrator(
         Settings(followup_window_s=0, confirm_listen_s=0),
-        wake=WakeOnceThenCancel(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(["hi"]),
+        wake=WakeOnceThenCancel(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(["tell me a joke"]),
         brain=LoginFailBrain(), tts=TTS(), player=Player(),
     )
     with pytest.raises(asyncio.CancelledError):
@@ -496,7 +496,7 @@ async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
     order = []
 
     class SlowTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             order.append(("synth", text))
             await asyncio.sleep(0.01)
             return np.zeros(10, dtype=np.float32), 24000
@@ -527,7 +527,7 @@ async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
 
 async def test_handle_text_cancel_with_full_queue_does_not_hang():
     class FastTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             return np.zeros(10, dtype=np.float32), 24000
 
     class SlowTTS:
@@ -538,7 +538,7 @@ async def test_handle_text_cancel_with_full_queue_does_not_hang():
         (exercising the orphaned-future fix), and other futures will still
         be genuinely in-flight (not just already-done) when drained."""
         def __init__(self): self.started = 0; self.finished = 0
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             self.started += 1
             try:
                 await asyncio.sleep(1)
@@ -594,7 +594,7 @@ async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
     texts_by_index: list[str] = []
 
     class DelayedTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             idx = len(texts_by_index)
             texts_by_index.append(text)
             await asyncio.sleep(0.05)
@@ -654,7 +654,7 @@ async def test_barge_listener_receives_suppress_callback():
     """The barge listener must be handed a callable that yields the sentence
     currently being spoken, so the whisper wake engine can ignore Veronica's
     own speech (e.g. "I'm Veronica") instead of self-interrupting."""
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     o.wake = BargeWake(barge_on_call=None)
     await o.one_turn()
     assert callable(o.wake.received_suppress)
@@ -832,7 +832,7 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
         def __init__(self):
             self.said = []
 
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             self.said.append(text)
             if text.startswith("Run "):
                 await release_ev.wait()
@@ -883,14 +883,14 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
 
 
 async def test_no_barge_listener_stopped_when_turn_ends():
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     o.wake = BargeWake()  # never barges
     await o.one_turn()
     assert o.wake.stops == 1  # listener stopped once when handle_text finished
 
 
 async def test_barge_uses_barge_threshold():
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     seen = []
     class W(BargeWake):
         async def wait(self, threshold=None, suppress=None):
@@ -973,7 +973,7 @@ async def test_barge_listener_failure_does_not_cancel_good_turn(caplog):
         def take_preroll(self):
             return np.zeros(0, dtype=np.int16)
 
-    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     o.wake = RaisingWake()
     import logging
     with caplog.at_level(logging.ERROR, logger="veronica.orchestrator"):
@@ -1013,10 +1013,10 @@ def build3(rec_pcms=(), stt_texts=()):
 
 
 async def test_events_full_turn():
-    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     await o.one_turn()
     kinds = [k for k, _ in ev]
-    assert ("heard", "what time is it") in ev
+    assert ("heard", "tell me a joke") in ev
     assert [p for k, p in ev if k == "sentence"] == ["Sure.", "Done."]
     voices = [p for k, p in ev if k == "voice"]
     assert len(voices) == 2 and voices[0]["step_ms"] == 50 and isinstance(voices[0]["levels"], list)
@@ -1286,7 +1286,7 @@ async def test_followup_empty_transcript_ends_silently():
     follow-up window — just go idle."""
     o, states = build(
         rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)],
-        stt_texts=["hi", ""],
+        stt_texts=["tell me a joke", ""],
     )
     await o.one_turn()
     assert o.tts.said == ["Sure.", "Done."]
@@ -1308,7 +1308,7 @@ async def test_empty_transcript_after_barge_relisten_keeps_sorry():
     transcript there should still get "Sorry, didn't catch that."."""
     o, states = build(
         rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
-        stt_texts=["hi", ""],
+        stt_texts=["tell me a joke", ""],
     )
     o.wake = BargeWake(barge_on_call=1)
     o.brain = SlowBrain()
@@ -1368,9 +1368,9 @@ async def test_hud_full_intent_says_okay_emits_hud_and_continues_followup():
 
 
 async def test_non_intent_text_goes_to_brain():
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     await o.one_turn()
-    assert o.brain.asked == ["what time is it"]
+    assert o.brain.asked == ["tell me a joke"]
 
 
 async def test_followup_window_default_is_four_seconds():
@@ -1537,7 +1537,7 @@ async def test_wake_and_announce_same_tick_prefers_wake_and_requeues():
     """If the wake word and a queued announcement both resolve in the same
     tick, the wake path wins (a real detection must not be swallowed) and
     the announcement is put back to be delivered after the turn."""
-    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hello"])
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     wake = _WakeOnceThenCancel()
     o.wake = wake
     # Scheduled (not put_nowait'd) before run_forever starts, so it lands in
@@ -1550,7 +1550,7 @@ async def test_wake_and_announce_same_tick_prefers_wake_and_requeues():
     with pytest.raises(asyncio.CancelledError):
         await o.run_forever()
 
-    assert o.brain.asked == ["hello"]
+    assert o.brain.asked == ["tell me a joke"]
     assert "Sure." in o.tts.said and "Timer done" in o.tts.said
     assert o.tts.said.index("Timer done") > o.tts.said.index("Sure.")
 
@@ -2055,7 +2055,7 @@ async def test_ptt_while_speaking_cancels_turn_and_hold_captures():
     """Regression (reviewer repro_barge): PTT while speaking -> the turn is
     cancelled, brain.interrupt() called, NO follow-up capture from the old
     turn, the hold capture proceeds, then the new answer."""
-    o, states = build_ptt(stt_texts=["hi", "ptt text"])
+    o, states = build_ptt(stt_texts=["tell me a joke", "ptt text"])
     o.recorder = SlowRec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
     interrupts = []
 
@@ -2067,7 +2067,7 @@ async def test_ptt_while_speaking_cancels_turn_and_hold_captures():
         async def ask(self, text, images=()):
             self.asked.append(text)
             yield "First sentence."
-            if text == "hi":
+            if text == "tell me a joke":
                 await self.ev.wait()       # "thinking" about sentence 2 until interrupted
 
         async def interrupt(self):
@@ -2092,7 +2092,7 @@ async def test_ptt_while_speaking_cancels_turn_and_hold_captures():
     assert o.recorder.max_active == 1
     o.ptt_end()
     await _settle()
-    assert o.brain.asked == ["hi", "ptt text"]
+    assert o.brain.asked == ["tell me a joke", "ptt text"]
     assert o.recorder.hold_calls == [False, True, False]   # then a normal follow-up window
     o.recorder.stop()
     await _settle()
@@ -2104,7 +2104,7 @@ async def test_ptt_during_followup_capture_switches_to_hold_capture():
     """Regression (reviewer repro_ptt: scenario_ptt_during_followup): with
     the old design a PTT press during the follow-up window opened a second
     capture beside the follow-up one and left a stale wake.stop() behind."""
-    o, states = build_ptt(stt_texts=["hi", "ptt text"])
+    o, states = build_ptt(stt_texts=["tell me a joke", "ptt text"])
     o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
     t = asyncio.create_task(o.one_turn())
     await _settle()
@@ -2119,7 +2119,7 @@ async def test_ptt_during_followup_capture_switches_to_hold_capture():
     assert o.wake.stops == 1                       # only the barge listener's own stop; no stale one
     o.ptt_end()
     await _settle()
-    assert o.brain.asked == ["hi", "ptt text"]
+    assert o.brain.asked == ["tell me a joke", "ptt text"]
     o.recorder.stop()
     await _settle()
     assert t.done() and t.exception() is None
@@ -2222,7 +2222,7 @@ async def test_ptt_quick_tap_released_during_chime_leaves_nothing_stuck():
 async def test_ptt_release_during_chime_ends_capture_that_already_started():
     """The capture is started before the chime is awaited, so a release
     that lands while the chime is still playing finishes a real capture."""
-    o, _ = build_ptt(stt_texts=["hello"])
+    o, _ = build_ptt(stt_texts=["tell me a joke"])
     o.recorder = SlowRec([np.zeros(1, np.int16), None])
 
     class SlowPlayer(Player):
@@ -2241,7 +2241,7 @@ async def test_ptt_release_during_chime_ends_capture_that_already_started():
     assert not o._ptt_capturing
     o.recorder.stop()
     await asyncio.wait_for(t, 2)
-    assert o.brain.asked == ["hello"]
+    assert o.brain.asked == ["tell me a joke"]
 
 
 async def test_ptt_capture_uses_ptt_max_s_hold_and_partial():
@@ -2725,7 +2725,7 @@ class TTS2(TTS):
         self.speed = 1.0
         self.spoken_with = []   # (text, voice, speed) at synth time
 
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.spoken_with.append((text, self.voice, self.speed))
         return await super().asynth(text)
 
@@ -2759,7 +2759,7 @@ async def test_voice_intent_unknown_lists_voices(monkeypatch):
     assert o.tts.voice == "af_sarah"
     assert saved == []
     assert o.tts.said[-1].startswith("I don't have that voice. I have Sarah, Bella")
-    assert o.tts.said[-1].endswith("George and Lewis.")
+    assert o.tts.said[-1].endswith("George, Lewis, and in Hindi Alpha, Beta, Omega and Psi.")
 
 
 async def test_voice_intent_next_cycles(monkeypatch):
@@ -2869,14 +2869,14 @@ async def test_brief_now_can_be_barged(monkeypatch):
         def __init__(self): super().__init__(); self.interrupts = 0
         async def interrupt(self): self.interrupts += 1
 
-    o, _, _, _ = build_pro(["brief me", "hello"], monkeypatch, wake=BargeWake())
+    o, _, _, _ = build_pro(["brief me", "tell me a joke"], monkeypatch, wake=BargeWake())
     o.proactive = SlowProactive()
     o.brain = InterruptibleBrain()
     o.recorder = Rec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
     await o.one_turn()
     assert o.wake.barges >= 1
     assert "never" not in o.tts.said
-    assert o.brain.asked == ["hello"]
+    assert o.brain.asked == ["tell me a joke"]
 
 
 async def test_time_spoken_12h():
@@ -2965,3 +2965,302 @@ async def test_run_forever_without_proactive_is_fine():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert o.proactive is None
+
+
+# -- batch C: quick replies ----------------------------------------------------
+
+async def test_quick_time_reply_skips_brain_and_logs():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what day is it"])
+    o.store = FakeStore()
+    o.s = Settings(followup_window_s=0, confirm_listen_s=0, memory_enabled=True)
+    await o.one_turn()
+    import datetime as _dt
+    assert o.tts.said == [f"It's {_dt.datetime.now().strftime('%A')}."]
+    assert o.brain.asked == []
+    assert ("tool", {"summary": "Quick reply", "decision": "auto"}) in ev
+    assert o.store.turns[-1] == ("what day is it", o.tts.said[0])
+
+
+async def test_quick_battery_reads_pmset(monkeypatch):
+    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (72, "charging"))
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery level"])
+    await o.one_turn()
+    assert o.tts.said == ["Battery is at 72 percent and charging."]
+
+
+async def test_quick_battery_failure_copy(monkeypatch):
+    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (None, None))
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery kitni hai"])
+    await o.one_turn()
+    assert o.tts.said == ["Battery level nahi mil paaya."]
+
+
+async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
+    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (98, None))
+    o, *_ = build_lang(["battery level"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.said[-1] == "Battery is at 98 percent."
+    o, *_ = build_lang(["battery kitni hai"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.said[-1] == "Battery 98 percent hai."
+
+
+async def test_quick_volume_uses_mac_tool(monkeypatch):
+    async def fake_get(args):
+        return {"content": [{"type": "text", "text": "40"}]}
+    monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's the volume"])
+    await o.one_turn()
+    assert o.tts.said == ["Volume is at 40 percent."]
+
+
+async def test_quick_volume_error_copy(monkeypatch):
+    async def fake_get(args):
+        return {"content": [{"type": "text", "text": "error: boom"}], "is_error": True}
+    monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["volume kitna hai"])
+    await o.one_turn()
+    assert o.tts.said == ["Volume nahi mil paaya."]
+
+
+async def test_quick_uses_utterance_lang_for_english_phrase():
+    # whisper labelled the utterance Hindi (an English phrase said in a
+    # Hindi sentence's flow): the reply comes back in Hinglish.
+    o, *_ = build_lang(["what day is it"], langs=["hi"], mode="auto")
+    await o.one_turn()
+    assert o._utterance_lang == "hi"
+    import datetime as _dt
+    assert o.tts.said == [f"Aaj {_dt.datetime.now().strftime('%A')} hai."]
+
+
+async def test_quick_does_not_shadow_local_intents_or_brain():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hello can you open safari"])
+    await o.one_turn()
+    assert o.brain.asked == ["hello can you open safari"]
+
+
+async def test_quick_does_not_run_when_local_intent_matched():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that time is 5"])
+    o.store = FakeStore()
+    await o.one_turn()
+    assert o.store.facts == ["time is 5"]
+    assert o.tts.said == ["Got it."]
+
+
+def test_read_battery_parses_pmset():
+    class R:
+        def __init__(self, out):
+            self.stdout = out
+            self.returncode = 0
+    run = lambda *a, **k: R("Now drawing from 'AC Power'\n -InternalBattery-0 (id=123)\t72%; charging; 0:45 remaining present: true\n")
+    assert mac_tools_mod.read_battery(run=run) == (72, "charging")
+    run = lambda *a, **k: R(" -InternalBattery-0\t100%; charged; 0:00 remaining\n")
+    assert mac_tools_mod.read_battery(run=run) == (100, "charged")
+    run = lambda *a, **k: R(" -InternalBattery-0\t35%; discharging; 3:10 remaining\n")
+    assert mac_tools_mod.read_battery(run=run) == (35, "discharging")
+    # plugged in but not charging (battery-health hold): the state is unknown, not "charging"
+    run = lambda *a, **k: R(" -InternalBattery-0\t98%; AC attached; not charging present: true\n")
+    assert mac_tools_mod.read_battery(run=run) == (98, None)
+    run = lambda *a, **k: R(" -InternalBattery-0\t80%; finishing charge; 0:05 remaining present: true\n")
+    assert mac_tools_mod.read_battery(run=run) == (80, "charging")
+    run = lambda *a, **k: R("Now drawing from 'AC Power'\n")
+    assert mac_tools_mod.read_battery(run=run) == (None, None)
+    run = lambda *a, **k: (_ for _ in ()).throw(OSError("no pmset"))
+    assert mac_tools_mod.read_battery(run=run) == (None, None)
+
+
+@pytest.mark.parametrize("heard,ok", [
+    ("haan", True), ("haanji", True), ("ji haan", True), ("theek hai", True), ("karo", True), ("ji", True),
+    # transcribed laughter must never approve a tool
+    ("ha", False), ("ha ha", False),
+    ("nahi", False), ("nahin", False), ("mat karo", False), ("rehne do", False), ("haan nahi", False),
+    # Devanagari (pinned hi mode makes whisper emit the script)
+    ("हाँ", True), ("हां", True), ("जी", True), ("जी हाँ", True), ("ठीक है", True), ("करो", True),
+    ("हाँ, करो।", True),
+    ("नहीं", False), ("नही", False), ("मत करो", False), ("रहने दो", False), ("हाँ नहीं", False),
+    # trailing danda must not glue onto the word
+    ("हाँ।", True), ("ठीक है।", True), ("नहीं।", False), ("हाँ, नहीं।", False), ("करो॥", True),
+])
+def test_is_confirmation_hinglish(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
+
+
+# -- batch C: language mode -----------------------------------------------------
+
+class STT2(STT):
+    def __init__(self, texts, langs=None):
+        super().__init__(texts); self.langs = list(langs or []); self.language = "en"; self.model_name = "small.en"
+    async def atranscribe_detailed(self, pcm):
+        t = await self.atranscribe(pcm)
+        return t, (self.langs.pop(0) if self.langs else "en")
+    def set_language(self, lang): self.language = lang
+
+
+class TTS3(TTS):
+    def __init__(self):
+        super().__init__(); self.voice = "af_sarah"; self.speed = 1.0; self.hindi_voice = "hf_alpha"; self.langs = []
+    async def asynth(self, text, lang=None):
+        self.langs.append((text, lang)); return await super().asynth(text)
+
+
+def build_lang(stt_texts, langs=(), mode="en", monkeypatch=None):
+    saved = []
+    if monkeypatch:
+        monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    made = []
+    def factory(model, language):
+        s = STT2([], []); s.model_name = model; s.language = language; made.append((model, language)); return s
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(stt_texts, langs),
+        brain=Brain(), tts=TTS3(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), stt_factory=factory, language=mode,
+    )
+    return o, saved, made, events
+
+
+async def test_utterance_lang_from_detection_and_script():
+    o, *_ = build_lang(["kal meeting hai"], langs=["hi"], mode="auto")
+    await o.one_turn()
+    assert o._utterance_lang == "hi"
+    assert o.tts.langs[-1][1] == "hi"                      # brain reply spoken with the Hindi voice
+    o, *_ = build_lang(["कल मीटिंग है"], langs=["en"], mode="en")   # Devanagari wins even if detector says en
+    await o.one_turn()
+    assert o._utterance_lang == "hi"
+    o, *_ = build_lang(["what time is it"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert o._utterance_lang == "en" and o.tts.langs[-1][1] == "en"
+
+
+async def test_hinglish_phrase_in_auto_mode_counts_as_hindi():
+    o, *_ = build_lang(["shukriya"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+
+
+async def test_hinglish_phrase_in_english_mode_stays_english():
+    o, *_ = build_lang(["shukriya"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o._utterance_lang == "en"
+    # ...but the Hindi reply to a Hinglish phrase is still voiced in Hindi
+    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+
+
+async def test_english_quick_reply_in_english_mode_is_voiced_in_english():
+    o, *_ = build_lang(["thanks"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.langs[-1][1] == "en"
+
+
+async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
+    o, saved, made, ev = build_lang(["speak hindi"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.language == "hi"
+    assert made[-2:] == [("small", "hi"), ("tiny", "hi")]     # main + partial
+    assert o.stt.model_name == "small" and o.partial_stt.model_name == "tiny"
+    assert {"language": "hi"} in saved
+    assert o.tts.said[:2] == ["Ek minute, Hindi load kar rahi hoon.", "Ab Hindi mein baat karte hain."]
+    assert o.tts.langs[:2] == [("Ek minute, Hindi load kar rahi hoon.", "hi"), ("Ab Hindi mein baat karte hain.", "hi")]
+    assert ("tool", {"summary": "Language: hi", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+    o.stt = STT2(["speak english"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.language == "en" and made[-2:] == [("small.en", "en"), ("tiny.en", "en")]
+    assert o.tts.said[-2:] == ["One moment, switching to English.", "Okay, English it is."]
+    assert o.tts.langs[-1] == ("Okay, English it is.", "en")
+
+    o.stt = STT2(["dono bhasha"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.language == "auto" and made[-2:] == [("small", None), ("tiny", None)]
+    assert o.tts.said[-1] == "Theek hai, dono chalega."
+
+
+async def test_language_switch_same_model_only_sets_language(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="auto", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
+    await o.one_turn()
+    assert made == [] and o.stt.language == "hi" and o.partial_stt.language == "hi"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert {"language": "hi"} in saved
+
+
+async def test_language_switch_already_active_just_confirms(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="hi", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.stt.language = "hi"
+    o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"; o.partial_stt.language = "hi"
+    await o.one_turn()
+    assert made == [] and o.language == "hi"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+
+
+async def test_language_switch_without_factory_only_sets_language(monkeypatch):
+    saved = []
+    monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(["speak hindi"]),
+        brain=Brain(), tts=TTS3(), player=Player(),
+    )
+    await o.one_turn()
+    assert o.language == "hi" and o.stt.language == "hi" and o.stt.model_name == "small.en"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+
+
+async def test_stt_without_detailed_api_defaults_to_english():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+    await o.one_turn()
+    assert o._utterance_lang == "en"
+    assert o.brain.asked == ["tell me a joke"]
+
+
+async def test_announcements_speak_without_forced_lang():
+    o, *_ = build_lang([], mode="hi")
+    await o._deliver_announcement(("Timer done.", None))
+    assert o.tts.langs[-1] == ("Timer done.", None)
+
+
+async def test_hindi_voice_request_sets_hindi_voice(monkeypatch):
+    o, saved, _, ev = build_lang(["use a hindi voice"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_sarah" and o.tts.hindi_voice == "hf_alpha"
+    assert {"tts_hindi_voice": "hf_alpha"} in saved
+    assert o.tts.langs[-1] == ("Theek hai, ab main aise bolungi.", "hi")
+
+    o.stt = STT2(["use the omega voice"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hm_omega" and o.tts.voice == "af_sarah"
+    assert {"tts_hindi_voice": "hm_omega"} in saved
+    assert ("tool", {"summary": "Voice: Omega", "decision": "auto"}) in ev
+
+
+async def test_language_switch_load_failure_leaves_everything_untouched(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="en", monkeypatch=monkeypatch)
+    original_stt = o.stt
+    calls = []
+    def factory(model, language):
+        calls.append((model, language))
+        if len(calls) == 2:
+            raise RuntimeError("offline")   # main loaded, partial download failed
+        s = STT2([]); s.model_name = model; s.language = language; return s
+    o.stt_factory = factory
+    await o.one_turn()
+    assert calls == [("small", "hi"), ("tiny", "hi")]
+    assert o.stt is original_stt and o.stt.model_name == "small.en" and o.stt.language == "en"
+    assert o.partial_stt is None
+    assert o.language == "en" and saved == []
+    assert o.tts.said == ["Ek minute, Hindi load kar rahi hoon.", "Hindi load nahi ho paayi, baad mein try karo."]
+    assert o.tts.langs[-1][1] == "hi"
+    assert o.brain.asked == []
+
+
+async def test_language_switch_load_failure_english_line(monkeypatch):
+    o, saved, made, _ = build_lang(["speak english"], mode="hi", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"
+    def factory(model, language):
+        raise RuntimeError("disk full")
+    o.stt_factory = factory
+    await o.one_turn()
+    assert o.language == "hi" and saved == [] and o.stt.model_name == "small"
+    assert o.tts.said[-1] == "Couldn't switch language, check the log."

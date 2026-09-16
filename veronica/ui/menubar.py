@@ -115,7 +115,15 @@ class VeronicaApp(rumps.App):
         self._voice_items: dict[str, rumps.MenuItem] = {}
         self._speed_items: dict[str, rumps.MenuItem] = {}
         voice_menu = rumps.MenuItem("Voice")
+        # English voices, a separator, then the Hindi voices (picking one
+        # sets the voice Hindi replies use; the English voice is untouched).
         for vid in voices.VOICE_IDS:
+            name = voices.display_name(vid)
+            item = rumps.MenuItem(name, callback=self._pick_voice)
+            self._voice_items[name] = item
+            voice_menu.add(item)
+        voice_menu.add(None)
+        for vid in voices.HINDI_VOICE_IDS:
             name = voices.display_name(vid)
             item = rumps.MenuItem(name, callback=self._pick_voice)
             self._voice_items[name] = item
@@ -336,10 +344,13 @@ class VeronicaApp(rumps.App):
         # Runs on the 0.25 s _refresh timer too, so it must stay cheap and
         # tolerate no orchestrator (startup) or no tts on it.
         orch = getattr(self, "_orch", None)
-        current = getattr(getattr(orch, "tts", None), "voice", None)
-        current_name = voices.display_name(current) if current else None
+        tts = getattr(orch, "tts", None)
+        checked = {
+            voices.display_name(v)
+            for v in (getattr(tts, "voice", None), getattr(tts, "hindi_voice", None)) if v
+        }
         for name, item in self._voice_items.items():
-            item.state = 1 if name == current_name else 0
+            item.state = 1 if name in checked else 0
 
     # -- HUD orb click -> menu ---------------------------------------------
     def _build_popup_menu(self):
@@ -372,13 +383,18 @@ class VeronicaApp(rumps.App):
 
         self._refresh_voice_menu()
         voice_menu = AppKit.NSMenu.alloc().initWithTitle_("Voice")
-        for name, rumps_item in self._voice_items.items():
-            voice_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(name, "onPickVoice:", "")
-            voice_item.setTarget_(handler)
-            voice_item.setRepresentedObject_(name)
-            voice_item.setState_(1 if rumps_item.state else 0)
-            voice_menu.addItem_(voice_item)
-        voice_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        english = {voices.display_name(v) for v in voices.VOICE_IDS}
+        hindi = {voices.display_name(v) for v in voices.HINDI_VOICE_IDS}
+        for group in (english, hindi):
+            for name, rumps_item in self._voice_items.items():
+                if name not in group:
+                    continue
+                voice_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(name, "onPickVoice:", "")
+                voice_item.setTarget_(handler)
+                voice_item.setRepresentedObject_(name)
+                voice_item.setState_(1 if rumps_item.state else 0)
+                voice_menu.addItem_(voice_item)
+            voice_menu.addItem_(AppKit.NSMenuItem.separatorItem())
         for title in self._speed_items:
             speed_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "onSpeed:", "")
             speed_item.setTarget_(handler)

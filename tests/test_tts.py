@@ -54,3 +54,30 @@ def test_synth_passes_current_voice_and_speed(monkeypatch, tmp_path):
     s.speed = 1.3
     s.synth("hi")
     assert calls == [("hi", "am_adam", 1.3, "en-us")]
+
+
+def test_synth_picks_hindi_voice_for_devanagari_or_lang(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeKokoro:
+        def __init__(self, *a):
+            pass
+
+        def create(self, text, voice, speed, lang):
+            calls.append((voice, lang))
+            return [0.0], 24000
+
+    monkeypatch.setattr(Synthesizer, "_kokoro_cls", FakeKokoro)
+    s = Synthesizer("af_sarah", tmp_path)
+    assert s.hindi_voice == "hf_alpha"
+    s.synth("नमस्ते")
+    assert calls[-1] == ("hf_alpha", "hi")
+    s.synth("kal teen baje", lang="hi")
+    assert calls[-1] == ("hf_alpha", "hi")
+    s.synth("hello", lang="en")
+    assert calls[-1] == ("af_sarah", "en-us")
+    s.synth("hello")
+    assert calls[-1] == ("af_sarah", "en-us")
+    s.hindi_voice = "hm_omega"
+    s.synth("ठीक है")
+    assert calls[-1] == ("hm_omega", "hi")

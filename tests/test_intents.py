@@ -4,6 +4,7 @@ from veronica.brain.intents import (
     is_stop_dictation,
     match_dictation_intent,
     match_intent,
+    match_language_intent,
     match_memory_intent,
     match_music_intent,
     match_note_intent,
@@ -321,3 +322,44 @@ def test_parse_clock_time(s, expected):
 ])
 def test_match_proactive_intent(text, expected):
     assert match_proactive_intent(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("bas karo", "end"), ("theek hai bas", "end"), ("chup", "end"), ("chup raho", "end"),
+    ("band karo", "end"), ("ruko", "end"), ("ruk jao", "end"),
+    ("mute karo", "mute"), ("awaaz band karo", "mute"), ("unmute karo", "unmute"), ("awaaz chalu karo", "unmute"),
+    ("chhoti ho jao", "hud_mini"), ("chota karo", "hud_mini"), ("badi ho jao", "hud_full"), ("bada karo", "hud_full"),
+    ("quit karo", "quit"), ("band ho jao", "quit"),
+    ("Veronica, bas karo please", "end"),
+    # bare "bas" is too common mid-sentence ("bas ek minute") to end the turn
+    ("bas", None), ("bas ek minute", None),
+    # Devanagari (pinned hi mode)
+    ("बस", "end"), ("बस करो", "end"), ("चुप", "end"), ("रुको", "end"), ("बंद करो", "end"), ("बस करो।", "end"),
+    ("म्यूट करो", "mute"), ("आवाज़ बंद करो", "mute"), ("अनम्यूट करो", "unmute"), ("आवाज़ चालू करो", "unmute"),
+])
+def test_hinglish_local_intents(text, expected):
+    assert match_intent(text) == expected
+
+
+def test_normalize_keeps_devanagari_and_strips_danda():
+    assert normalize("समय क्या है?") == "समय क्या है"
+    assert normalize("बस करो।") == "बस करो"
+    assert normalize("आवाज़ बंद करो") == "आवाज़ बंद करो"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("speak hindi", "hi"), ("talk in hindi", "hi"), ("switch to hindi", "hi"), ("hindi mein bolo", "hi"),
+    ("hindi me bolo", "hi"), ("hindi mein baat karo", "hi"),
+    ("speak english", "en"), ("talk in english", "en"), ("switch to english", "en"), ("english mein bolo", "en"),
+    ("english me bolo", "en"), ("angrezi mein bolo", "en"),
+    ("understand both", "auto"), ("both languages", "auto"), ("hindi and english", "auto"), ("hindi aur english", "auto"),
+    ("auto language", "auto"), ("dono bhasha", "auto"),
+    ("what is hindi for hello", None), ("translate this to hindi", None), ("speak faster", None),
+])
+def test_match_language_intent(text, expected):
+    assert match_language_intent(text) == expected
+
+
+def test_clause_split_on_danda():
+    assert match_intent("ठीक है। बस।") == "end"
+    assert match_intent("मीटिंग बंद करो।") is None

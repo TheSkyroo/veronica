@@ -1,8 +1,17 @@
 import re
 
-# sentence ends at . ! ? followed by whitespace and uppercase (so "3.14" and "p.m." don't split)
-_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+# sentence ends at . ! ? or the Devanagari danda (।) followed by whitespace and
+# an uppercase/digit/Devanagari char (so "3.14" and "p.m." don't split)
+_END = re.compile(r"(?<=[.!?।])\s+(?=[A-Z0-9ऀ-ॿ])")
 _MD = re.compile(r"[*_`#]+")
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def has_devanagari(text: str) -> bool:
+    """True if `text` contains any Devanagari (U+0900-U+097F). Lives here,
+    not in speech.tts, so callers that only need the script check (the
+    orchestrator) don't import kokoro_onnx for it."""
+    return bool(_DEVANAGARI.search(text or ""))
 
 
 class SentenceSplitter:
@@ -23,7 +32,7 @@ class SentenceSplitter:
 
         # Check if buffer ends with sentence-ending punctuation (at end of current input)
         stripped_buf = self._buf.rstrip()
-        if stripped_buf and stripped_buf[-1] in '.!?':
+        if stripped_buf and stripped_buf[-1] in '.!?।':
             result.append(stripped_buf)
             self._buf = ""
 

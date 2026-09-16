@@ -41,10 +41,13 @@ class Settings(BaseSettings):
     )
 
     # speech
+    language: str = "en"
     whisper_model: str = "small.en"
+    whisper_multilingual_model: str = "small"
     kokoro_voice: str = "af_sarah"
     partial_stt: bool = True
     partial_stt_model: str = "tiny.en"
+    partial_stt_multilingual_model: str = "tiny"
     partial_hop_s: float = 0.7
 
     # chimes (Hz)
