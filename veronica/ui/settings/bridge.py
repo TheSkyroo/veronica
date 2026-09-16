@@ -58,6 +58,10 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
 
 
+def _inline(fn: Callable[[], None]) -> None:
+    fn()
+
+
 def _thread(fn: Callable[[], None]) -> None:
     threading.Thread(target=fn, name="veronica-settings", daemon=True).start()
 
@@ -91,6 +95,7 @@ class SettingsBridge:
         repo: Path,
         run_thread: Callable[[Callable[[], None]], None] = _thread,
         open_path: Callable[[Path | str], None] = _open_path,
+        marshal: Callable[[Callable[[], None]], None] = _inline,
     ) -> None:
         self._settings = settings
         self._get_orch = get_orch
@@ -105,7 +110,13 @@ class SettingsBridge:
         self._repo = repo
         self._run_thread = run_thread
         self._open_path = open_path
+        self._marshal = marshal
         self.restart_required = False
+        #: Set by the window to push a fresh `get_state()` to JS after any
+        #: change. It may fire from the update worker thread (a failed
+        #: update) or from whichever thread ran `check_update`, so every call
+        #: is routed through `marshal` — the window passes something that
+        #: hops to the AppKit main thread; the default runs inline.
         self.on_state_changed: Callable[[dict], None] | None = None
         self._update_status = None          # last UpdateStatus from check_update
         self._update_error: str | None = None
@@ -138,12 +149,22 @@ class SettingsBridge:
             return _fail(str(e) or e.__class__.__name__)
 
     def _push(self) -> None:
-        if self.on_state_changed is None:
+        cb = self.on_state_changed
+        if cb is None:
             return
         try:
-            self.on_state_changed(self.get_state())
+            state = self.get_state()
         except Exception:
-            log.exception("on_state_changed failed")
+            log.exception("get_state failed")
+            return
+
+        def deliver() -> None:
+            try:
+                cb(state)
+            except Exception:
+                log.exception("on_state_changed failed")
+
+        self._marshal(deliver)
 
     # -- state -------------------------------------------------------------------
     def _setting(self, name: str, overrides: dict, s) -> Any:
@@ -160,6 +181,11 @@ class SettingsBridge:
             return pro.schedule
         return proactive.load_schedule(self._prefs.load)
 
+    def _cached_build_info(self) -> dict:
+        if self._build_info is None:
+            self._build_info = dict(self._version.build_info())
+        return self._build_info
+
     def get_state(self) -> dict:
         orch = self._get_orch()
         saved = self._prefs.load() or {}
@@ -172,17 +198,17 @@ class SettingsBridge:
 
         if orch is not None:
             language = getattr(orch, "language", None) or s.language
-            voice, hindi_voice = orch.tts.voice, orch.tts.hindi_voice
-            speed = float(orch.tts.speed)
+            tts = getattr(orch, "tts", None)
+            voice = getattr(tts, "voice", None) or voices.DEFAULT_VOICE
+            hindi_voice = getattr(tts, "hindi_voice", None) or voices.DEFAULT_HINDI_VOICE
+            speed = float(getattr(tts, "speed", None) or voices.DEFAULT_SPEED)
         else:
             language = saved.get("language") or s.language
             voice = saved.get("tts_voice") or voices.DEFAULT_VOICE
             hindi_voice = saved.get("tts_hindi_voice") or voices.DEFAULT_HINDI_VOICE
             speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
         sched = self._schedule(orch)
-        if self._build_info is None:
-            self._build_info = dict(self._version.build_info())
-        info = self._build_info
+        info = self._cached_build_info()
         if self._update_error:
             update = {"available": True, "detail": self._update_error}
         elif self._update_status is not None:
@@ -264,6 +290,16 @@ class SettingsBridge:
     def _orch_or_none(self):
         return self._get_orch()
 
+    @staticmethod
+    async def _with_player_reset(orch, coro) -> None:
+        """The orchestrator's own dispatch resets the player before a turn
+        (the turns don't do it themselves); mirror that, as the menubar's
+        `_voice_action` does, so in-flight speech is cut before the reply."""
+        reset = getattr(getattr(orch, "player", None), "reset", None)
+        if reset is not None:
+            reset()
+        await coro
+
     def _set_language(self, value) -> dict:
         mode = str(value or "").strip().lower()
         if mode not in LANGUAGE_MODES:
@@ -271,7 +307,9 @@ class SettingsBridge:
         orch = self._orch_or_none()
         if orch is None:
             return _fail(STARTING_UP)
-        self._run_on_loop(orch._language_turn(mode))
+        if getattr(orch, "language", None) == mode:
+            return _ok()   # already there: don't reload or re-announce
+        self._run_on_loop(self._with_player_reset(orch, orch._language_turn(mode)))
         return _ok()
 
     def _set_start_at_login(self, value) -> dict:
@@ -291,6 +329,10 @@ class SettingsBridge:
         orch = self._orch_or_none()
         if orch is None:
             return _fail(STARTING_UP)
+        # The menubar persists hud_mode when it handles the event, but that
+        # happens on a later _drain tick — save first so the state we push
+        # right after this already shows the new mode.
+        self._prefs.save({"hud_mode": mode})
         orch._emit("hud", {"mode": mode})
         return _ok()
 
@@ -306,7 +348,7 @@ class SettingsBridge:
         orch = self._orch_or_none()
         if orch is None:
             return _fail(STARTING_UP)
-        self._run_on_loop(orch._voice_turn(("voice", name)))
+        self._run_on_loop(self._with_player_reset(orch, orch._voice_turn(("voice", name))))
         return _ok()
 
     def _set_speed(self, value) -> dict:
@@ -345,7 +387,12 @@ class SettingsBridge:
         coerced = config.coerce_setting(name, value)
         orch = self._orch_or_none()
         if field.restart:
-            self._prefs.save_settings_override(name, _jsonable(coerced))
+            # The process keeps its current value, but run the new one
+            # through Settings' validation first: load_settings drops invalid
+            # overrides silently at startup, which would lose the change.
+            probe = (orch.s if orch is not None else self._settings).model_copy()
+            setattr(probe, name, coerced)   # ValidationError (a ValueError) on bad input
+            self._prefs.save_settings_override(name, _jsonable(getattr(probe, name)))
             self.restart_required = True
             return _ok(restart_required=True)
         if orch is None:
@@ -362,7 +409,7 @@ class SettingsBridge:
         if lang is None:
             lang = "hi" if getattr(orch, "language", "en") == "hi" else "en"
         lang = "hi" if str(lang).lower() == "hi" else "en"
-        self._run_on_loop(orch.say(VOICE_TEST[lang], lang="hi" if lang == "hi" else None))
+        self._run_on_loop(self._with_player_reset(orch, orch.say(VOICE_TEST[lang], lang="hi" if lang == "hi" else None)))
         return _ok()
 
     # -- history ----------------------------------------------------------------------
@@ -387,7 +434,7 @@ class SettingsBridge:
     # -- updates ------------------------------------------------------------------------
     def check_update(self) -> dict:
         try:
-            status = self._updater.check(self._repo)
+            status = self._updater.check(self._repo, info=self._cached_build_info())
         except Exception as e:  # noqa: BLE001 — network/git trouble becomes a message
             log.warning("update check failed: %s", e)
             return _fail(f"Couldn't check: {e}")

@@ -4,6 +4,7 @@ and `run_thread` runs its function inline so the update flow is synchronous."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -581,3 +582,119 @@ def test_bridge_imports_no_appkit():
         elif isinstance(node, ast.ImportFrom):
             names.add(node.module or "")
     assert not {n for n in names if n.split(".")[0] in ("AppKit", "WebKit", "objc", "Foundation", "rumps")}
+
+
+# -- fix round 1 ----------------------------------------------------------------------
+def test_state_push_goes_through_marshal():
+    """The update worker pushes state from its thread; every push must be
+    handed to `marshal` so the window can hop to the main thread."""
+    delivered: list = []
+    marshalled: list = []
+
+    def marshal(fn):
+        marshalled.append(fn)
+        fn()
+
+    threads: list[str] = []
+
+    def run_thread(fn):
+        t = threading.Thread(target=fn)
+        t.start()
+        t.join()
+
+    h = Harness(updater=FakeUpdater(status=_available(), fail=UpdateError("nope")))
+    h.bridge._marshal = marshal
+    h.bridge._run_thread = run_thread
+    h.bridge.on_state_changed = lambda st: (delivered.append(st), threads.append(threading.current_thread().name))
+    h.bridge.check_update()          # pushes (from this thread) and caches the status
+    assert len(marshalled) == 1
+    h.bridge.update_now()
+    assert len(marshalled) == 2 and len(delivered) == 2
+    assert threads[-1] != threading.main_thread().name  # the fake marshal ran it inline, on the worker
+    h.bridge.set("listening", "followup_window_s", 5)
+    assert len(marshalled) == 3
+
+
+def test_marshal_is_a_constructor_kwarg(h):
+    calls = []
+    b = SettingsBridge(
+        settings=h.settings, get_orch=lambda: h.orch, store=h.store, run_on_loop=run_on_loop,
+        prefs=h.prefs, login_item=h.login, version=FAKE_VERSION, updater=h.updater,
+        relaunch=lambda: True, bundle_path=None, repo=Path("/repo"), run_thread=run_thread,
+        marshal=lambda fn: calls.append(fn),
+    )
+    b.on_state_changed = lambda st: None
+    b.set("listening", "followup_window_s", 5)
+    assert len(calls) == 1
+
+
+def test_set_hud_mode_persists_before_push(h):
+    h.bridge.set("general", "hud_mode", "mini")
+    assert {"hud_mode": "mini"} in h.prefs.saved
+    assert h.bridge.get_state()["general"]["hud_mode"] == "mini"
+    assert h.states[-1]["general"]["hud_mode"] == "mini"
+
+
+def test_restart_setting_coercion_failure_is_a_message(h):
+    res = h.bridge.set("listening", "wake_window_s", "wide")
+    assert res["ok"] is False and res["message"]
+    assert h.prefs.overrides == []
+    assert h.bridge.restart_required is False
+
+
+def test_restart_setting_pydantic_rejection_is_a_message(h, monkeypatch):
+    """Defence in depth: a value coerce_setting lets through but Settings
+    rejects must never reach prefs.json (load_settings would drop it at
+    startup and the user would silently lose the change)."""
+    from veronica import config as cfg
+    from veronica.ui.settings import bridge as mod
+
+    # sample_rate is an int field; expose it as a free-text "str" editable so
+    # coercion passes junk through to pydantic.
+    monkeypatch.setitem(cfg.EDITABLE_SETTINGS, "sample_rate", cfg.EditableField("str", "Sample rate"))
+    monkeypatch.setitem(mod.SETTING_SECTIONS, "listening", mod.SETTING_SECTIONS["listening"] + ("sample_rate",))
+    res = h.bridge.set("listening", "sample_rate", "loud")
+    assert res["ok"] is False and "integer" in res["message"].lower()
+    assert h.prefs.overrides == []
+    assert h.bridge.restart_required is False
+    assert h.orch.s.sample_rate == 16000
+    assert h.bridge.set("listening", "sample_rate", "22050")["ok"]
+    assert h.prefs.overrides == [("sample_rate", 22050)]   # the validated value, not the raw string
+
+
+def test_set_language_same_mode_is_noop(h):
+    h.orch.language = "hi"
+    res = h.bridge.set("general", "language", "hi")
+    assert res["ok"] and h.orch.calls == []
+    assert len(h.states) == 1
+
+
+def test_orchestrator_turns_reset_player_first(h):
+    resets: list[str] = []
+    h.orch.player = SimpleNamespace(reset=lambda: resets.append("reset"))
+    h.bridge.set("general", "language", "hi")
+    h.bridge.set("voice", "voice", "George")
+    h.bridge.test_voice()
+    assert resets == ["reset"] * 3
+    assert [c[0] for c in h.orch.calls] == ["language", "voice", "say"]
+
+
+def test_orchestrator_without_player_still_works(h):
+    assert not hasattr(h.orch, "player")
+    assert h.bridge.set("voice", "voice", "George")["ok"]
+
+
+def test_state_tolerates_partial_tts(h):
+    h.orch.tts = SimpleNamespace()
+    st = h.bridge.get_state()
+    assert st["voice"]["voice"] == "af_sarah"
+    assert st["voice"]["hindi_voice"] == "hf_alpha"
+    assert st["voice"]["speed"] == 1.0
+
+
+def test_check_update_passes_cached_build_info(h):
+    seen = []
+    h.updater.check = lambda repo, run=None, info=None: (seen.append(info), h.updater.status)[1]
+    h.bridge.get_state()   # primes the cache
+    h.bridge.check_update()
+    assert seen == [FAKE_VERSION.build_info()]
