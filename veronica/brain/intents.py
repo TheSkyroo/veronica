@@ -57,6 +57,12 @@ SCREEN_PHRASES = frozenset({
     "what does this error say", "what does this say",
 })
 
+# Romanized-Hindi (Hinglish) forms of the local intents above. Filled in by
+# the Hinglish intents work; quick.is_hinglish_phrase() unions this with its
+# own phrase tables so a whole-utterance Hinglish command is treated as
+# Hindi even when the transcriber labels it "en".
+HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset()
+
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"
 
