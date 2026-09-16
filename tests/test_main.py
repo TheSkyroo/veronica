@@ -87,6 +87,16 @@ async def test_build_orchestrator_defaults_without_voice_prefs(monkeypatch, tmp_
     assert orch.tts.speed == 1.0
 
 
+async def test_build_orchestrator_ignores_unknown_voice_pref(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "zz_nobody"})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == Settings().kokoro_voice
+
+
 async def test_build_orchestrator_ignores_bad_speed_pref(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrain)

@@ -60,7 +60,9 @@ def test_build_app_structure_and_plist(tmp_path):
     assert plist["LSUIElement"] is True
     assert plist["LSMinimumSystemVersion"] == "13.0"
     assert "NSMicrophoneUsageDescription" in plist
-    assert "NSAppleEventsUsageDescription" in plist
+    desc = plist["NSAppleEventsUsageDescription"]
+    for app_name in ("Calendar", "Mail", "Reminders", "Notes", "Music", "Chrome", "Safari", "System Events"):
+        assert app_name in desc
     assert plist["NSHighResolutionCapable"] is True
     assert plist["CFBundleVersion"] == plist["CFBundleShortVersionString"]
 

@@ -203,7 +203,9 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
 **System Settings → Privacy & Security**:
 
 - **Microphone** — wake word and voice commands (asked automatically on first run).
-- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify/Chrome/Safari (asked automatically the first time each is used).
+- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used);
+  **Google Chrome** and **Safari** for the browser tools; **System Events** for browser detection (which browser is
+  in front) and for dictation's typing.
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
 - **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
   asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if
@@ -224,7 +226,7 @@ Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a t
 one is already committed, so this is optional.)
 
 On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail,
-Reminders, Notes, Music, or Spotify it asks for **Automation** access to that app; the first `screenshot` prompts
+Reminders, Notes, Music, Spotify, Chrome, Safari or System Events it asks for **Automation** access to that app; the first `screenshot` prompts
 for **Screen Recording** — approve all of these (System Settings → Privacy & Security). **Accessibility** (for
 push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
 Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is

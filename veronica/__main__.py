@@ -34,7 +34,11 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # Voice/speed chosen at runtime ("use a british voice", "speak faster")
     # outlive the process via prefs.json; Settings only supplies the default.
     saved = prefs.load()
-    saved_voice = saved.get("tts_voice") or s.kokoro_voice
+    saved_voice = saved.get("tts_voice")
+    if saved_voice not in voices.VOICE_IDS:
+        if saved_voice:
+            logging.getLogger("veronica").warning("unknown saved voice %r; using %s", saved_voice, s.kokoro_voice)
+        saved_voice = s.kokoro_voice
     try:
         saved_speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
     except (TypeError, ValueError):
