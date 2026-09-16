@@ -10,12 +10,16 @@ import rumps
 from veronica.__main__ import build_orchestrator
 from veronica.audio.hotkey import HotkeyMonitor
 from veronica.config import settings
+from veronica.speech import voices
 from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
 
 ACCESSIBILITY_PANE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
+
+# Voice submenu speed entries: menu title -> Orchestrator._voice_turn("speed", arg).
+SPEED_TITLES = {"Faster": "faster", "Slower": "slower", "Normal speed": "normal"}
 
 
 def _make_menu_handler_class():
@@ -56,6 +60,15 @@ def _make_menu_handler_class():
             item = self._app._login_item_item
             if item.callback is not None:
                 self._app.toggle_login_item(item)
+
+        # The popup's voice/speed items carry the rumps item's title as
+        # their representedObject, so the handler forwards to the exact
+        # same rumps MenuItem (and callback) the menu bar uses.
+        def onPickVoice_(self, sender):
+            self._app._pick_voice(self._app._voice_items[sender.representedObject()])
+
+        def onSpeed_(self, sender):
+            self._app._speed(self._app._speed_items[sender.representedObject()])
 
         def onQuit_(self, _sender):
             self._app.quit(None)
@@ -99,8 +112,22 @@ class VeronicaApp(rumps.App):
         self._quitting = False
         hud_mode_item = rumps.MenuItem("HUD: Full", callback=self.toggle_hud_mode)
         login_item_item = self._make_login_item()
+        self._voice_items: dict[str, rumps.MenuItem] = {}
+        self._speed_items: dict[str, rumps.MenuItem] = {}
+        voice_menu = rumps.MenuItem("Voice")
+        for vid in voices.VOICE_IDS:
+            name = voices.display_name(vid)
+            item = rumps.MenuItem(name, callback=self._pick_voice)
+            self._voice_items[name] = item
+            voice_menu.add(item)
+        voice_menu.add(None)
+        for title in SPEED_TITLES:
+            item = rumps.MenuItem(title, callback=self._speed)
+            self._speed_items[title] = item
+            voice_menu.add(item)
+        self._voice_menu = voice_menu
         menu_items = [
-            rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, login_item_item, None,
+            rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, voice_menu, login_item_item, None,
         ]
         self._hud_mode_item = hud_mode_item
         self._login_item_item = login_item_item
@@ -177,6 +204,7 @@ class VeronicaApp(rumps.App):
             self.title = "V ✕"
         else:
             self.title = f"V {ICONS.get(self._state, '?')}"
+        self._refresh_voice_menu()
 
     def _drain(self, _timer) -> None:
         # If the backlog has grown past 1000 (the HUD/UI thread falling
@@ -269,10 +297,54 @@ class VeronicaApp(rumps.App):
             if self._muted:
                 orch.player.stop()
 
+    # -- Voice submenu ------------------------------------------------------------
+    def _schedule(self, coro) -> None:
+        """Run `coro` on the orchestrator's background loop from the AppKit
+        main thread (or, under test with a loop that isn't running yet,
+        queue it as a task for the next run_until_complete)."""
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            coro.close()
+            return
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        else:
+            loop.create_task(coro)
+
+    def _voice_action(self, action: tuple[str, str]) -> None:
+        orch = getattr(self, "_orch", None)
+        if orch is None:
+            return
+
+        async def _turn():
+            # The orchestrator's own dispatch resets the player before
+            # _voice_turn (it doesn't do so itself), so mirror that here:
+            # cut off any in-flight speech and confirm in the new voice.
+            orch.player.reset()
+            await orch._voice_turn(action)
+
+        self._schedule(_turn())
+
+    def _pick_voice(self, item: rumps.MenuItem) -> None:
+        self._voice_action(("voice", item.title.lower()))
+        self._refresh_voice_menu()
+
+    def _speed(self, item: rumps.MenuItem) -> None:
+        self._voice_action(("speed", SPEED_TITLES[item.title]))
+
+    def _refresh_voice_menu(self) -> None:
+        # Runs on the 0.25 s _refresh timer too, so it must stay cheap and
+        # tolerate no orchestrator (startup) or no tts on it.
+        orch = getattr(self, "_orch", None)
+        current = getattr(getattr(orch, "tts", None), "voice", None)
+        current_name = voices.display_name(current) if current else None
+        for name, item in self._voice_items.items():
+            item.state = 1 if name == current_name else 0
+
     # -- HUD orb click -> menu ---------------------------------------------
     def _build_popup_menu(self):
-        """Return an NSMenu mirroring the 4 menu bar items (Mute, HUD
-        Mini/Full, Start at Login, Quit). Prefers rumps' own live NSMenu
+        """Return an NSMenu mirroring the menu bar items (Mute, HUD
+        Mini/Full, Voice submenu, Start at Login, Quit). Prefers rumps' own live NSMenu
         (`self.menu._menu`, already wired and kept in sync by rumps) so the
         popup always matches the real menu bar exactly; falls back to
         building a fresh one (with its own tiny target/action handler) when
@@ -297,6 +369,24 @@ class VeronicaApp(rumps.App):
             self._hud_mode_item.title, "onToggleHud:", "")
         hud_item.setTarget_(handler)
         menu.addItem_(hud_item)
+
+        self._refresh_voice_menu()
+        voice_menu = AppKit.NSMenu.alloc().initWithTitle_("Voice")
+        for name, rumps_item in self._voice_items.items():
+            voice_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(name, "onPickVoice:", "")
+            voice_item.setTarget_(handler)
+            voice_item.setRepresentedObject_(name)
+            voice_item.setState_(1 if rumps_item.state else 0)
+            voice_menu.addItem_(voice_item)
+        voice_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        for title in self._speed_items:
+            speed_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "onSpeed:", "")
+            speed_item.setTarget_(handler)
+            speed_item.setRepresentedObject_(title)
+            voice_menu.addItem_(speed_item)
+        voice_parent = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Voice", None, "")
+        voice_parent.setSubmenu_(voice_menu)
+        menu.addItem_(voice_parent)
 
         login_item_ = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             self._login_item_item.title, "onToggleLogin:", "")
