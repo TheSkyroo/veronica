@@ -155,6 +155,7 @@ class Recorder:
         started = False
         onset_from_preroll = False
         waited = 0
+        elapsed = 0
         frames_since_partial = 0
         frame_idx = -1
 
@@ -171,6 +172,16 @@ class Recorder:
         try:
             for frame in _all_frames():
                 frame_idx += 1
+                if frame_idx >= preroll_frame_total:
+                    # Hard cap on live-frame time, independent of started/
+                    # reset state: repeated false onsets (e.g. a bursty noise
+                    # source) each get their own wait budget via the reset
+                    # below, which can otherwise inflate the *real* wall-clock
+                    # wait far past max_s. elapsed counts every live frame no
+                    # matter what state we're in, so this always fires.
+                    elapsed += 1
+                    if wait_frames is not None and elapsed >= wait_frames + max_frames:
+                        return None
                 if self._stop.is_set():
                     self._stop.clear()
                     return None

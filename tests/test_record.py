@@ -258,3 +258,33 @@ async def test_skip_ms_drops_leading_live_frames(monkeypatch):
     assert pcm is not None
     assert len(pcm) == FRAME * 9   # only the real speech (6) + 3 silence to endpoint
     assert np.all(pcm[: FRAME * 6] == 1000)
+
+
+async def test_repeated_false_onsets_bounded_by_hard_wait_cap(monkeypatch):
+    """Repeated false onsets (e.g. a bursty noise source alternating short
+    speech bursts with gaps) must not let the reset-and-keep-waiting logic
+    inflate the real wait far past max_s: a hard cap on total live-frame
+    elapsed time (wait_frames + max_frames) always wins, regardless of
+    started/reset state."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(
+        vad_silence_ms=90, min_speech_ms=150, max_utterance_s=1,
+    )
+    fm = s.frame_ms
+    wait_frames = 1000 // fm       # max_s=1
+    max_frames = s.max_utterance_s * 1000 // fm
+    consumed = []
+
+    def infinite_burst_gap():
+        while True:
+            for _ in range(2):
+                consumed.append(1)
+                yield np.full(FRAME, 1000, dtype=np.int16).tobytes()
+            for _ in range(4):
+                consumed.append(1)
+                yield np.zeros(FRAME, dtype=np.int16).tobytes()
+
+    r = Recorder(s, frames=infinite_burst_gap)
+    pcm = await r.capture(max_s=1)
+    assert pcm is None
+    assert len(consumed) <= wait_frames + max_frames + 1

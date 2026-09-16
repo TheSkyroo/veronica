@@ -194,6 +194,10 @@ class Brain:
                         error_text = " ".join(
                             str(part) for part in (msg.result, errors) if part
                         ).lower()
+                        # Substring heuristic, not a structured error code from the
+                        # SDK — a false positive here just resets the session
+                        # (loses conversation history) rather than mis-handling
+                        # a genuinely different error, so it's a safe bias.
                         if any(
                             marker in error_text
                             for marker in (
