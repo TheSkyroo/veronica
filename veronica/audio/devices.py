@@ -26,14 +26,71 @@ _DEFAULT_INPUT = int.from_bytes(b"dIn ", "big")          # kAudioHardwarePropert
 _SCOPE_GLOBAL = int.from_bytes(b"glob", "big")           # kAudioObjectPropertyScopeGlobal
 _ELEMENT_MAIN = 0
 
-# Hook the orchestrator/Recorder sets so a PortAudio re-init never runs
-# while a capture stream is open (Recorder registers `lambda: self._capturing`).
-busy: Callable[[], bool] = lambda: False
+# -- shared state -----------------------------------------------------------
+# Kept at module level (not per InputWatch) because wake readers come and go:
+# WhisperWake/WakeWord close their frame generator every time wait() returns,
+# so a per-reader baseline would miss any change that happens between readers
+# (e.g. AirPods connecting during a capture/turn).
+last_input_id: int | None = None      # most recent poll
+initialised_for: int | None = None    # default input id PortAudio was last (re)initialised for
+pending: bool = False                 # last_input_id != initialised_for: a refresh is owed
+generation: int = 0                   # bumped by every refresh_portaudio(); streams opened
+                                      # under an older generation are dead (Pa_Terminate closes them)
+_baselined = False
 
 # Held while PortAudio is re-initialised and while any stream is being
-# opened, so a re-init can't land between an open starting and the stream
-# being live (Pa_Terminate under a live stream is undefined behaviour).
+# opened or read, so a re-init can't land between an open starting and the
+# stream being live (Pa_Terminate under a live stream is undefined behaviour).
 refresh_lock = threading.RLock()
+
+
+def _never_busy() -> bool:
+    return False
+
+
+_busy_fn: Callable[[], bool] = _never_busy
+
+
+def register_busy(fn: Callable[[], bool]) -> None:
+    """Install the hook that says whether a capture stream is open (Recorder
+    registers `lambda: self._capturing`); a refresh is deferred while it's True."""
+    global _busy_fn
+    _busy_fn = fn
+
+
+def reset_busy() -> None:
+    global _busy_fn
+    _busy_fn = _never_busy
+
+
+def busy() -> bool:
+    return bool(_busy_fn())
+
+
+def reset() -> None:
+    """Forget all shared state (tests)."""
+    global last_input_id, initialised_for, pending, generation, _baselined
+    last_input_id = initialised_for = None
+    pending = False
+    generation = 0
+    _baselined = False
+    reset_busy()
+
+
+def observe(current: int | None) -> bool:
+    """Record a polled default input id. The first observation is the
+    baseline PortAudio was initialised for. Returns True when the id differs
+    from the previous observation; `pending` says whether a refresh is owed
+    (it clears itself if the device switches back)."""
+    global last_input_id, initialised_for, pending, _baselined
+    if not _baselined:
+        _baselined = True
+        last_input_id = initialised_for = current
+        return False
+    changed = current != last_input_id
+    last_input_id = current
+    pending = current != initialised_for
+    return changed
 
 
 class _PropertyAddress(ctypes.Structure):
@@ -85,6 +142,7 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
     first (used to close the persistent Player output stream — PortAudio
     must not be terminated under an open stream). Every step is attempted;
     errors are logged, never raised."""
+    global initialised_for, pending, generation
     with refresh_lock:
         if before is not None:
             try:
@@ -99,13 +157,18 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
             sd._initialize()
         except Exception:
             log.warning("PortAudio initialize failed", exc_info=True)
+        generation += 1
+        initialised_for = last_input_id
+        pending = False
 
 
 class InputWatch:
-    """Polls the default input device id at most every `poll_s` seconds.
-    `check(now)` is cheap enough to call per mic frame: it returns True (and
-    calls `on_change(old, new)`) only when the id differs from the last
-    observation; the very first observation never counts as a change."""
+    """Polls the default input device id at most every `poll_s` seconds and
+    feeds `observe()`. `check(now)` is cheap enough to call per mic frame: it
+    returns True (and calls `on_change(old, new)`) when the id differs from
+    the previous observation; the very first observation (module-wide, not
+    per instance) never counts as a change. Whether a refresh is owed is
+    `devices.pending`."""
 
     def __init__(
         self,
@@ -116,10 +179,11 @@ class InputWatch:
         self.poll_s = poll_s
         self._get_id = get_id
         self._on_change = on_change
-        self.last: int | None = None
-        self.previous: int | None = None   # id before the most recent change
-        self._seen = False
         self._next_poll: float | None = None
+
+    @property
+    def last(self) -> int | None:
+        return last_input_id
 
     def _poll(self) -> int | None:
         get = self._get_id if self._get_id is not None else default_input_id
@@ -133,14 +197,9 @@ class InputWatch:
         if self._next_poll is not None and now < self._next_poll:
             return False
         self._next_poll = now + self.poll_s
-        current = self._poll()
-        if not self._seen:
-            self._seen = True
-            self.last = current
+        old = last_input_id
+        if not observe(self._poll()):
             return False
-        if current == self.last:
-            return False
-        self.previous, self.last = self.last, current
         if self._on_change is not None:
-            self._on_change(self.previous, current)
+            self._on_change(old, last_input_id)
         return True

@@ -110,6 +110,48 @@ def test_input_watch_fires_once_per_change_not_on_first_observation():
     assert changes == [(5, 7), (7, None), (None, 5)]
     assert results == [False, False, True, False, False, True, False, True]
     assert w.last == 5
+    assert devices.initialised_for == 5 and devices.pending is False   # back on the baseline device
+
+
+def test_pending_tracks_difference_from_initialised_device():
+    ids = iter([5, 7, 7])
+    w = devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 7))
+    w.check(now=0.0)
+    assert devices.pending is False
+    w.check(now=1.0)
+    assert devices.pending is True and devices.last_input_id == 7 and devices.initialised_for == 5
+    w.check(now=2.0)                        # same device again: still owed, not a new change
+    assert devices.pending is True
+
+
+def test_baseline_is_module_wide_not_per_watch():
+    """A fresh InputWatch must not re-baseline: a change between two readers
+    is still a change."""
+    devices.InputWatch(poll_s=0.0, get_id=lambda: 5).check(now=0.0)
+    assert devices.InputWatch(poll_s=0.0, get_id=lambda: 7).check(now=0.0) is True
+    assert devices.pending is True
+
+
+def test_refresh_portaudio_adopts_last_seen_device_and_bumps_generation(monkeypatch):
+    monkeypatch.setattr(devices, "sd", FakeSD())
+    ids = iter([5, 7])
+    devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 7)).check(now=0.0)
+    devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 7)).check(now=0.0)
+    assert devices.pending is True and devices.generation == 0
+    devices.refresh_portaudio()
+    assert devices.pending is False and devices.initialised_for == 7 and devices.generation == 1
+
+
+def test_register_busy_and_reset():
+    assert devices.busy() is False
+    flag = {"v": True}
+    devices.register_busy(lambda: flag["v"])
+    assert devices.busy() is True
+    flag["v"] = False
+    assert devices.busy() is False
+    devices.register_busy(lambda: True)
+    devices.reset_busy()
+    assert devices.busy() is False
 
 
 def test_input_watch_rate_limits_polls_by_poll_s():
@@ -141,7 +183,3 @@ def test_input_watch_survives_getter_exception():
     w = devices.InputWatch(poll_s=0.0, get_id=boom)
     assert w.check(now=0.0) is False
     assert w.last is None
-
-
-def test_busy_default_is_false():
-    assert devices.busy() is False

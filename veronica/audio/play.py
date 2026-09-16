@@ -58,6 +58,9 @@ class Player:
         # chunk's own playback duration — a stalled/dead device must not hang
         # a caller forever. Exposed as an attribute so tests can shrink it.
         self._timeout_margin_s = DEFAULT_TIMEOUT_MARGIN_S
+        # Set by close_stream() (device refresh) so an interrupted play()
+        # logs the expected interruption at INFO rather than WARNING.
+        self._refreshed = False
 
     @property
     def is_playing(self) -> bool:
@@ -92,11 +95,15 @@ class Player:
                 # PortAudio's device table goes stale when the default output
                 # device changes mid-session (headphones plugged in, AirPods
                 # connected): opening a new stream then fails with an internal
-                # error until PortAudio is re-initialised. One retry.
+                # error until PortAudio is re-initialised. One retry, routed
+                # through devices.refresh_portaudio so the other registered
+                # Players close first and the generation bump tells the wake
+                # mic reader (which only reads under refresh_lock, so it is
+                # between reads right now) to reopen its stream. A Recorder
+                # capture open at this moment is not protected: its next
+                # read fails and that capture returns None.
                 log.warning("output stream open failed (%s); re-initialising PortAudio", e)
-                with contextlib.suppress(Exception):
-                    sd._terminate()
-                sd._initialize()
+                devices.refresh_portaudio(before=close_registered_streams)
                 stream = self._open_stream()
             try:
                 stream.start()
@@ -130,11 +137,13 @@ class Player:
         in flight sees the stream go inactive and returns early."""
         with self._lock:
             stream, self._stream = self._stream, None
+            self._refreshed = stream is not None
         if stream is not None:
             self._close_stream_obj(stream)
 
     def close(self) -> None:
         self.close_stream()
+        self._refreshed = False
 
     def _cb(self, outdata, frames, time_info, status) -> None:
         out = outdata[:, 0] if outdata.ndim > 1 else outdata
@@ -178,10 +187,15 @@ class Player:
         drained = await asyncio.to_thread(self._drained.wait, timeout)
         active = getattr(stream, "active", True)
         if not drained or not active:
-            log.warning(
-                "playback %s; closing and reopening the output stream",
-                "timed out" if not drained else "stream went inactive",
-            )
+            with self._lock:
+                refreshed, self._refreshed = self._refreshed, False
+            if refreshed and not active:
+                log.info("playback interrupted by an audio device refresh; reopening the output stream")
+            else:
+                log.warning(
+                    "playback %s; closing and reopening the output stream",
+                    "timed out" if not drained else "stream went inactive",
+                )
             with self._lock:
                 if self._stream is stream:
                     self._stream = None

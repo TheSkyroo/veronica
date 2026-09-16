@@ -43,7 +43,7 @@ class Recorder:
         # A PortAudio re-init (default input device changed) must wait until
         # this capture's RawInputStream is closed; each capture opens a fresh
         # stream, so it lands on the new device by itself afterwards.
-        devices.busy = lambda: self._capturing
+        devices.register_busy(lambda: self._capturing)
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000

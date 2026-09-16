@@ -563,6 +563,7 @@ def test_disarm_resets_arm_flags(monkeypatch):
 
 
 def test_recorder_registers_capture_in_flight_as_device_busy():
+    # (devices.reset() in the autouse fixture clears the hook between tests)
     from veronica.audio import devices
 
     r = Recorder(Settings(), frames=lambda: iter([]))

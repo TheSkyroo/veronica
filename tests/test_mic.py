@@ -72,7 +72,7 @@ def test_mic_frames_without_watch_opens_once_and_stops_thread(fake_sd):
 
 
 def test_mic_frames_reopens_stream_when_input_device_changes(fake_sd, caplog):
-    ids = iter([1, 1, 2])
+    ids = iter([1, 1, 1, 2])            # baseline at start, then per frame
     watch = devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 2))
     before = []
     with caplog.at_level(logging.INFO, logger="veronica.audio"):
@@ -84,6 +84,7 @@ def test_mic_frames_reopens_stream_when_input_device_changes(fake_sd, caplog):
     assert fake_sd.streams[0].closed
     assert before == [1]
     assert "input device changed (1 -> 2); reopening mic" in caplog.text
+    assert devices.pending is False and devices.initialised_for == 2
     # frames keep flowing through the same generator: the new stream's
     # counter restarts at 1, and nothing was dropped from the old one.
     assert got[:3] == [(i).to_bytes(4, "little") * 320 for i in (1, 2, 3)]
@@ -99,7 +100,8 @@ def test_mic_frames_defers_reopen_while_capture_in_flight(fake_sd, monkeypatch, 
         gen = mic.mic_frames(Settings(), 1280, "wake", watch=watch)
         _drain(gen, 6)
         assert fake_sd.calls == ["open"]                 # change seen but not acted on
-        assert "deferring device refresh: capture in flight" in caplog.text
+        assert devices.pending is True
+        assert caplog.text.count("deferring device refresh: capture in flight") == 1   # once, not per frame
         busy["v"] = False
         _drain(gen, 6)
         gen.close()
@@ -136,3 +138,71 @@ def test_mic_frames_reports_backlog(fake_sd):
     assert seen[0]() > 0            # reader ran ahead while we stalled
     gen.close()
     assert len(seen) == 2 and seen[1]() == 0
+
+
+def test_change_seen_with_no_reader_refreshes_before_first_open(fake_sd, caplog):
+    """The watch state is module-level: a device change observed while no
+    reader is alive (between wait() calls) is applied by the next reader
+    before it opens its first stream."""
+    ids = iter([1, 2])
+    devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 2)).check(now=0.0)   # baseline 1
+    assert devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 2)).check(now=1.0) is True
+    assert devices.pending is True
+    with caplog.at_level(logging.INFO, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake", watch=devices.InputWatch(poll_s=0.0, get_id=lambda: 2))
+        _drain(gen, 3)
+        gen.close()
+    time.sleep(0.02)
+    assert fake_sd.calls == ["terminate", "initialize", "open"]
+    assert "input device changed (1 -> 2); reopening mic" in caplog.text
+    assert devices.pending is False and devices.initialised_for == 2
+
+
+def test_deferred_refresh_survives_reader_stop_and_start(fake_sd, monkeypatch):
+    busy = {"v": True}
+    monkeypatch.setattr(devices, "busy", lambda: busy["v"])
+    ids = iter([1, 2])
+    gen = mic.mic_frames(Settings(), 1280, "wake", watch=devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 2)))
+    _drain(gen, 4)
+    gen.close()                                  # reader stops with the refresh still owed
+    time.sleep(0.02)
+    assert fake_sd.calls == ["open"] and devices.pending is True
+
+    # next reader starts while still busy: opens anyway, keeps pending...
+    gen = mic.mic_frames(Settings(), 1280, "wake", watch=devices.InputWatch(poll_s=0.0, get_id=lambda: 2))
+    _drain(gen, 3)
+    assert fake_sd.calls == ["open", "open"] and devices.pending is True
+    # ...and refreshes at the first non-busy check.
+    busy["v"] = False
+    _drain(gen, 3)
+    gen.close()
+    time.sleep(0.02)
+    assert fake_sd.calls == ["open", "open", "terminate", "initialize", "open"]
+    assert devices.pending is False
+
+
+def test_switching_back_to_original_device_cancels_pending(fake_sd, monkeypatch):
+    monkeypatch.setattr(devices, "busy", lambda: True)
+    ids = iter([1, 2, 1])
+    gen = mic.mic_frames(Settings(), 1280, "wake", watch=devices.InputWatch(poll_s=0.0, get_id=lambda: next(ids, 1)))
+    _drain(gen, 4)
+    gen.close()
+    time.sleep(0.02)
+    assert devices.pending is False and fake_sd.calls == ["open"]
+
+
+def test_reader_reopens_without_closing_when_portaudio_refreshed_elsewhere(fake_sd, caplog):
+    """A refresh from another thread (Player's open-retry path) bumps the
+    generation; Pa_Terminate already closed the reader's stream, so the
+    reader drops the dead handle (no close()) and opens a fresh one."""
+    with caplog.at_level(logging.INFO, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        _drain(gen, 2)
+        devices.refresh_portaudio()
+        _drain(gen, 4)
+        gen.close()
+    time.sleep(0.02)
+    assert fake_sd.calls == ["open", "terminate", "initialize", "open"]
+    assert fake_sd.streams[0].closed is False        # dead handle dropped, not closed
+    assert fake_sd.streams[1].closed is True
+    assert "wake mic stream invalidated by PortAudio refresh; reopening" in caplog.text
