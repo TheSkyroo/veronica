@@ -108,3 +108,33 @@ def test_build_app_resolves_claude_via_which(tmp_path, monkeypatch):
     app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False)
     launcher = app / "Contents" / "MacOS" / "Veronica"
     assert "/opt/homebrew/bin" in launcher.read_text()
+
+
+def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
+    import json
+
+    from tests.fakes import FakeRun
+
+    build_app = _load_build_app()
+    run = FakeRun(
+        {
+            "git rev-parse --short HEAD": (0, "a517483\n", ""),
+            "git log -1 --format=%cI": (0, "2026-09-17T00:00:48+05:30\n", ""),
+            "git status --porcelain": (0, "", ""),
+        }
+    )
+    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, run=run)
+
+    build_json = app / "Contents" / "Resources" / "build.json"
+    assert build_json.is_file()
+    data = json.loads(build_json.read_text())
+    assert data["sha"] == "a517483"
+    assert data["built_at"] == "2026-09-17T00:00:48+05:30"
+    assert data["dirty"] is False
+    assert data["source"] == "git"
+    # git ran against the repo, not the cwd
+    assert all(kw.get("cwd") == REPO for kw in run.kwargs)
+
+    text = (app / "Contents" / "MacOS" / "Veronica").read_text()
+    assert f'export VERONICA_BUNDLE_BUILD="{build_json}"' in text
+    assert text.index("export VERONICA_BUNDLE_BUILD=") < text.index("exec ")
