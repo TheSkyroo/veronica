@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     # HUD
     hud_enabled: bool = True
     hud_hide_after_s: float = 3.0
-    hud_width: int = 400
-    hud_height: int = 230
+    hud_width: int = 540
+    hud_height: int = 300
     hud_margin: int = 24
 
     @property

@@ -1,31 +1,18 @@
 html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"SF Pro Text",sans-serif;color:#e8ecf1;overflow:hidden}
-#card{box-sizing:border-box;width:400px;height:230px;padding:20px;display:flex;gap:18px;align-items:center;
+#card{box-sizing:border-box;width:540px;height:300px;padding:16px;display:flex;gap:16px;align-items:center;
   background:rgba(8,10,16,.72);border:1px solid rgba(255,255,255,.10);border-radius:18px;backdrop-filter:blur(18px);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 20px 40px rgba(0,0,0,.35)}
 #orb{width:170px;height:170px;flex:0 0 170px}
-#text{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;overflow:hidden;max-height:190px;justify-content:center}
-.row{display:flex;gap:8px;align-items:baseline;min-height:18px;font-size:13px;line-height:1.35;transition:opacity .2s ease}
-.who{flex:0 0 auto;font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.55}
-.msg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
-#heard .msg{opacity:.7}
-#reply .msg{font-weight:500;max-height:64px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
-#tool{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11.5px;opacity:.9;align-items:flex-start}
-#tool .toolText{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-#tool .detail{font-size:10.5px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
-.badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}
-.row.hidden{opacity:0}
-#prompt .msg{font-size:13px;font-weight:500;color:#f0c36c}
-#hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
+#text{flex:1;min-width:0;max-height:268px;display:flex;flex-direction:column;gap:10px;overflow:hidden}
 
-#heard .msg{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-#heard .msg.partial{font-style:italic;opacity:.6}
+.hidden{display:none !important}
 
-#status{display:flex;align-items:center;gap:6px;min-height:14px}
+/* ---- status row ---- */
+#status{display:flex;align-items:center;gap:6px;min-height:14px;flex:0 0 auto}
 #status .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s ease}
-#status .label{flex:0 1 auto;font-size:10.5px;letter-spacing:.03em;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#status .label{flex:0 0 auto;font-size:10.5px;letter-spacing:.03em;opacity:.65;white-space:nowrap}
 #status .label:empty{display:none}
-#status .level{flex:0 0 auto;width:120px;height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-left:4px;display:none}
+#status .level{flex:1;min-width:0;height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-left:4px;display:none}
 #status .level i{display:block;height:100%;width:0%;background:#7ad0ff;border-radius:2px;transition:width .08s linear}
 #status[data-state="listening"] .level,
 #status[data-state="followup"] .level,
@@ -44,3 +31,39 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
   0%,100%{box-shadow:0 0 0 0 rgba(122,208,255,.55)}
   50%{box-shadow:0 0 0 4px rgba(122,208,255,0)}
 }
+
+/* ---- chat bubbles ---- */
+#chat{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:5px;overflow:hidden}
+.bubble{box-sizing:border-box;padding:8px 10px;border-radius:12px;max-width:100%;font-size:12px;line-height:1.2;overflow:hidden}
+.bubble .who{display:block;font-size:9px;letter-spacing:.08em;text-transform:uppercase;opacity:.55;margin-bottom:2px}
+.bubble .msg{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;white-space:pre-wrap}
+.you{background:rgba(255,255,255,.06);align-self:flex-start}
+.you .msg{opacity:.75}
+.you .msg.partial{font-style:italic;opacity:.6}
+.her{background:rgba(255,190,90,.10);border:1px solid rgba(255,190,90,.18)}
+.her .msg{font-weight:500}
+
+/* ---- action card ---- */
+#action{flex:0 0 auto;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+  border-radius:12px;padding:8px 10px;overflow:hidden}
+
+#tool.head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px}
+#tool .badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
+.badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}
+#tool .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.9}
+#tool .pill{flex:0 0 auto;margin-left:auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,.06)}
+.pill.auto{color:#7ad0ff}
+.pill.waiting{color:#ffb454}
+.pill.done{color:#7dffb0}
+.pill.declined{color:#ff7a7a}
+#tool .detail{flex:0 0 100%;font-size:10.5px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+#tool .detail:empty{display:none}
+
+#prompt{margin-top:5px}
+#prompt .msg{font-size:13px;font-weight:500;color:#f0c36c}
+
+.countdown{height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:5px}
+.countdown i{display:block;height:100%;width:100%;background:#f0c36c}
+
+#hint{margin-top:3px}
+#hint .msg{font-size:11px;opacity:.6;color:#ffcc66}

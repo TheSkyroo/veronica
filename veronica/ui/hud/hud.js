@@ -25,17 +25,35 @@
   };
 
   const $ = id => document.getElementById(id);
-  const heardEl = $('heard').querySelector('.msg');
-  const replyEl = $('reply').querySelector('.msg');
-  const toolEl = $('tool').querySelector('.msg');
-  const detailEl = $('tool').querySelector('.detail');
-  const badgeEl = $('tool').querySelector('.badge');
-  const promptEl = $('prompt').querySelector('.msg');
-  const hintEl = $('hint').querySelector('.msg');
+  const heardRowEl = $('heard');
+  const replyRowEl = $('reply');
+  const heardEl = heardRowEl.querySelector('.msg');
+  const replyEl = replyRowEl.querySelector('.msg');
+  const actionEl = $('action');
+  const toolBoxEl = $('tool');
+  const toolTitleEl = $('tool-title');
+  const detailEl = toolBoxEl.querySelector('.detail');
+  const badgeEl = toolBoxEl.querySelector('.badge');
+  const pillEl = toolBoxEl.querySelector('.pill');
+  const promptRowEl = $('prompt');
+  const promptEl = promptRowEl.querySelector('.msg');
+  const countdownEl = document.querySelector('.countdown');
+  const countdownBarEl = countdownEl.querySelector('i');
+  const hintRowEl = $('hint');
+  const hintEl = hintRowEl.querySelector('.msg');
   const statusEl = $('status');
   const statusLabelEl = statusEl.querySelector('.label');
   const statusLevelEl = statusEl.querySelector('.level i');
   statusEl.dataset.state = 'idle';
+
+  const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined'};
+
+  // Hide an empty bubble/row (no awkward blank box in the card) and show it
+  // once it has content.
+  function setBubble(rowEl, msgEl, text) {
+    msgEl.textContent = text;
+    rowEl.classList.toggle('hidden', !text);
+  }
 
   function clearReply() {
     replyGen++;
@@ -46,10 +64,17 @@
 
   function clearTurn() {
     model.heard = ''; model.reply = ''; replySentences = []; clearReply();
-    replyEl.textContent = ''; heardEl.textContent = ''; heardEl.classList.remove('partial');
-    model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = ''; detailEl.textContent = '';
-    model.prompt = ''; promptEl.textContent = '';
-    hintEl.textContent = '';
+    setBubble(heardRowEl, heardEl, ''); heardEl.classList.remove('partial');
+    setBubble(replyRowEl, replyEl, '');
+    model.tool = null;
+    badgeEl.className = 'badge'; badgeEl.textContent = '';
+    toolTitleEl.textContent = ''; detailEl.textContent = '';
+    pillEl.className = 'pill'; pillEl.textContent = '';
+    actionEl.classList.add('hidden');
+    model.prompt = ''; promptEl.textContent = ''; promptRowEl.classList.add('hidden');
+    hintEl.textContent = ''; hintRowEl.classList.add('hidden');
+    countdownEl.classList.add('hidden');
+    countdownBarEl.style.transition = 'none'; countdownBarEl.style.width = '100%';
   }
 
   function typeNext() {
@@ -64,6 +89,7 @@
       try {
         i = Math.min(s.length, i + 2);           // ~40 chars/s at 20 fps ticks
         replyEl.textContent = start + s.slice(0, i);
+        replyRowEl.classList.toggle('hidden', replyEl.textContent.length === 0);
         if (i < s.length) { pendingTimeout = setTimeout(step, 50); return; }
       } catch (e) {
         typing = false; pendingTimeout = null; console.error('hud typewriter step failed', e); typeNext(); return;
@@ -91,7 +117,7 @@
             break;
           case 'heard_partial': {
             const s = String(payload ?? '');
-            heardEl.textContent = s;
+            setBubble(heardRowEl, heardEl, s);
             heardEl.classList.add('partial');
             break;
           }
@@ -100,7 +126,8 @@
             // passes through 'listening') starts a fresh turn: clear the
             // previous reply/tool state so it doesn't bleed into this one.
             clearTurn();
-            model.heard = payload || ''; heardEl.textContent = model.heard;
+            model.heard = payload || '';
+            setBubble(heardRowEl, heardEl, model.heard);
             heardEl.classList.remove('partial');
             break;
           }
@@ -119,13 +146,17 @@
             const t = payload && typeof payload === 'object' ? payload : {};
             const decision = t.decision || '';
             const summary = t.summary || '';
-            model.tool = t; badgeEl.className = 'badge ' + decision;
+            model.tool = t;
+            actionEl.classList.remove('hidden');
+            badgeEl.className = 'badge ' + decision;
             badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
-            toolEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
+            toolTitleEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
             // The final allowed/declined event doesn't repeat `detail` — keep
             // whatever the preceding 'ask' event already put there instead
             // of blanking it out.
             if (typeof t.detail === 'string') detailEl.textContent = t.detail;
+            pillEl.className = 'pill ' + (PILL_TEXT[decision] || '');
+            pillEl.textContent = PILL_TEXT[decision] || '';
             if (decision === 'ask') {
               // No "say yes or no" text here: the #status label already
               // says "Say yes or no" while confirming, so the hint row is
@@ -136,19 +167,35 @@
               // spoken and we're about to start listening), not when the
               // 'confirming' state was entered.
               model.confirmStart = performance.now();
+              countdownEl.classList.remove('hidden');
+              countdownBarEl.style.transition = 'none';
+              countdownBarEl.style.width = '100%';
+              // Force a reflow so the width reset above is applied before the
+              // transition below kicks in, otherwise the browser may coalesce
+              // both style writes into a single paint and skip the shrink.
+              void countdownBarEl.offsetWidth;
+              countdownBarEl.style.transition = 'width ' + model.confirmTimeoutMs + 'ms linear';
+              countdownBarEl.style.width = '0%';
             } else {
-              model.prompt = ''; promptEl.textContent = '';
+              model.prompt = ''; promptEl.textContent = ''; promptRowEl.classList.add('hidden');
+              hintEl.textContent = ''; hintRowEl.classList.add('hidden');
+              countdownEl.classList.add('hidden');
             }
             break;
           }
           case 'prompt': {
             // The confirmation question, spoken right before we start
-            // listening. Shown immediately in the prompt row; the status
-            // label already reads "Say yes or no" while confirming, so
-            // there's no separate hint text here. The countdown arc itself
-            // doesn't start until the 'tool' ask event.
+            // listening. Shown immediately in the prompt row, alongside a
+            // short hint on how to answer (the status label already reads
+            // "Say yes or no" while confirming, but the hint row spells out
+            // the exact words expected). The countdown bar itself doesn't
+            // start until the 'tool' ask event.
             const s = String(payload ?? '');
-            model.prompt = s; promptEl.textContent = s;
+            model.prompt = s;
+            promptEl.textContent = s;
+            promptRowEl.classList.toggle('hidden', !s);
+            hintEl.textContent = s ? 'say "yes" or "no"' : '';
+            hintRowEl.classList.toggle('hidden', !s);
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;

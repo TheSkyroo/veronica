@@ -6,11 +6,21 @@
   <canvas id="orb" width="170" height="170"></canvas>
   <div id="text">
     <div id="status"><span class="dot"></span><span class="label"></span><div class="level"><i></i></div></div>
-    <div class="row" id="heard"><span class="who">You</span><span class="msg"></span></div>
-    <div class="row" id="reply"><span class="who">Veronica</span><span class="msg"></span></div>
-    <div class="row" id="tool"><span class="badge"></span><span class="toolText"><span class="msg"></span><span class="detail"></span></span></div>
-    <div class="row" id="prompt"><span class="msg"></span></div>
-    <div class="row hint" id="hint"><span class="msg"></span></div>
+    <div id="chat">
+      <div class="bubble you hidden" id="heard"><span class="who">You</span><span class="msg"></span></div>
+      <div class="bubble her hidden" id="reply"><span class="who">Veronica</span><span class="msg"></span></div>
+    </div>
+    <div id="action" class="hidden">
+      <div id="tool" class="head">
+        <span class="badge"></span>
+        <span class="title msg" id="tool-title"></span>
+        <span class="pill"></span>
+        <span class="detail"></span>
+      </div>
+      <div id="prompt" class="hidden"><span class="msg"></span></div>
+      <div class="countdown hidden"><i></i></div>
+      <div id="hint" class="hidden"><span class="msg"></span></div>
+    </div>
   </div>
 </div>
 <script src="hud.js"></script>
