@@ -25,14 +25,49 @@ def _webview_class():
     (and acceptsFirstMouse_, so the very first click on this non-activating
     panel starts a drag instead of just activating/focusing it) to make the
     HUD draggable through the web view."""
+    import objc
     import WebKit
 
     class _DraggableWebView(WebKit.WKWebView):
+        # Set by HudWindow after construction: Callable[[object], None] | None,
+        # called with the triggering NSEvent on a plain click (mouseUp with no
+        # drag in between) or a right-click anywhere on the panel.
+        on_menu = None
+
         def mouseDownCanMoveWindow(self):
             return True
 
         def acceptsFirstMouse_(self, event):
             return True
+
+        def mouseDown_(self, event):
+            # Remember the panel's on-screen origin at mouseDown so mouseUp_
+            # can tell a plain click (origin unchanged) from the end of a
+            # window drag (setMovableByWindowBackground_ moved it).
+            try:
+                origin = self.window().frame().origin
+                self._menu_click_origin = (origin.x, origin.y)
+            except Exception:
+                self._menu_click_origin = None
+            objc.super(_DraggableWebView, self).mouseDown_(event)
+
+        def mouseUp_(self, event):
+            objc.super(_DraggableWebView, self).mouseUp_(event)
+            origin_before = getattr(self, "_menu_click_origin", None)
+            if origin_before is None or self.on_menu is None:
+                return
+            try:
+                origin = self.window().frame().origin
+                dragged = (origin.x, origin.y) != origin_before
+            except Exception:
+                dragged = True
+            if not dragged:
+                self.on_menu(event)
+
+        def rightMouseDown_(self, event):
+            objc.super(_DraggableWebView, self).rightMouseDown_(event)
+            if self.on_menu is not None:
+                self.on_menu(event)
 
     return _DraggableWebView
 
@@ -127,6 +162,9 @@ class HudWindow:
         self._loaded = False
         self._pending_js: list[str] = []
         self._nav_delegate = None
+        # Set by the menu bar app (e.g. `hud.on_menu = self._popup_menu_at`);
+        # called with (x, y) screen coordinates when the orb is clicked.
+        self.on_menu: Callable[[float, float], None] | None = None
 
         saved: dict = {}
         try:
@@ -160,6 +198,12 @@ class HudWindow:
                 self._web.setNavigationDelegate_(self._nav_delegate)
             except Exception:
                 log.warning("failed to set HUD navigation delegate", exc_info=True)
+
+        if self.available:
+            try:
+                self._web.on_menu = self._on_webview_menu
+            except Exception:
+                log.warning("failed to wire HUD menu click handler", exc_info=True)
 
         # Only reposition/resize on construction if the saved state actually
         # differs from what the factories already built (full size, top
@@ -297,6 +341,25 @@ class HudWindow:
             self._prefs_save({f"hud_pos_{self._mode}": [x, y]})
         except Exception:
             log.warning("failed to save HUD position pref", exc_info=True)
+
+    # -- menu -------------------------------------------------------------------
+    def _on_webview_menu(self, event) -> None:
+        """Called by the draggable web view (already on the main thread —
+        AppKit event handlers always are) on a plain click or a right-click
+        anywhere on the panel: resolve the screen point and hand off to
+        _popup_menu."""
+        try:
+            import AppKit
+            point = AppKit.NSEvent.mouseLocation()
+            x, y = float(point.x), float(point.y)
+        except Exception:
+            log.warning("failed to resolve HUD menu click location", exc_info=True)
+            return
+        self._popup_menu(x, y)
+
+    def _popup_menu(self, x: float, y: float) -> None:
+        if self.on_menu is not None:
+            self.on_menu(x, y)
 
     # -- events ---------------------------------------------------------------
     def push(self, event: dict) -> None:

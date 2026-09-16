@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import queue
 import threading
@@ -11,6 +12,51 @@ from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
+
+
+def _make_menu_handler_class():
+    """Lazily build the tiny NSObject subclass used as the target for the
+    fallback popup menu's items (built fresh when the rumps menu's own
+    live NSMenu isn't available, e.g. under a faked rumps in tests). Each
+    action method just forwards to the same Python callback the
+    corresponding rumps menu bar item already uses.
+
+    The Objective-C runtime's class registry is process-global (unlike a
+    Python module namespace), so redefining a same-named class — e.g. this
+    module getting reloaded, as the menu bar test fixture does per test —
+    would normally raise `objc.error: ... is overriding existing
+    Objective-C class`. Look the class up first and reuse it if it's
+    already registered, rather than caching in Python (a plain
+    functools.lru_cache wouldn't survive a module reload anyway)."""
+    import objc
+    from Foundation import NSObject
+
+    with contextlib.suppress(Exception):
+        return objc.lookUpClass("_VeronicaPopupMenuHandler")
+
+    class _VeronicaPopupMenuHandler(NSObject):
+        def initWithApp_(self, app):
+            self = objc.super(_VeronicaPopupMenuHandler, self).init()
+            if self is None:
+                return None
+            self._app = app
+            return self
+
+        def onMute_(self, _sender):
+            self._app.toggle_mute(self._app.menu[0])
+
+        def onToggleHud_(self, _sender):
+            self._app.toggle_hud_mode(self._app._hud_mode_item)
+
+        def onToggleLogin_(self, _sender):
+            item = self._app._login_item_item
+            if item.callback is not None:
+                self._app.toggle_login_item(item)
+
+        def onQuit_(self, _sender):
+            self._app.quit(None)
+
+    return _VeronicaPopupMenuHandler
 
 
 class _NoopHud:
@@ -57,6 +103,8 @@ class VeronicaApp(rumps.App):
         self._login_item_item = login_item_item
         hud = HudWindow(settings) if settings.hud_enabled else None
         self._hud = hud if (hud is not None and hud.available) else _NoopHud()
+        self._hud.on_menu = self._popup_menu_at
+        self._popup_menu_handler = None  # strong ref for the fallback menu's target
         self._refresh_hud_mode_item()
         self._events: queue.Queue = queue.Queue()
         self._loop = asyncio.new_event_loop()
@@ -76,7 +124,8 @@ class VeronicaApp(rumps.App):
             # it rather than only once warmup() starts.
             self._state = "warming"
             self._orch = build_orchestrator(
-                settings, on_state=self._on_state, on_event=lambda k, p: self._events.put((k, p))
+                settings, on_state=self._on_state, on_event=lambda k, p: self._events.put((k, p)),
+                on_quit=self._schedule_quit,
             )
             self._loop.run_until_complete(self._orch.warmup())
             self._loop.run_until_complete(self._orch.run_forever())
@@ -92,6 +141,13 @@ class VeronicaApp(rumps.App):
 
     def _on_state(self, state: str) -> None:
         self._state = state
+
+    def _schedule_quit(self) -> None:
+        # Called from the orchestrator's background asyncio thread (the
+        # "quit" voice intent) after confirmation; quit() tears down AppKit
+        # state and must run on the main thread.
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(lambda: self.quit(None))
 
     # AppKit side (main thread)
     def _refresh(self, _timer) -> None:
@@ -172,6 +228,57 @@ class VeronicaApp(rumps.App):
             orch.muted = self._muted
             if self._muted:
                 orch.player.stop()
+
+    # -- HUD orb click -> menu ---------------------------------------------
+    def _build_popup_menu(self):
+        """Return an NSMenu mirroring the 4 menu bar items (Mute, HUD
+        Mini/Full, Start at Login, Quit). Prefers rumps' own live NSMenu
+        (`self.menu._menu`, already wired and kept in sync by rumps) so the
+        popup always matches the real menu bar exactly; falls back to
+        building a fresh one (with its own tiny target/action handler) when
+        that's unavailable."""
+        live_menu = getattr(self.menu, "_menu", None)
+        if live_menu is not None:
+            return live_menu
+
+        import AppKit
+
+        handler = _make_menu_handler_class().alloc().initWithApp_(self)
+        self._popup_menu_handler = handler  # AppKit doesn't retain the target
+
+        menu = AppKit.NSMenu.alloc().init()
+
+        mute_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Mute", "onMute:", "")
+        mute_item.setTarget_(handler)
+        mute_item.setState_(1 if self._muted else 0)
+        menu.addItem_(mute_item)
+
+        hud_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            self._hud_mode_item.title, "onToggleHud:", "")
+        hud_item.setTarget_(handler)
+        menu.addItem_(hud_item)
+
+        login_item_ = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            self._login_item_item.title, "onToggleLogin:", "")
+        login_item_.setTarget_(handler)
+        login_item_.setEnabled_(self._login_item_item.callback is not None)
+        login_item_.setState_(1 if getattr(self._login_item_item, "state", False) else 0)
+        menu.addItem_(login_item_)
+
+        quit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Quit", "onQuit:", "")
+        quit_item.setTarget_(handler)
+        menu.addItem_(quit_item)
+
+        return menu
+
+    def _popup_menu_at(self, x: float, y: float) -> None:
+        """hud.on_menu callback: show the menu at the given screen point.
+        Called from the HUD panel's AppKit click handler, which — like all
+        AppKit event handling — already runs on the main thread."""
+        import Foundation
+
+        menu = self._build_popup_menu()
+        menu.popUpMenuPositioningItem_atLocation_inView_(None, Foundation.NSMakePoint(x, y), None)
 
     def quit(self, _item) -> None:
         self._quitting = True

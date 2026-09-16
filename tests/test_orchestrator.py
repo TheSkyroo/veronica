@@ -115,6 +115,17 @@ async def test_confirm_yes_and_no():
     assert o.tts.said[0] == "Run Bash: ls?"
 
 
+async def test_confirm_question_override_replaces_default_prompt():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    assert await o.confirm("Quit Veronica", question="Quit Veronica?") is True
+    assert o.tts.said == ["Quit Veronica?"]
+    assert ("prompt", "Quit Veronica?") in ev
+    tools = [p for k, p in ev if k == "tool"]
+    # the "ask" tool event still carries the original summary, independent
+    # of the spoken question override
+    assert tools[0]["summary"] == "Quit Veronica"
+
+
 async def test_confirm_no_speech_is_deny():
     o, _ = build(rec_pcms=[None])
     assert await o.confirm("Write file a") is False
@@ -1625,6 +1636,85 @@ async def test_forget_intent_no_match_says_didnt_have_that():
     o.store = store
     await o.one_turn()
     assert "I didn't have that." in o.tts.said
+
+
+# -- commit: voice mute/unmute/quit intents -----------------------------------
+
+async def test_mute_intent_says_muted_sets_muted_and_hides_hud():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["mute yourself"])
+    await o.one_turn()
+    assert o.tts.said == ["Muted."]
+    assert o.muted is True
+    assert ("hud", {"mode": "hide"}) in ev
+    assert states[-1] == "idle"
+    assert "followup" not in states
+    assert o.brain.asked == []
+
+
+async def test_muted_wake_capture_unmute_says_im_back():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["unmute"])
+    o.wake = _WakeOnceThenCancel()
+    o.muted = True
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert o.muted is False
+    assert o.tts.said == ["I'm back."]
+    assert o.brain.asked == []
+
+
+async def test_muted_wake_capture_other_text_ignored_silently():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["what time is it"])
+    o.wake = _WakeOnceThenCancel()
+    o.muted = True
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert o.muted is True
+    assert o.tts.said == []
+    assert o.brain.asked == []
+
+
+async def test_muted_wake_capture_no_speech_stays_muted():
+    o, _ = build(rec_pcms=[None])
+    o.wake = _WakeOnceThenCancel()
+    o.muted = True
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert o.muted is True
+    assert o.tts.said == []
+
+
+async def test_quit_intent_yes_says_goodbye_and_calls_on_quit():
+    called = []
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)],
+        stt_texts=["quit veronica", "yes"],
+    )
+    o._on_quit = lambda: called.append(True)
+    await o.one_turn()
+    assert called == [True]
+    assert "Goodbye." in o.tts.said
+    assert states[-1] == "idle"
+    # natural prompt wording, not the generic confirm() "Run {summary}?" form
+    assert o.tts.said[0] == "Quit Veronica?"
+
+
+async def test_quit_intent_no_does_not_quit_and_continues_turn():
+    called = []
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["quit veronica", "no"],
+    )
+    o._on_quit = lambda: called.append(True)
+    await o.one_turn()
+    assert called == []
+    assert "Goodbye." not in o.tts.said
+    assert "followup" in states
+
+
+async def test_on_quit_defaults_to_noop():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["quit", "yes"])
+    await o.one_turn()  # must not raise even with no on_quit provided
+    assert "Goodbye." in o.tts.said
 
 
 async def test_remember_without_store_still_says_got_it():

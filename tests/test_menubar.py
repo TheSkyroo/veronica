@@ -3,6 +3,7 @@ import importlib
 import logging
 import sys
 import threading
+import types
 
 import pytest
 import rumps as real_rumps
@@ -145,8 +146,9 @@ def fake_env(monkeypatch, tmp_home, request):
     # build_orchestrator actually ran) is awaited.
     orch_holder = {"ready": threading.Event()}
 
-    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True):
+    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
         orch = FakeOrch(on_state=on_state)
+        orch.on_quit = on_quit
         orch_holder["orch"] = orch
         # VeronicaApp() (on the main thread) can return before the
         # background thread it starts has run build_orchestrator and
@@ -182,13 +184,13 @@ def test_state_is_warming_during_build_orchestrator(fake_env, monkeypatch):
     seen = {}
     original = menubar.build_orchestrator
 
-    def wrapped(s, on_state=None, on_event=None, *, audio=True):
+    def wrapped(s, on_state=None, on_event=None, *, audio=True, on_quit=None):
         # on_state is the VeronicaApp instance's bound _on_state method, so
         # __self__ recovers the app without racing its constructor's
         # `app = VeronicaApp()` assignment on the main thread.
         app = on_state.__self__
         seen["state"] = app._state
-        return original(s, on_state=on_state, on_event=on_event, audio=audio)
+        return original(s, on_state=on_state, on_event=on_event, audio=audio, on_quit=on_quit)
 
     monkeypatch.setattr(menubar, "build_orchestrator", wrapped)
     app, orch = _make_app(menubar, orch_holder)
@@ -445,6 +447,177 @@ def test_toggle_login_item_enables_and_disables(fake_env, monkeypatch, tmp_path)
         assert item.state is False
     finally:
         _quit_and_join(app)
+
+
+# -- commit: voice "quit" intent -> menu bar quit ------------------------------
+
+def test_build_orchestrator_receives_on_quit_callback(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert orch.on_quit == app._schedule_quit
+    finally:
+        _quit_and_join(app)
+
+
+def test_schedule_quit_calls_quit_via_apphelper(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    from PyObjCTools import AppHelper
+    calls = []
+    monkeypatch.setattr(AppHelper, "callAfter", lambda fn: calls.append(fn))
+    app._schedule_quit()
+    assert len(calls) == 1
+    calls[0]()
+    app._thread.join(timeout=2)
+    assert fake_rumps.quit_called is True
+
+
+# -- commit: click the HUD orb to open the menu --------------------------------
+
+class _FakeMenuItemNS:
+    def __init__(self, title, action, key):
+        self.title = title
+        self.action = action
+        self.key = key
+        self.target = None
+        self.state = 0
+        self.enabled = True
+
+    def setTarget_(self, target):
+        self.target = target
+
+    def setState_(self, state):
+        self.state = state
+
+    def setEnabled_(self, enabled):
+        self.enabled = enabled
+
+
+class _FakeNSMenu:
+    def __init__(self):
+        self.items = []
+        self.popups = []
+
+    def addItem_(self, item):
+        self.items.append(item)
+
+    def popUpMenuPositioningItem_atLocation_inView_(self, item, point, view):
+        self.popups.append((item, point, view))
+
+
+def _fake_appkit_for_menu():
+    menu_holder = {}
+
+    def new_menu():
+        m = _FakeNSMenu()
+        menu_holder["last"] = m
+        return m
+
+    return types.SimpleNamespace(
+        NSMenu=types.SimpleNamespace(alloc=lambda: types.SimpleNamespace(init=new_menu)),
+        NSMenuItem=types.SimpleNamespace(
+            alloc=lambda: types.SimpleNamespace(
+                initWithTitle_action_keyEquivalent_=lambda title, action, key: _FakeMenuItemNS(title, action, key)
+            )
+        ),
+    ), menu_holder
+
+
+def test_hud_on_menu_wired_to_popup_menu_at(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert app._hud.on_menu == app._popup_menu_at
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_uses_live_rumps_menu_when_available(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        sentinel = object()
+        app.menu = types.SimpleNamespace(_menu=sentinel)
+        assert app._build_popup_menu() is sentinel
+    finally:
+        _quit_and_join(app)
+
+
+def test_build_popup_menu_fallback_has_four_titles_and_actions(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        fake_appkit, _ = _fake_appkit_for_menu()
+        monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+
+        menu = app._build_popup_menu()
+
+        assert [i.title for i in menu.items] == [
+            "Mute", "HUD: Full", "Start at Login (build the app first)", "Quit",
+        ]
+        assert [i.action for i in menu.items] == [
+            "onMute:", "onToggleHud:", "onToggleLogin:", "onQuit:",
+        ]
+        assert all(i.target is not None for i in menu.items)
+        # login item is disabled (no callback) when not running from a bundle
+        assert menu.items[2].enabled is False
+    finally:
+        _quit_and_join(app)
+
+
+def test_build_popup_menu_reflects_mute_state(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app.toggle_mute(app.menu[0])
+        fake_appkit, _ = _fake_appkit_for_menu()
+        monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+        menu = app._build_popup_menu()
+        assert menu.items[0].state == 1
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_at_shows_menu_at_screen_point(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        fake_menu = _FakeNSMenu()
+        monkeypatch.setattr(app, "_build_popup_menu", lambda: fake_menu)
+        fake_foundation = types.SimpleNamespace(
+            NSMakePoint=lambda x, y: types.SimpleNamespace(x=x, y=y)
+        )
+        monkeypatch.setitem(sys.modules, "Foundation", fake_foundation)
+
+        app._popup_menu_at(12.0, 34.0)
+
+        assert len(fake_menu.popups) == 1
+        item, point, view = fake_menu.popups[0]
+        assert item is None and view is None
+        assert (point.x, point.y) == (12.0, 34.0)
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_handler_forwards_to_app_callbacks(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    handler_cls = menubar._make_menu_handler_class()
+    handler = handler_cls.alloc().initWithApp_(app)
+
+    assert app._muted is False
+    handler.onMute_(None)
+    assert app._muted is True
+    assert orch.player.stopped is True
+
+    handler.onToggleHud_(None)
+    assert app._hud.mode_calls == ["mini"]
+    assert app._hud_mode_item.title == "HUD: Mini"
+
+    handler.onQuit_(None)
+    app._thread.join(timeout=2)
+    assert fake_rumps.quit_called is True
 
 
 def test_real_rumps_restored_after_fixture_teardown():

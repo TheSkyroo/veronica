@@ -4,7 +4,7 @@ import re
 import string
 from typing import Literal
 
-Intent = Literal["end", "hud_mini", "hud_full", "hud_hide"]
+Intent = Literal["end", "hud_mini", "hud_full", "hud_hide", "mute", "unmute", "quit"]
 
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
@@ -32,6 +32,18 @@ HUD_FULL_PHRASES = frozenset({
 
 HUD_HIDE_PHRASES = frozenset({
     "hide", "hide yourself", "hide the hud", "hide the panel",
+})
+
+MUTE_PHRASES = frozenset({
+    "mute", "mute yourself", "be quiet", "silence",
+})
+
+UNMUTE_PHRASES = frozenset({
+    "unmute", "unmute yourself", "you can talk", "speak again",
+})
+
+QUIT_PHRASES = frozenset({
+    "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely",
 })
 
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
@@ -93,6 +105,12 @@ def _match_candidate(candidate: str) -> Intent | None:
         return "hud_full"
     if candidate in HUD_HIDE_PHRASES:
         return "hud_hide"
+    if candidate in MUTE_PHRASES:
+        return "mute"
+    if candidate in UNMUTE_PHRASES:
+        return "unmute"
+    if candidate in QUIT_PHRASES:
+        return "quit"
     return None
 
 
