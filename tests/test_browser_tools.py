@@ -15,16 +15,26 @@ def _err(text):
 
 @pytest.fixture
 def scripts(monkeypatch):
-    """Capture every AppleScript sent; reply from a queue of canned results."""
+    """Capture every AppleScript sent; reply from a queue of canned results.
+    An empty queue answers 'complete' so the post-navigation readyState poll
+    (which never fails a tool) ends immediately; the poll's sleep is stubbed."""
     sent = []
     replies = []
 
     async def fake_osascript(script):
         sent.append(script)
-        return replies.pop(0) if replies else _ok("")
+        return replies.pop(0) if replies else _ok("complete")
+
+    async def no_sleep(_s):
+        pass
 
     monkeypatch.setattr(b, "_osascript", fake_osascript)
+    monkeypatch.setattr(b, "_sleep", no_sleep)
     return sent, replies
+
+
+def ready_polls(sent):
+    return [s for s in sent if "document.readyState" in s]
 
 
 def frontmost(replies, name):
@@ -195,3 +205,92 @@ def test_wrap_js_roundtrip():
     assert inner.endswith('"')
     unescaped = inner[:-1].replace('\\"', '"').replace("\\\\", "\\")
     assert unescaped == js
+
+
+async def test_type_submit_guards_against_double_submit(scripts):
+    """If a keydown handler already handled Enter (preventDefault), don't
+    also call form.requestSubmit() — that would submit twice."""
+    sent, replies = scripts
+    frontmost(replies, "Safari")
+    replies.append(_ok(json.dumps({"typed": "INPUT search"})))
+    await b.browser_type.handler({"target": "search", "text": "hello", "submit": True})
+    js = sent[1]
+    assert "var ok=el.dispatchEvent(new KeyboardEvent('keydown',opts))" in js
+    assert "if(ok&&el.form&&document.activeElement===el)" in js
+
+
+async def test_open_waits_for_page_to_load(scripts):
+    sent, replies = scripts
+    frontmost(replies, "Google Chrome")
+    replies.append(_ok("ok"))                       # the open itself
+    frontmost(replies, "Google Chrome"); replies.append(_ok("loading"))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("loading"))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("complete"))
+    res = await b.browser_open.handler({"url": "https://example.com"})
+    assert res["content"][0]["text"] == "Opened https://example.com"
+    assert len(ready_polls(sent)) == 3
+
+
+async def test_click_waits_for_page_to_load(scripts):
+    sent, replies = scripts
+    frontmost(replies, "Google Chrome")
+    replies.append(_ok(json.dumps({"clicked": "A Docs"})))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("loading"))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("complete"))
+    res = await b.browser_click.handler({"target": "Docs"})
+    assert res["content"][0]["text"] == "Clicked A Docs"
+    assert len(ready_polls(sent)) == 2
+
+
+async def test_back_and_submit_wait_for_page_to_load(scripts):
+    sent, replies = scripts
+    frontmost(replies, "Safari"); replies.append(_ok("ok"))
+    frontmost(replies, "Safari"); replies.append(_ok("complete"))
+    assert (await b.browser_back.handler({}))["content"][0]["text"] == "Went back"
+    assert len(ready_polls(sent)) == 1
+    sent.clear()
+    frontmost(replies, "Safari"); replies.append(_ok(json.dumps({"typed": "INPUT q"})))
+    frontmost(replies, "Safari"); replies.append(_ok("complete"))
+    res = await b.browser_type.handler({"target": "q", "text": "x", "submit": True})
+    assert res["content"][0]["text"] == "Typed into INPUT q"
+    assert len(ready_polls(sent)) == 1
+    sent.clear()
+    frontmost(replies, "Safari"); replies.append(_ok(json.dumps({"typed": "INPUT q"})))
+    res = await b.browser_type.handler({"target": "q", "text": "x", "submit": False})
+    assert not res.get("is_error")
+    assert ready_polls(sent) == []                   # no submit: nothing to wait for
+
+
+async def test_nav_wait_error_does_not_fail_tool(scripts):
+    """A readyState poll error (page mid-navigation, JS refused) ends the
+    wait but never turns the tool's own success into an error."""
+    sent, replies = scripts
+    frontmost(replies, "Google Chrome")
+    replies.append(_ok("ok"))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("loading"))
+    frontmost(replies, "Google Chrome"); replies.append(_err("execution error: page is unloading"))
+    frontmost(replies, "Google Chrome"); replies.append(_ok("complete"))   # must not be consumed
+    res = await b.browser_open.handler({"url": "https://example.com"})
+    assert not res.get("is_error")
+    assert res["content"][0]["text"] == "Opened https://example.com"
+    assert len(ready_polls(sent)) == 2
+    assert len(replies) == 2
+
+
+async def test_nav_wait_gives_up_after_deadline(scripts, monkeypatch):
+    sent, replies = scripts
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(b, "_sleep", fake_sleep)
+    frontmost(replies, "Google Chrome")
+    replies.append(_ok("ok"))
+    for _ in range(40):
+        frontmost(replies, "Google Chrome"); replies.append(_ok("loading"))
+    res = await b.browser_open.handler({"url": "https://example.com"})
+    assert res["content"][0]["text"] == "Opened https://example.com"
+    n = len(ready_polls(sent))
+    assert n == int(b.NAV_WAIT_S / b.NAV_POLL_S) and n < 40
+    assert slept and all(s == b.NAV_POLL_S for s in slept)

@@ -140,7 +140,9 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "browser_click":
             return f"Click '{input.get('target', '')}'"
         if short == "browser_type":
-            return f"Type into '{input.get('target', '')}'"
+            text = str(input.get("text", ""))[:40]
+            desc = f"Type '{text}' into '{input.get('target', '')}'"
+            return desc + " and press Enter" if input.get("submit") else desc
         if short == "browser_scroll":
             return f"Scroll {input.get('direction', 'down')}"
         if short == "browser_back":

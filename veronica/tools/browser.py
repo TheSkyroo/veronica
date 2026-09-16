@@ -19,6 +19,11 @@ READ_MIN = 50
 READ_DEFAULT = 6000
 READ_MAX = 20000
 FIND_MAX_LINES = 10
+# After a navigation (open/click/back/submit) wait for document.readyState
+# to reach 'complete' so a following browser_read sees the new page.
+NAV_WAIT_S = 3.0
+NAV_POLL_S = 0.25
+_sleep = asyncio.sleep   # module attr so tests can stub the poll's delay
 
 
 class BrowserUnavailable(RuntimeError):
@@ -130,6 +135,23 @@ def _json(res: dict) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+async def _wait_for_load() -> None:
+    """Poll document.readyState until 'complete' or NAV_WAIT_S elapses.
+    Best effort: any error (page mid-unload, JS refused) just ends the wait;
+    it never changes the calling tool's result."""
+    polls = int(NAV_WAIT_S / NAV_POLL_S)
+    for i in range(polls):
+        try:
+            res = await _js("document.readyState")
+        except Exception:
+            log.debug("readyState poll failed", exc_info=True)
+            return
+        if res.get("is_error") or res["content"][0]["text"].strip() == "complete":
+            return
+        if i < polls - 1:
+            await _sleep(NAV_POLL_S)
+
+
 def _guard(fn):
     """Wrap a handler so malformed args/unexpected failures return
     `_err(...)` instead of raising."""
@@ -203,10 +225,11 @@ _JS_TYPE = """(function(){%s
   }
   el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));
   if(%s){
-    var opts={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true};
-    el.dispatchEvent(new KeyboardEvent('keydown',opts)); el.dispatchEvent(new KeyboardEvent('keypress',opts));
+    var opts={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
+    var ok=el.dispatchEvent(new KeyboardEvent('keydown',opts)); el.dispatchEvent(new KeyboardEvent('keypress',opts));
     el.dispatchEvent(new KeyboardEvent('keyup',opts));
-    if(el.form&&document.activeElement===el){ if(el.form.requestSubmit){el.form.requestSubmit();} else {el.form.submit();} }
+    /* ok is false when a keydown handler called preventDefault, i.e. the page handled Enter itself: don't submit twice */
+    if(ok&&el.form&&document.activeElement===el){ if(el.form.requestSubmit){el.form.requestSubmit();} else {el.form.submit();} }
   }
   return JSON.stringify({typed:describe(el)});
 })()"""
@@ -291,6 +314,7 @@ async def browser_open(args: dict) -> dict:
     res = await _osascript(script)
     if res.get("is_error"):
         return _map_error(browser, res["content"][0]["text"])
+    await _wait_for_load()
     return _ok(f"Opened {url}")
 
 
@@ -339,6 +363,7 @@ async def browser_click(args: dict) -> dict:
     clicked = (_json(res) or {}).get("clicked")
     if not clicked:
         return _err(f"no element matching '{target}'")
+    await _wait_for_load()
     return _ok(f"Clicked {clicked}")
 
 
@@ -349,13 +374,15 @@ async def browser_type(args: dict) -> dict:
     text = str(args.get("text", ""))
     if not target:
         return _err("target is required")
-    submit = "true" if bool(args.get("submit", False)) else "false"
-    res = await _js(_JS_TYPE % (_JS_MATCH_HELPERS, json.dumps(target), json.dumps(text), submit))
+    submit = bool(args.get("submit", False))
+    res = await _js(_JS_TYPE % (_JS_MATCH_HELPERS, json.dumps(target), json.dumps(text), "true" if submit else "false"))
     if res.get("is_error"):
         return res
     typed = (_json(res) or {}).get("typed")
     if not typed:
         return _err(f"no field matching '{target}'")
+    if submit:
+        await _wait_for_load()
     return _ok(f"Typed into {typed}")
 
 
@@ -373,7 +400,10 @@ async def browser_scroll(args: dict) -> dict:
 @_guard
 async def browser_back(args: dict) -> dict:
     res = await _js(_JS_BACK)
-    return res if res.get("is_error") else _ok("Went back")
+    if res.get("is_error"):
+        return res
+    await _wait_for_load()
+    return _ok("Went back")
 
 
 TOOLS = [browser_tabs, browser_open, browser_read, browser_find, browser_click, browser_type, browser_scroll, browser_back]
