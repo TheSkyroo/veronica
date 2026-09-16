@@ -683,7 +683,7 @@ def test_ptt_unavailable_adds_accessibility_menu_item(fake_env, monkeypatch):
     app, orch = _make_app(menubar, orch_holder)
     try:
         assert app._ptt_item is not None
-        assert "Accessibility" in app._ptt_item.title
+        assert "Input Monitoring" in app._ptt_item.title
         assert app._ptt_item in app.menu
     finally:
         _quit_and_join(app)

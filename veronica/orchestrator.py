@@ -252,7 +252,12 @@ class Orchestrator:
             return
         async with self._speech_lock:
             self.player.reset()
-            await self.player.play(tone(freq_hz, ms))
+            try:
+                await self.player.play(tone(freq_hz, ms))
+            except Exception:
+                # A chime is a courtesy, not the turn — never let an audio
+                # device hiccup abort listening or a reply.
+                log.warning("chime failed", exc_info=True)
 
     async def handle_text(self, text: str, images: list[bytes] = ()) -> list[str]:
         """Ask the brain and speak each sentence; synth N+1 overlaps playback of N."""

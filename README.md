@@ -135,8 +135,8 @@ release it when you're done. Works even while she's speaking (it interrupts her,
 Disable with `VERONICA_PTT_ENABLED=false`, or change the key with `VERONICA_PTT_KEYCODE` (macOS virtual keycode;
 61 is Right Option).
 
-Push-to-talk needs **Accessibility** access (see Permissions below). If it isn't granted, the menu bar shows
-"Enable Push-to-talk… (Accessibility)" — click it to jump straight to the right System Settings pane.
+Push-to-talk needs **Input Monitoring** access (prompted on first launch) (see Permissions below). If it isn't granted, the menu bar shows
+"Enable Push-to-talk… (Input Monitoring)" — click it to jump straight to the right System Settings pane.
 
 ## Music
 
@@ -161,8 +161,8 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
 - **Microphone** — wake word and voice commands (asked automatically on first run).
 - **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used).
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
-- **Accessibility** (Input Monitoring) — push-to-talk's global hotkey and dictation's typing into other apps. Not
-  asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Accessibility)" item if
+- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
+  asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if
   push-to-talk shows as unavailable.
 
 ## Run
@@ -183,7 +183,7 @@ On first launch macOS asks for **Microphone** access, and the first time Veronic
 Reminders, Notes, Music, or Spotify it asks for **Automation** access to that app; the first `screenshot` prompts
 for **Screen Recording** — approve all of these (System Settings → Privacy & Security). **Accessibility** (for
 push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
-Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Accessibility)" item. Because the bundle is
+Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is
 ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier (`io.manik.veronica`)
 doesn't change.
 

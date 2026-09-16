@@ -8,6 +8,7 @@ import numpy as np
 import sounddevice as sd
 
 log = logging.getLogger("veronica.audio.play")
+_PortAudioError = sd.PortAudioError  # bound here so tests can swap `sd` for a fake
 
 FADE_MS = 3
 DEFAULT_TIMEOUT_MARGIN_S = 2.0
@@ -49,10 +50,8 @@ class Player:
         self._stopped = False
 
     # -- stream lifecycle -------------------------------------------------
-    def _ensure_stream(self):
-        if self._stream is not None:
-            return self._stream
-        stream = sd.OutputStream(
+    def _open_stream(self):
+        return sd.OutputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
@@ -61,6 +60,22 @@ class Player:
             callback=self._cb,
             finished_callback=self._on_finished,
         )
+
+    def _ensure_stream(self):
+        if self._stream is not None:
+            return self._stream
+        try:
+            stream = self._open_stream()
+        except _PortAudioError as e:
+            # PortAudio's device table goes stale when the default output
+            # device changes mid-session (headphones plugged in, AirPods
+            # connected): opening a new stream then fails with an internal
+            # error until PortAudio is re-initialised. One retry.
+            log.warning("output stream open failed (%s); re-initialising PortAudio", e)
+            with contextlib.suppress(Exception):
+                sd._terminate()
+            sd._initialize()
+            stream = self._open_stream()
         try:
             stream.start()
         except Exception:

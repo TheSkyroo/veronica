@@ -236,3 +236,38 @@ async def test_stream_reopened_after_open_error(monkeypatch):
     await asyncio.wait_for(task, 1)
 
     assert fsd.calls == 2
+
+
+async def test_stream_open_retries_after_portaudio_reinit(monkeypatch):
+    class SD:
+        PortAudioError = play_mod._PortAudioError
+
+        def __init__(self):
+            self.calls = 0
+            self.reinit = []
+            self.streams = []
+
+        def _terminate(self):
+            self.reinit.append("terminate")
+
+        def _initialize(self):
+            self.reinit.append("initialize")
+
+        def OutputStream(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise play_mod._PortAudioError("Internal PortAudio error", -9986)
+            s = FakeStream(**kwargs)
+            self.streams.append(s)
+            return s
+
+    fsd = SD()
+    monkeypatch.setattr(play_mod, "sd", fsd)
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    task = asyncio.ensure_future(p.play(np.ones(500, dtype=np.float32)))
+    await asyncio.sleep(0.01)
+    assert fsd.reinit == ["terminate", "initialize"]
+    assert fsd.calls == 2
+    stream = fsd.streams[-1]
+    await pump(stream, 1)
+    await task

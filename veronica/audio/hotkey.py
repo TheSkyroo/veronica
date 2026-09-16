@@ -1,9 +1,8 @@
 """Global push-to-talk hotkey monitor: a Quartz CGEventTap watching
 kCGEventFlagsChanged for one modifier keycode (default: Right Option, 61).
-Requires Accessibility (Input Monitoring) permission — if the tap can't be
-created (permission not granted), `available` is False and neither callback
-is ever invoked; callers should offer a menu item pointing at the
-Accessibility privacy pane.
+Requires Input Monitoring permission — if it isn't granted (the OS is asked
+to prompt), `available` is False and neither callback is ever invoked;
+callers should offer a menu item pointing at the Input Monitoring pane.
 """
 import asyncio
 import contextlib
@@ -122,6 +121,21 @@ class HotkeyMonitor:
             self.available = False
             return False
         self._quartz = quartz
+        # A listen-only session tap is *created* fine without Input
+        # Monitoring — it just never receives an event. Preflight so the
+        # failure is visible (and the OS prompt is triggered) instead of a
+        # silently dead push-to-talk key.
+        preflight = getattr(quartz, "CGPreflightListenEventAccess", None)
+        if preflight is not None and not preflight():
+            request = getattr(quartz, "CGRequestListenEventAccess", None)
+            granted = bool(request()) if request is not None else False
+            if not granted:
+                log.warning(
+                    "hotkey monitor: Input Monitoring not granted — enable Veronica in "
+                    "System Settings > Privacy & Security > Input Monitoring"
+                )
+                self.available = False
+                return False
         tap = quartz.CGEventTapCreate(
             quartz.kCGSessionEventTap,
             quartz.kCGHeadInsertEventTap,

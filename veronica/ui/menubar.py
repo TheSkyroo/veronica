@@ -13,7 +13,7 @@ from veronica.config import settings
 from veronica.ui import login_item
 from veronica.ui.hud import HudWindow
 
-ACCESSIBILITY_PANE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+ACCESSIBILITY_PANE_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪", "followup": "◎", "error": "✕", "warming": "…", "confirming": "?"}
 
@@ -121,7 +121,7 @@ class VeronicaApp(rumps.App):
             self._hotkey.start(loop=self._loop)
             if not self._hotkey.available:
                 self._ptt_item = rumps.MenuItem(
-                    "Enable Push-to-talk… (Accessibility)", callback=self.open_accessibility_settings
+                    "Enable Push-to-talk… (Input Monitoring)", callback=self.open_accessibility_settings
                 )
                 menu_items.append(self._ptt_item)
 
