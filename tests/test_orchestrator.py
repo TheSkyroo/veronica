@@ -884,9 +884,9 @@ async def test_events_confirm_ask_then_allowed_and_declined():
     assert await o.confirm("Bash: rm y") is False
     tools = [p for k, p in ev if k == "tool"]
     assert tools == [
-        {"summary": "Bash: rm x", "decision": "ask"},
+        {"summary": "Bash: rm x", "decision": "ask", "timeout_ms": 0},
         {"summary": "Bash: rm x", "decision": "allowed"},
-        {"summary": "Bash: rm y", "decision": "ask"},
+        {"summary": "Bash: rm y", "decision": "ask", "timeout_ms": 0},
         {"summary": "Bash: rm y", "decision": "declined"},
     ]
     assert ("sentence", "Run Bash: rm x?") in ev

@@ -19,12 +19,13 @@ class Settings(BaseSettings):
     max_utterance_s: int = 15
     min_speech_ms: int = 300
     followup_window_s: int = 8
-    confirm_listen_s: int = 5
+    confirm_listen_s: int = 8
     listen_wait_s: int = 6
 
     # wake word
     wake_model: str = "hey_veronica"
-    wake_threshold: float = 0.5
+    wake_threshold: float = 0.35
+    wake_hits: int = 2
     wake_retry_s: int = 10
     barge_threshold: float = 0.8
 
@@ -45,8 +46,8 @@ class Settings(BaseSettings):
     # HUD
     hud_enabled: bool = True
     hud_hide_after_s: float = 3.0
-    hud_width: int = 380
-    hud_height: int = 220
+    hud_width: int = 400
+    hud_height: int = 230
     hud_margin: int = 24
 
     @property

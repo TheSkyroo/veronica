@@ -9,6 +9,8 @@ Brain = Claude via your Claude Code login. Speech = local (faster-whisper + Koko
     uv run python scripts/download_models.py
     claude auth login        # if not already
 
+Wake word not triggering? Run `uv run python scripts/wake_scores.py`, say the phrase, and set VERONICA_WAKE_THRESHOLD in .env just below the scores you see.
+
 Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is ignored if set).
 
 - macOS will ask for Microphone access for your terminal app on first run (System Settings → Privacy & Security → Microphone).
