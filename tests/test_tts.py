@@ -36,3 +36,21 @@ def test_real_kokoro_speaks():
     s = Synthesizer(voice=settings.kokoro_voice, models_dir=settings.models_dir)
     samples, sr = s.synth("Hello, I am Veronica.")
     assert sr == 24000 and len(samples) > sr  # > 1 s of audio
+
+
+def test_synth_passes_current_voice_and_speed(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeKokoro:
+        def __init__(self, *a): pass
+        def create(self, text, voice, speed, lang):
+            calls.append((text, voice, speed, lang))
+            return [0.0, 0.0], 24000
+
+    monkeypatch.setattr(Synthesizer, "_kokoro_cls", FakeKokoro)
+    s = Synthesizer("af_sarah", tmp_path)
+    assert s.speed == 1.0
+    s.voice = "am_adam"
+    s.speed = 1.3
+    s.synth("hi")
+    assert calls == [("hi", "am_adam", 1.3, "en-us")]
