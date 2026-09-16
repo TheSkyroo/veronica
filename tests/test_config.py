@@ -58,6 +58,7 @@ def _fresh_veronica_logger():
     log = logging.getLogger("veronica")
     for h in list(log.handlers):
         log.removeHandler(h)
+        h.close()
     return log
 
 
