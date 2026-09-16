@@ -77,6 +77,18 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "music_now_playing": "allow",
         "music_volume": "allow",
     },
+    "browser": {
+        # Read-only / navigation: same risk as mac.open_url.
+        "browser_tabs": "allow",
+        "browser_open": "allow",
+        "browser_read": "allow",
+        "browser_find": "allow",
+        "browser_scroll": "allow",
+        "browser_back": "allow",
+        # Acts inside the user's logged-in session: confirm.
+        "browser_click": "confirm",
+        "browser_type": "confirm",
+    },
 }
 
 MCP_PREFIX_FMT = "mcp__{server}__"

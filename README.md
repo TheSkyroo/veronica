@@ -128,6 +128,22 @@ sends it to Claude along with your question in one turn — the HUD shows a "Loo
 also decide to look at the screen on its own mid-conversation via the `screenshot` tool (allow-class, runs
 automatically). Requires **Screen Recording** access — see Permissions below.
 
+## Browser control
+
+Veronica can read and act on the page you have open in **Chrome** or **Safari**. Say "read this page", "summarize
+this article", "find pricing on this page", "click the login button", "type hello in the search box and press
+enter", or "open a new tab with github" — Claude picks the right browser tool for the request.
+
+One-time setup, per browser:
+
+- **Chrome** — menu bar **View ▸ Developer ▸ Allow JavaScript from Apple Events**.
+- **Safari** — enable the Develop menu in **Settings ▸ Advanced**, then **Develop ▸ Allow JavaScript from Apple
+  Events**.
+
+The first time a browser tool runs, macOS prompts for **Automation** access to the browser — allow it (see
+Permissions below). Reading, listing tabs, opening a URL, finding text, scrolling and going back run automatically;
+**clicking** and **typing** always ask for confirmation first, since they act inside your logged-in session.
+
 ## Push-to-talk
 
 Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
@@ -187,7 +203,7 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
 **System Settings → Privacy & Security**:
 
 - **Microphone** — wake word and voice commands (asked automatically on first run).
-- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used).
+- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify/Chrome/Safari (asked automatically the first time each is used).
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
 - **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
   asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if

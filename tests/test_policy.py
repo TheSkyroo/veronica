@@ -147,3 +147,12 @@ CASES = [
 @pytest.mark.parametrize("tool,inp,expected", CASES)
 def test_classify(tool, inp, expected):
     assert classify(tool, inp) == expected
+
+
+@pytest.mark.parametrize("short,expected", [
+    ("browser_tabs", "allow"), ("browser_open", "allow"), ("browser_read", "allow"),
+    ("browser_find", "allow"), ("browser_scroll", "allow"), ("browser_back", "allow"),
+    ("browser_click", "confirm"), ("browser_type", "confirm"), ("browser_unknown", "confirm"),
+])
+def test_browser_tool_risk(short, expected):
+    assert classify(f"mcp__browser__{short}", {}) == expected
