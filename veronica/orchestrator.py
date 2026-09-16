@@ -29,7 +29,7 @@ from veronica.brain.intents import (
 from veronica.config import Settings
 from veronica.speech import voices
 from veronica.speech.stt import stt_spec
-from veronica.speech.tts import has_devanagari
+from veronica.brain.sentences import has_devanagari
 from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools

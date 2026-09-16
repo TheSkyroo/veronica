@@ -162,6 +162,8 @@ def test_reply_for_battery_and_volume():
     assert q.reply_for("battery", "hi", percent=72, state="charging") == "Battery 72 percent hai aur charge ho rahi hai."
     assert q.reply_for("battery", "hi", percent=72, state="discharging") == "Battery 72 percent hai aur charge nahi ho rahi."
     assert q.reply_for("battery", "hi", percent=100, state="charged") == "Battery 100 percent hai aur full charge hai."
+    assert q.reply_for("battery", "en", percent=98, state=None) == "Battery is at 98 percent."
+    assert q.reply_for("battery", "hi", percent=98, state=None) == "Battery 98 percent hai."
     assert q.reply_for("battery", "en", percent=None, state=None) == "I couldn't read the battery level."
     assert q.reply_for("battery", "hi", percent=None, state=None) == "Battery level nahi mil paaya."
     assert q.reply_for("volume", "en", percent=40) == "Volume is at 40 percent."

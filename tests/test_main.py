@@ -472,6 +472,40 @@ async def test_build_orchestrator_ignores_unknown_language_pref(monkeypatch, tmp
     memory_tools.bind(None)
 
 
+async def test_build_orchestrator_falls_back_to_english_when_multilingual_stt_fails(monkeypatch, tmp_home, caplog):
+    _patch_audio_fakes(monkeypatch, {"language": "hi"})
+    saved_calls = []
+    monkeypatch.setattr(main_mod.prefs, "save", lambda d: saved_calls.append(d))
+
+    class _Flaky(_FakeTranscriber):
+        def __init__(self, model, language="en"):
+            if model in ("small", "tiny"):
+                raise RuntimeError("model download failed")
+            super().__init__(model, language)
+
+    monkeypatch.setattr(main_mod, "Transcriber", _Flaky)
+    with caplog.at_level("ERROR", logger="veronica"):
+        orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.language == "en"
+    assert (orch.stt.model_name, orch.stt.language) == ("small.en", "en")
+    assert (orch.partial_stt.model_name, orch.partial_stt.language) == ("tiny.en", "en")
+    assert any("model download failed" in r.getMessage() or "download failed" in (r.exc_text or "") for r in caplog.records)
+    assert saved_calls == []     # the saved "hi" pref is left intact for the next launch
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_english_stt_failure_still_raises(monkeypatch, tmp_home):
+    _patch_audio_fakes(monkeypatch, {})
+
+    def boom(model, language="en"):
+        raise RuntimeError("no models at all")
+
+    monkeypatch.setattr(main_mod, "Transcriber", boom)
+    with pytest.raises(RuntimeError, match="no models at all"):
+        main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    memory_tools.bind(None)
+
+
 async def test_build_orchestrator_stt_factory_builds_transcribers(monkeypatch, tmp_home):
     _patch_audio_fakes(monkeypatch, {})
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)

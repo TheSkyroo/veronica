@@ -63,6 +63,26 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     def make_stt(model: str, lang: str | None) -> Transcriber:
         return Transcriber(model, language=lang)
 
+    stt = partial_stt = None
+    if audio:
+        try:
+            stt = make_stt(main_model, stt_language)
+            partial_stt = make_stt(partial_model, stt_language) if s.partial_stt else None
+        except Exception:
+            if language == "en":
+                raise
+            # The multilingual models are downloaded on first use; offline
+            # (or a corrupt cache) must not stop Veronica from starting.
+            # Fall back to the English pair for this session only -- the
+            # saved pref is left alone so the next online launch restores it.
+            logging.getLogger("veronica").exception(
+                "multilingual whisper models failed to load; falling back to English for this session"
+            )
+            language = "en"
+            main_model, stt_language, partial_model = stt_spec(s, "en")
+            stt = make_stt(main_model, stt_language)
+            partial_stt = make_stt(partial_model, stt_language) if s.partial_stt else None
+
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
     # (or a mail count) and composes the announcement itself.
@@ -105,8 +125,8 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         s,
         wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
-        stt=make_stt(main_model, stt_language) if audio else None,
-        partial_stt=make_stt(partial_model, stt_language) if (audio and s.partial_stt) else None,
+        stt=stt,
+        partial_stt=partial_stt,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
         tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed, hindi_voice=saved_hindi_voice),
         player=Player(),

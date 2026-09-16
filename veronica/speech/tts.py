@@ -1,15 +1,12 @@
 import asyncio
-import re
 from pathlib import Path
 
 import numpy as np
 from kokoro_onnx import Kokoro
 
-_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
-
-
-def has_devanagari(text: str) -> bool:
-    return bool(_DEVANAGARI.search(text))
+from veronica.brain.sentences import (
+    has_devanagari,  # also re-exported for compatibility
+)
 
 
 class Synthesizer:

@@ -2995,6 +2995,16 @@ async def test_quick_battery_failure_copy(monkeypatch):
     assert o.tts.said == ["Battery level nahi mil paaya."]
 
 
+async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
+    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (98, None))
+    o, *_ = build_lang(["battery level"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.said[-1] == "Battery is at 98 percent."
+    o, *_ = build_lang(["battery kitni hai"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.said[-1] == "Battery 98 percent hai."
+
+
 async def test_quick_volume_uses_mac_tool(monkeypatch):
     async def fake_get(args):
         return {"content": [{"type": "text", "text": "40"}]}
@@ -3048,8 +3058,11 @@ def test_read_battery_parses_pmset():
     assert mac_tools_mod.read_battery(run=run) == (100, "charged")
     run = lambda *a, **k: R(" -InternalBattery-0\t35%; discharging; 3:10 remaining\n")
     assert mac_tools_mod.read_battery(run=run) == (35, "discharging")
+    # plugged in but not charging (battery-health hold): the state is unknown, not "charging"
     run = lambda *a, **k: R(" -InternalBattery-0\t98%; AC attached; not charging present: true\n")
-    assert mac_tools_mod.read_battery(run=run) == (98, "charging")
+    assert mac_tools_mod.read_battery(run=run) == (98, None)
+    run = lambda *a, **k: R(" -InternalBattery-0\t80%; finishing charge; 0:05 remaining present: true\n")
+    assert mac_tools_mod.read_battery(run=run) == (80, "charging")
     run = lambda *a, **k: R("Now drawing from 'AC Power'\n")
     assert mac_tools_mod.read_battery(run=run) == (None, None)
     run = lambda *a, **k: (_ for _ in ()).throw(OSError("no pmset"))

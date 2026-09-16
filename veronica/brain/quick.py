@@ -17,10 +17,10 @@ import re
 from collections.abc import Callable
 
 from veronica.brain.intents import _FILLERS_BY_LEN, _candidates_for, normalize
+from veronica.brain.sentences import has_devanagari
 
 QuickReply = tuple[str, str]
 _rng = random.Random()
-_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
 
 # -- phrase tables (written in normalize()+strip_wrapper form) -----------------
 _TIME = {"what time is it", "whats the time", "time", "current time", "tell me the time", "what is the time"}
@@ -311,7 +311,7 @@ def reply_lang(text: str, lang: str = "en") -> str:
     utterance is Devanagari, one of our Hinglish phrases, or Hindi-form
     arithmetic ("... kitna hota hai") -- those always get Hindi copy, whatever
     the mode -- otherwise `lang` (the utterance language)."""
-    if _DEVANAGARI_RE.search(text or ""):
+    if has_devanagari(text):
         return "hi"
     if any(c in HINGLISH_PHRASES for c in _candidates_for(normalize(text))):
         return "hi"

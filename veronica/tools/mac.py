@@ -41,8 +41,10 @@ _BATT_RE = re.compile(r"(\d{1,3})%;\s*(charging|discharging|charged|finishing ch
 
 
 def read_battery(run=subprocess.run) -> tuple[int | None, str | None]:
-    """(percent, state) from `pmset -g batt`, state in charging|discharging|charged;
-    (None, None) if pmset is missing, times out, or reports no battery."""
+    """(percent, state) from `pmset -g batt`, state in charging|discharging|
+    charged, or None when the percent is known but the state isn't ("AC
+    attached; not charging" -- plugged in, battery-health hold); (None, None)
+    if pmset is missing, times out, or reports no battery."""
     try:
         p = run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5)
         m = _BATT_RE.search(p.stdout or "")
@@ -51,8 +53,10 @@ def read_battery(run=subprocess.run) -> tuple[int | None, str | None]:
     if not m:
         return None, None
     state = m.group(2).lower()
-    if state in ("finishing charge", "ac attached"):
+    if state == "finishing charge":
         state = "charging"
+    elif state == "ac attached":
+        state = None
     return int(m.group(1)), state
 
 
