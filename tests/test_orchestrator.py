@@ -2669,3 +2669,86 @@ async def test_barge_teardown_logs_turn_exception(caplog):
     with caplog.at_level("ERROR", logger="veronica.orchestrator"):
         await o._barge_teardown(turn)
     assert any("torn down" in r.message for r in caplog.records)
+
+
+# -- batch B: voice / speed --------------------------------------------------
+
+from veronica import prefs as prefs_mod
+
+
+class TTS2(TTS):
+    def __init__(self):
+        super().__init__()
+        self.voice = "af_sarah"
+        self.speed = 1.0
+        self.spoken_with = []   # (text, voice, speed) at synth time
+
+    async def asynth(self, text):
+        self.spoken_with.append((text, self.voice, self.speed))
+        return await super().asynth(text)
+
+
+def build_voice(stt_texts, monkeypatch):
+    saved = []
+    monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(stt_texts),
+        brain=Brain(), tts=TTS2(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    return o, saved, events
+
+
+async def test_voice_intent_switches_voice_and_saves(monkeypatch):
+    o, saved, ev = build_voice(["use a british male voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "bm_george"
+    assert o.tts.spoken_with[-1] == ("Okay, this is George.", "bm_george", 1.0)
+    assert {"tts_voice": "bm_george"} in saved
+    assert ("tool", {"summary": "Voice: George", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+
+async def test_voice_intent_unknown_lists_voices(monkeypatch):
+    o, saved, _ = build_voice(["use a robot voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_sarah"
+    assert saved == []
+    assert o.tts.said[-1].startswith("I don't have that voice. I have Sarah, Bella")
+    assert o.tts.said[-1].endswith("George and Lewis.")
+
+
+async def test_voice_intent_next_cycles(monkeypatch):
+    o, saved, _ = build_voice(["change your voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_bella"
+    assert {"tts_voice": "af_bella"} in saved
+
+
+async def test_speed_faster_and_clamp(monkeypatch):
+    o, saved, _ = build_voice(["speak faster"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.speed == pytest.approx(1.15)
+    assert o.tts.spoken_with[-1][0] == "Like this?"
+    assert any(abs(d.get("tts_speed", 0) - 1.15) < 1e-9 for d in saved)
+
+    o.tts.speed = 1.5
+    o.stt = STT(["speak faster"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.speed == 1.5
+    assert o.tts.said[-1] == "That's as fast as I go."
+
+
+async def test_speed_slower_normal(monkeypatch):
+    o, saved, _ = build_voice(["slow down"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.speed == pytest.approx(0.85)
+    o.stt = STT(["normal speed"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.speed == 1.0
+    assert o.tts.said[-1] == "Like this?"
+    o.stt = STT(["normal speed"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.said[-1] == "Already at normal speed."

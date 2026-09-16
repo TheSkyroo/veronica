@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 
+from veronica import prefs
 from veronica.audio.play import Player
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
@@ -11,6 +12,7 @@ from veronica.brain.agent import Brain
 from veronica.config import Settings, settings, setup_logging
 from veronica.memory.store import MemoryStore
 from veronica.orchestrator import Orchestrator
+from veronica.speech import voices
 from veronica.speech.stt import Transcriber
 from veronica.speech.tts import Synthesizer
 from veronica.tools import memory_tools, pim
@@ -29,6 +31,14 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # local remember/forget intents and logs turns, and the brain still
     # wants facts/recent injected into its system prompt.
     store = MemoryStore(s.memory_path) if s.memory_enabled else None
+    # Voice/speed chosen at runtime ("use a british voice", "speak faster")
+    # outlive the process via prefs.json; Settings only supplies the default.
+    saved = prefs.load()
+    saved_voice = saved.get("tts_voice") or s.kokoro_voice
+    try:
+        saved_speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
+    except (TypeError, ValueError):
+        saved_speed = voices.DEFAULT_SPEED
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
@@ -36,7 +46,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         stt=Transcriber(s.whisper_model) if audio else None,
         partial_stt=Transcriber(s.partial_stt_model) if (audio and s.partial_stt) else None,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
-        tts=Synthesizer(s.kokoro_voice, s.models_dir),
+        tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed),
         player=Player(),
         store=store,
         on_state=on_state,

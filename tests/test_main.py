@@ -10,9 +10,10 @@ from veronica.tools import memory_tools
 
 
 class _FakeSynthesizer:
-    def __init__(self, voice, models_dir):
+    def __init__(self, voice, models_dir, speed=1.0):
         self.voice = voice
         self.models_dir = models_dir
+        self.speed = speed
 
 
 class _FakeBrain:
@@ -24,6 +25,7 @@ class _FakeBrain:
 
 
 async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
 
@@ -52,6 +54,7 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
 
 
 async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
 
@@ -60,6 +63,38 @@ async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp
     assert orch.store is None
     assert orch.brain.memory is None
     assert memory_tools.store is None
+
+
+async def test_build_orchestrator_applies_saved_voice_prefs(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "am_adam", "tts_speed": 9})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == "am_adam"
+    assert orch.tts.speed == 1.5   # clamped to SPEED_MAX
+
+
+async def test_build_orchestrator_defaults_without_voice_prefs(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == Settings().kokoro_voice
+    assert orch.tts.speed == 1.0
+
+
+async def test_build_orchestrator_ignores_bad_speed_pref(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_speed": "fast"})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.speed == 1.0
 
 
 class _FakeWakeWord:
@@ -91,6 +126,7 @@ class _FakeBrainWithOnTool:
 
 
 async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)

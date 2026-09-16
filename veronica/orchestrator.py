@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from veronica import prefs
 from veronica.audio.chime import tone
 from veronica.brain.intents import (
     is_stop_dictation,
@@ -18,9 +19,11 @@ from veronica.brain.intents import (
     match_music_intent,
     match_note_intent,
     match_screen_intent,
+    match_voice_intent,
     normalize,
 )
 from veronica.config import Settings
+from veronica.speech import voices
 from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
@@ -413,6 +416,48 @@ class Orchestrator:
         if res.get("is_error"):
             text = "Sorry, I couldn't do that."
         await self.say(text)
+
+    # -- voice & speed (B1) ---------------------------------------------------------
+    async def _voice_turn(self, action: tuple[str, str]) -> None:
+        """Local fast path for "use a british voice" / "speak faster":
+        mutate the running Synthesizer, persist to prefs.json, and confirm
+        in the new voice/speed so the user hears the change immediately.
+        Also called by the menu bar's Voice/Speed items."""
+        kind, arg = action
+        if kind == "voice":
+            vid = voices.next_voice(self.tts.voice) if arg == "next" else voices.resolve_voice(arg)
+            if vid is None:
+                names = [voices.display_name(v) for v in voices.VOICE_IDS]
+                await self.say(
+                    "I don't have that voice. I have " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                )
+                return
+            self.tts.voice = vid
+            prefs.save({"tts_voice": vid})
+            self._emit("tool", {"summary": f"Voice: {voices.display_name(vid)}", "decision": "auto"})
+            await self.say(f"Okay, this is {voices.display_name(vid)}.")
+            return
+        # speed
+        cur = float(self.tts.speed)
+        if arg == "faster":
+            new = voices.clamp_speed(cur + voices.SPEED_STEP)
+            if new <= cur:
+                await self.say("That's as fast as I go.")
+                return
+        elif arg == "slower":
+            new = voices.clamp_speed(cur - voices.SPEED_STEP)
+            if new >= cur:
+                await self.say("That's as slow as I go.")
+                return
+        else:
+            new = voices.DEFAULT_SPEED
+            if abs(cur - new) < 1e-9:
+                await self.say("Already at normal speed.")
+                return
+        self.tts.speed = round(new, 2)
+        prefs.save({"tts_speed": self.tts.speed})
+        self._emit("tool", {"summary": f"Speed: {self.tts.speed:.2f}x", "decision": "auto"})
+        await self.say("Like this?")
 
     # -- push-to-talk (A2) --------------------------------------------------------
     def ptt_start(self) -> None:
@@ -843,9 +888,14 @@ class Orchestrator:
                 None if (intent is not None or mem is not None or screen_intent or music_action)
                 else match_note_intent(text)
             )
+            voice_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
+                else match_voice_intent(text)
+            )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -886,6 +936,9 @@ class Orchestrator:
             elif note_body is not None:
                 self.player.reset()
                 await self._note_turn(note_body)
+            elif voice_action is not None:
+                self.player.reset()
+                await self._voice_turn(voice_action)
             elif dictation_intent:
                 barged = await self._run_with_barge(self._dictation_turn())
                 if barged:
