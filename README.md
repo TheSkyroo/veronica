@@ -30,11 +30,12 @@ breath as the wake word isn't lost and the wake chime is skipped when she can al
 The HUD's status line under the orb shows what she's doing:
 
 - **Warming up…** — models are loading (first run only).
-- **Listening…** — she's capturing your voice (also shown while a follow-up or a confirmation reply is expected);
-  the bar next to it tracks the live mic level.
+- **Listening…** — she's capturing your voice (also shown during the follow-up window after a reply); the bar
+  next to it tracks the live mic level.
 - **Thinking…** — Claude is working on a reply.
 - **Speaking** — she's talking.
-- **Say yes or no** — she's asked for confirmation before a risky action.
+- **Say yes or no** — she's asked for confirmation before a risky action and is listening for your answer; the
+  question itself appears above, and the mic-level bar is still shown while she listens for it.
 - **Error** — something went wrong; check the log.
 
 While she's listening, the HUD also shows a live partial transcript of what you're saying (in italics), which is

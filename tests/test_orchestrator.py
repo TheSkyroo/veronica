@@ -17,7 +17,7 @@ class Rec:
         self.pcms = list(pcms)
         self._has_speech = has_speech
         self.preroll_calls = []
-    async def capture(self, max_s=None, preroll=None):
+    async def capture(self, max_s=None, preroll=None, partial=False):
         self.preroll_calls.append(preroll)
         return self.pcms.pop(0) if self.pcms else None
     def has_speech(self, pcm): return self._has_speech
@@ -331,7 +331,7 @@ class RecArgs:
         self.pcms = list(pcms)
         self.max_s_calls = []
 
-    async def capture(self, max_s=None, preroll=None):
+    async def capture(self, max_s=None, preroll=None, partial=False):
         self.max_s_calls.append(max_s)
         return self.pcms.pop(0) if self.pcms else None
 
@@ -716,11 +716,11 @@ async def test_barge_in_stops_speech_and_relistens():
             super().__init__(pcms)
             self.n = 0
 
-        async def capture(self, max_s=None, preroll=None):
+        async def capture(self, max_s=None, preroll=None, partial=False):
             self.n += 1
             if self.n > 1:
                 events.append("capture")
-            return await super().capture(max_s=max_s, preroll=preroll)
+            return await super().capture(max_s=max_s, preroll=preroll, partial=partial)
 
     class LoggingSlowBrain(SlowBrain):
         async def interrupt(self):
@@ -758,7 +758,7 @@ class StoppableRec:
     def has_speech(self, pcm):
         return False
 
-    async def capture(self, max_s=None, preroll=None):
+    async def capture(self, max_s=None, preroll=None, partial=False):
         item = self.pcms.pop(0) if self.pcms else None
         if item is self.BLOCK:
             await self._ev.wait()
@@ -835,7 +835,7 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
             self.pcms = list(pcms)
             self.captures = 0
 
-        async def capture(self, max_s=None, preroll=None):
+        async def capture(self, max_s=None, preroll=None, partial=False):
             self.captures += 1
             return self.pcms.pop(0) if self.pcms else None
 
@@ -1059,14 +1059,14 @@ class RecWithOnAudio(Rec):
         self.audio_chunks = audio_chunks
         self.on_audio = None
 
-    async def capture(self, max_s=None, preroll=None):
-        if self.on_audio is not None:
+    async def capture(self, max_s=None, preroll=None, partial=False):
+        if partial and self.on_audio is not None:
             for chunk in self.audio_chunks:
                 self.on_audio(chunk)
             # give the loop.call_soon_threadsafe-scheduled callback (and the
             # task it creates) time to actually run before this returns.
             await asyncio.sleep(0.02)
-        return await super().capture(max_s=max_s, preroll=preroll)
+        return await super().capture(max_s=max_s, preroll=preroll, partial=partial)
 
 
 async def test_partial_transcript_emitted_during_capture_then_final_heard():
@@ -1130,6 +1130,88 @@ async def test_partial_transcription_coalesces_while_one_in_flight():
     release.set()
     await asyncio.sleep(0.01)
 
+
+# -- fix round: confirm() must not be contaminated by a stray partial ---------
+
+async def test_confirm_capture_does_not_fire_on_audio():
+    """confirm()'s yes/no capture must never invoke on_audio — a partial
+    transcription of "yes" would otherwise overwrite the HUD's You row."""
+    audio_chunks = [np.zeros(10, dtype=np.int16)]
+    rec = RecWithOnAudio([np.zeros(1, np.int16)], audio_chunks)
+    partial = PartialSTT(["should never appear"])
+    events = []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=rec, stt=STT(["yes"]),
+        partial_stt=partial,
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    o._loop = asyncio.get_running_loop()
+    rec.on_audio = o._on_recorder_audio
+
+    assert await o.confirm("Bash: rm x") is True
+    await asyncio.sleep(0.05)
+    assert [p for k, p in events if k == "heard_partial"] == []
+    assert partial.calls == 0
+
+
+# -- fix round: stale partial dropped after the turn's final heard ------------
+
+async def test_run_partial_drops_result_if_gen_advanced_while_transcribing():
+    """The gen re-check right before _emit: even if a partial transcription
+    wasn't (or couldn't be) cancelled in time, a result computed for a
+    generation that's no longer current must not be emitted."""
+    events = []
+
+    class SlowPartial:
+        async def atranscribe(self, pcm):
+            return "late text"
+
+    o = Orchestrator(
+        Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=SlowPartial(),
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    stale_gen = o._partial_gen
+    o._partial_gen += 1  # simulate the owning capture() having already ended
+
+    await o._run_partial(np.zeros(4, dtype=np.int16), stale_gen)
+
+    assert [p for k, p in events if k == "heard_partial"] == []
+
+
+def test_schedule_partial_drops_stale_gen():
+    o = Orchestrator(
+        Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=object(), brain=Brain(), tts=TTS(), player=Player(),
+    )
+    stale_gen = o._partial_gen
+    o._partial_gen += 1
+
+    o._schedule_partial(np.zeros(4, dtype=np.int16), stale_gen)
+
+    assert o._partial_task is None  # never scheduled: the gen was already stale
+
+
+async def test_partial_task_cancelled_when_capture_returns():
+    o, _ = build()
+    o.partial_stt = object()  # unused; we drive _partial_task directly
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    o._partial_task = asyncio.ensure_future(fut)
+    o._end_partial_window()
+    await asyncio.sleep(0)
+    assert o._partial_task.cancelled()
+
+
+async def test_end_partial_window_bumps_gen_each_call():
+    o, _ = build()
+    g0 = o._partial_gen
+    o._end_partial_window()
+    assert o._partial_gen == g0 + 1
+    o._end_partial_window()
+    assert o._partial_gen == g0 + 2
 
 
 # -- item 4: stop eavesdropping (shorter follow-up, spoken end phrases) --------

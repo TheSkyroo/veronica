@@ -127,25 +127,28 @@
             // of blanking it out.
             if (typeof t.detail === 'string') detailEl.textContent = t.detail;
             if (decision === 'ask') {
-              hintEl.textContent = 'say "yes" or "no"';
+              // No "say yes or no" text here: the #status label already
+              // says "Say yes or no" while confirming, so the hint row is
+              // reserved for the question itself (set by the 'prompt' event
+              // below), not a duplicate of the status label.
               model.confirmTimeoutMs = (+t.timeout_ms) || 8000;
               // Countdown starts here (once the question has actually been
               // spoken and we're about to start listening), not when the
               // 'confirming' state was entered.
               model.confirmStart = performance.now();
             } else {
-              hintEl.textContent = '';
               model.prompt = ''; promptEl.textContent = '';
             }
             break;
           }
           case 'prompt': {
             // The confirmation question, spoken right before we start
-            // listening. Shown immediately, with the hint beneath it; the
-            // countdown arc itself doesn't start until the 'tool' ask event.
+            // listening. Shown immediately in the prompt row; the status
+            // label already reads "Say yes or no" while confirming, so
+            // there's no separate hint text here. The countdown arc itself
+            // doesn't start until the 'tool' ask event.
             const s = String(payload ?? '');
             model.prompt = s; promptEl.textContent = s;
-            hintEl.textContent = s ? 'say "yes" or "no"' : '';
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;

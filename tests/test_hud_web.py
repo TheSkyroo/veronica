@@ -142,7 +142,9 @@ def test_confirm_hint_appears_and_clears():
         # The question is spoken (and rendered) as a 'prompt' event, distinct
         # from the reply row; the 'tool' ask event (carrying summary/detail
         # and the countdown timeout) follows once the question has been
-        # spoken.
+        # spoken. The status label ("Say yes or no") covers the "how to
+        # answer" part, so the #hint row is not a duplicate of it.
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
         page.evaluate(
             "window.hud.push({kind:'prompt', payload:'Fetch weather from wttr.in?'})"
         )
@@ -151,7 +153,8 @@ def test_confirm_hint_appears_and_clears():
             "detail:'Bash: curl -s https://wttr.in', decision:'ask', timeout_ms:8000}})"
         )
         assert page.inner_text("#prompt .msg") == 'Fetch weather from wttr.in?'
-        assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
+        assert page.inner_text("#status .label") == 'Say yes or no'
+        assert page.inner_text("#hint .msg") == ""  # no duplicate "say yes or no" text
         assert page.inner_text("#tool .detail") == 'Bash: curl -s https://wttr.in'
         assert page.inner_text("#reply .msg") == 'Something before.'
 
@@ -241,6 +244,8 @@ def test_status_label_per_state():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -264,6 +269,7 @@ def test_status_label_per_state():
         page.evaluate("window.hud.push({kind:'state', payload:'idle'})")
         assert page.inner_text("#status .label") == ""
 
+        assert not errors, f"page errors: {errors}"
         browser.close()
 
 
@@ -274,6 +280,8 @@ def test_level_bar_grows_with_mic_while_listening():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -291,6 +299,7 @@ def test_level_bar_grows_with_mic_while_listening():
         )
         assert level_display == "none"
 
+        assert not errors, f"page errors: {errors}"
         browser.close()
 
 
@@ -301,6 +310,8 @@ def test_heard_clamp_keeps_card_in_bounds():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -314,6 +325,7 @@ def test_heard_clamp_keeps_card_in_bounds():
         assert heard_box["bottom"] <= card_box["bottom"]
         assert card_box["width"] == 400 and card_box["height"] == 230
 
+        assert not errors, f"page errors: {errors}"
         browser.close()
 
 
@@ -324,6 +336,8 @@ def test_partial_transcript_then_final():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 400, "height": 240})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
@@ -343,4 +357,5 @@ def test_partial_transcript_then_final():
         assert page.inner_text("#heard .msg") == ""
         assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
 
+        assert not errors, f"page errors: {errors}"
         browser.close()

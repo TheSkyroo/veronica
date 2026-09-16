@@ -19,7 +19,7 @@ _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
 
 def _normalize_phrase(text: str) -> str:
-    return (text or "").lower().translate(_PUNCT_TABLE).strip()
+    return (text or "").lower().replace("’", "").translate(_PUNCT_TABLE).strip()
 
 
 class Orchestrator:
@@ -65,6 +65,11 @@ class Orchestrator:
         self._now_speaking = ""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
+        # Bumped every time a partial-eligible capture() returns, before STT
+        # runs on it: any partial transcription still in flight (or one that
+        # races in from the recorder thread right at that boundary) belongs
+        # to a capture that's already over and must be dropped.
+        self._partial_gen = 0
         if self.recorder is not None and self.partial_stt is not None:
             self.recorder.on_audio = self._on_recorder_audio
         # Own-speech suppression for the whisper wake engine: the mic's rolling
@@ -85,6 +90,8 @@ class Orchestrator:
         await self.tts.asynth("ok")
         if self.stt is not None:
             await self.stt.atranscribe(np.zeros(16000, dtype=np.int16))
+        if self.partial_stt is not None:
+            await self.partial_stt.atranscribe(np.zeros(16000, dtype=np.int16))
         log.info("warmup done in %.1fs", time.monotonic() - t0)
         self.ready = True
         self._set("idle")
@@ -119,6 +126,17 @@ class Orchestrator:
         return self._now_speaking
 
     # -- live partial transcript -----------------------------------------------
+    def _end_partial_window(self) -> None:
+        """Called right after any partial-eligible recorder.capture() returns,
+        before STT runs on the result: bumps the generation counter so a
+        partial transcription still in flight (or one that races in from the
+        recorder thread right at this boundary) is recognized as stale and
+        dropped rather than emitted after — or worse, overwriting — this
+        turn's real 'heard' text. Also cancels the in-flight task outright."""
+        self._partial_gen += 1
+        if self._partial_task is not None and not self._partial_task.done():
+            self._partial_task.cancel()
+
     def _on_recorder_audio(self, pcm: np.ndarray) -> None:
         """Called from the Recorder's capture thread (not the event loop)
         every partial_hop_s of captured speech. Hands off to the loop
@@ -127,22 +145,27 @@ class Orchestrator:
         loop = self._loop
         if loop is None:
             return
+        gen = self._partial_gen
         try:
-            loop.call_soon_threadsafe(self._schedule_partial, pcm)
+            loop.call_soon_threadsafe(self._schedule_partial, pcm, gen)
         except RuntimeError:
             pass  # loop closed/closing; drop this partial
 
-    def _schedule_partial(self, pcm: np.ndarray) -> None:
+    def _schedule_partial(self, pcm: np.ndarray, gen: int) -> None:
+        if gen != self._partial_gen:
+            return  # the capture this came from is already over
         if self._partial_task is not None and not self._partial_task.done():
             return  # a partial transcription is already in flight; coalesce
-        self._partial_task = asyncio.ensure_future(self._run_partial(pcm))
+        self._partial_task = asyncio.ensure_future(self._run_partial(pcm, gen))
 
-    async def _run_partial(self, pcm: np.ndarray) -> None:
+    async def _run_partial(self, pcm: np.ndarray, gen: int) -> None:
         try:
             text = await self.partial_stt.atranscribe(pcm)
         except Exception:
             log.exception("partial transcription failed")
             return
+        if gen != self._partial_gen:
+            return  # capture ended (or another one started) while transcribing
         if text:
             self._emit("heard_partial", text)
 
@@ -419,7 +442,9 @@ class Orchestrator:
         pre = self.wake.take_preroll()
         if not self.recorder.has_speech(pre):
             await self.chime(self.s.chime_wake_hz, 120)
-        return await self.recorder.capture(max_s=self.s.listen_wait_s, preroll=pre)
+        pcm = await self.recorder.capture(max_s=self.s.listen_wait_s, preroll=pre, partial=True)
+        self._end_partial_window()
+        return pcm
 
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
@@ -451,7 +476,8 @@ class Orchestrator:
                     continue
             self._set("followup")
             await self.chime(self.s.chime_followup_hz, 100)
-            pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s))
+            pcm = await self.recorder.capture(max_s=max(1, self.s.followup_window_s), partial=True)
+            self._end_partial_window()
             if pcm is None:
                 break
         self._set("idle")
