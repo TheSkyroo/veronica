@@ -139,3 +139,19 @@ def test_has_speech(monkeypatch):
     assert r.has_speech(np.zeros(0, dtype=np.int16)) is False
     assert r.has_speech(None) is False
 
+
+# -- live partial transcript (item 3) ------------------------------------------
+
+async def test_on_audio_called_after_hop_of_speech_not_before(monkeypatch):
+    calls = []
+    # 30 ms/frame; partial_hop_s=0.09 -> 3 frames per hop
+    r = make("ssssssssss..........", monkeypatch, partial_hop_s=0.09)
+    r.on_audio = calls.append
+    await r.capture()
+    assert len(calls) >= 1
+    # not called before speech starts: every call carries only started-buffer audio
+    for c in calls:
+        assert c.size > 0
+        assert np.all(c == 1000) or 1000 in c
+    # first call happens after >= 3 speech frames (0.09s), not on frame 1
+    assert calls[0].size >= FRAME * 3

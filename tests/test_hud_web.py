@@ -316,3 +316,31 @@ def test_heard_clamp_keeps_card_in_bounds():
 
         browser.close()
 
+
+@pytest.mark.live
+def test_partial_transcript_then_final():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'heard_partial', payload:'what time'})")
+        assert page.inner_text("#heard .msg") == "what time"
+        assert "partial" in page.get_attribute("#heard .msg", "class")
+
+        page.evaluate("window.hud.push({kind:'heard', payload:'what time is it'})")
+        assert page.inner_text("#heard .msg") == "what time is it"
+        assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
+
+        # a fresh 'listening' clears any leftover partial styling/text
+        page.evaluate("window.hud.push({kind:'heard_partial', payload:'stray'})")
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        assert page.inner_text("#heard .msg") == ""
+        assert "partial" not in (page.get_attribute("#heard .msg", "class") or "")
+
+        browser.close()

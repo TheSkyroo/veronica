@@ -34,11 +34,13 @@ class Orchestrator:
         return False
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
+                 partial_stt=None,
                  on_state: Callable[[str], None] | None = None,
                  on_event: Callable[[str, Any], None] | None = None) -> None:
         self.s = settings
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
+        self.partial_stt = partial_stt
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
         self.state = "idle"
@@ -49,6 +51,10 @@ class Orchestrator:
         self._confirm_capturing = False
         self._barged = False
         self._now_speaking = ""
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._partial_task: asyncio.Task | None = None
+        if self.recorder is not None and self.partial_stt is not None:
+            self.recorder.on_audio = self._on_recorder_audio
         # Own-speech suppression for the whisper wake engine: the mic's rolling
         # analysis window can still hold the tail of a just-finished sentence
         # (e.g. "...I'm Veronica") for up to wake_window_s + wake_hop_s after
@@ -99,6 +105,34 @@ class Orchestrator:
         if self._clock() < self._last_spoken_until:
             return f"{self._now_speaking} {self._last_spoken}"
         return self._now_speaking
+
+    # -- live partial transcript -----------------------------------------------
+    def _on_recorder_audio(self, pcm: np.ndarray) -> None:
+        """Called from the Recorder's capture thread (not the event loop)
+        every partial_hop_s of captured speech. Hands off to the loop
+        thread-safely; coalescing (skip while a partial transcription is
+        already running) happens there, not here."""
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._schedule_partial, pcm)
+        except RuntimeError:
+            pass  # loop closed/closing; drop this partial
+
+    def _schedule_partial(self, pcm: np.ndarray) -> None:
+        if self._partial_task is not None and not self._partial_task.done():
+            return  # a partial transcription is already in flight; coalesce
+        self._partial_task = asyncio.ensure_future(self._run_partial(pcm))
+
+    async def _run_partial(self, pcm: np.ndarray) -> None:
+        try:
+            text = await self.partial_stt.atranscribe(pcm)
+        except Exception:
+            log.exception("partial transcription failed")
+            return
+        if text:
+            self._emit("heard_partial", text)
 
     async def _say_unlocked(self, text: str, kind: str = "sentence") -> None:
         # Called only while _speech_lock is already held (by say()/confirm()).
@@ -377,6 +411,7 @@ class Orchestrator:
 
     async def one_turn(self) -> None:
         """Called after wake word: listen, answer, then follow-up window."""
+        self._loop = asyncio.get_running_loop()
         pcm = await self._listen_after_wake()
         if pcm is None:
             self._set("idle")

@@ -46,7 +46,7 @@
 
   function clearTurn() {
     model.heard = ''; model.reply = ''; replySentences = []; clearReply();
-    replyEl.textContent = ''; heardEl.textContent = '';
+    replyEl.textContent = ''; heardEl.textContent = ''; heardEl.classList.remove('partial');
     model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = ''; detailEl.textContent = '';
     model.prompt = ''; promptEl.textContent = '';
     hintEl.textContent = '';
@@ -89,12 +89,19 @@
             statusEl.dataset.state = payload;
             statusLabelEl.textContent = STATUS_LABELS[payload] || '';
             break;
+          case 'heard_partial': {
+            const s = String(payload ?? '');
+            heardEl.textContent = s;
+            heardEl.classList.add('partial');
+            break;
+          }
           case 'heard': {
             // A new user utterance (including a follow-up, which never
             // passes through 'listening') starts a fresh turn: clear the
             // previous reply/tool state so it doesn't bleed into this one.
             clearTurn();
             model.heard = payload || ''; heardEl.textContent = model.heard;
+            heardEl.classList.remove('partial');
             break;
           }
           case 'sentence': {

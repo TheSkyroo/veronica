@@ -1038,3 +1038,95 @@ async def test_on_event_errors_are_swallowed():
     def boom(k, p): raise RuntimeError("x")
     o = Orchestrator(Settings(), wake=Wake(), recorder=Rec([]), stt=STT([]), brain=Brain(), tts=TTS(), player=Player(), on_event=boom)
     await o.say("hi")   # must not raise
+
+
+# -- item 3: live partial transcript -------------------------------------------
+
+class PartialSTT:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls = 0
+
+    async def atranscribe(self, pcm):
+        self.calls += 1
+        return self.texts.pop(0) if self.texts else ""
+
+
+class RecWithOnAudio(Rec):
+    """Simulates the real Recorder firing on_audio during capture()."""
+    def __init__(self, pcms, audio_chunks):
+        super().__init__(pcms)
+        self.audio_chunks = audio_chunks
+        self.on_audio = None
+
+    async def capture(self, max_s=None, preroll=None):
+        if self.on_audio is not None:
+            for chunk in self.audio_chunks:
+                self.on_audio(chunk)
+            # give the loop.call_soon_threadsafe-scheduled callback (and the
+            # task it creates) time to actually run before this returns.
+            await asyncio.sleep(0.02)
+        return await super().capture(max_s=max_s, preroll=preroll)
+
+
+async def test_partial_transcript_emitted_during_capture_then_final_heard():
+    events = []
+    audio_chunks = [np.zeros(10, dtype=np.int16)]
+    rec = RecWithOnAudio([np.zeros(1, np.int16), None], audio_chunks)
+    partial = PartialSTT(["what time"])
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=rec, stt=STT(["what time is it"]),
+        partial_stt=partial,
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    await o.one_turn()
+    await asyncio.sleep(0.05)
+
+    kinds = [k for k, _ in events]
+    assert [p for k, p in events if k == "heard_partial"] == ["what time"]
+    assert ("heard", "what time is it") in events
+    assert kinds.index("heard_partial") < kinds.index("heard")
+
+
+async def test_no_partial_transcript_without_partial_stt():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hi"])
+    assert o.partial_stt is None
+    # Rec (the plain fake) has no on_audio attribute set by Orchestrator
+    # since partial_stt is None.
+    await o.one_turn()  # must not raise
+
+
+async def test_partial_transcription_coalesces_while_one_in_flight():
+    """A second on_audio callback that arrives while a partial transcription
+    is still running must be dropped, not queued."""
+    running = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class SlowPartial:
+        async def atranscribe(self, pcm):
+            calls.append(pcm)
+            running.set()
+            await release.wait()
+            return "slow result"
+
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([]), stt=STT([]),
+        partial_stt=SlowPartial(),
+        brain=Brain(), tts=TTS(), player=Player(),
+    )
+    o._loop = asyncio.get_running_loop()
+
+    o._on_recorder_audio(np.zeros(4, dtype=np.int16))
+    await asyncio.wait_for(running.wait(), 1)
+    # second callback while the first is still in flight: coalesced away
+    o._on_recorder_audio(np.zeros(4, dtype=np.int16))
+    await asyncio.sleep(0.01)
+    assert len(calls) == 1
+
+    release.set()
+    await asyncio.sleep(0.01)
+

@@ -23,6 +23,7 @@ class Recorder:
         settings: Settings,
         frames: Callable[[], Iterator[bytes]] | None = None,
         on_level: Callable[[float], None] | None = None,
+        on_audio: Callable[[np.ndarray], None] | None = None,
     ) -> None:
         self.s = settings
         self._frames = frames or self._mic_frames
@@ -31,6 +32,10 @@ class Recorder:
         self._capturing = False
         self._on_level = on_level
         self._level_error_logged = False
+        # Public, reassignable: Orchestrator wires this up after construction
+        # when partial live transcription is enabled.
+        self.on_audio = on_audio
+        self._audio_error_logged = False
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
@@ -101,12 +106,14 @@ class Recorder:
         min_speech_frames = self.s.min_speech_ms // fm
         max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
+        hop_frames = max(1, int(self.s.partial_hop_s * 1000 / fm))
 
         buf: list[bytes] = []
         speech_frames = 0
         silence_run = 0
         started = False
         waited = 0
+        frames_since_partial = 0
 
         def _all_frames():
             yield from self._preroll_frames(preroll)
@@ -134,6 +141,16 @@ class Recorder:
                     else:
                         continue
                 buf.append(frame)
+                if self.on_audio is not None:
+                    frames_since_partial += 1
+                    if frames_since_partial >= hop_frames:
+                        frames_since_partial = 0
+                        try:
+                            self.on_audio(np.frombuffer(b"".join(buf), dtype=np.int16).copy())
+                        except Exception:
+                            if not self._audio_error_logged:
+                                log.exception("on_audio callback failed")
+                                self._audio_error_logged = True
                 if is_speech:
                     speech_frames += 1
                     silence_run = 0

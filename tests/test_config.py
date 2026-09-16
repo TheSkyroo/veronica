@@ -25,6 +25,9 @@ def test_defaults(tmp_home):
     assert s.session_file == tmp_home / "session"
     assert s.log_file == tmp_home / "logs" / "veronica.log"
     assert s.whisper_model == "small.en"
+    assert s.partial_stt is True
+    assert s.partial_stt_model == "tiny.en"
+    assert s.partial_hop_s == 0.7
     assert s.hud_enabled is True and s.hud_hide_after_s == 3.0
     assert (s.hud_width, s.hud_height, s.hud_margin) == (400, 230, 24)
     assert s.vad_silence_ms == 800

@@ -19,6 +19,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
 
 #heard .msg{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#heard .msg.partial{font-style:italic;opacity:.6}
 
 #status{display:flex;align-items:center;gap:6px;min-height:14px}
 #status .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s ease}
