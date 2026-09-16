@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     max_turns: int | None = None
     brain_cwd: Path = Field(default_factory=Path.home)
 
+    # memory
+    memory_enabled: bool = True
+    memory_recent_turns: int = 6
+
     # HUD
     hud_enabled: bool = True
     hud_hide_after_s: float = 3.0
@@ -78,6 +82,10 @@ class Settings(BaseSettings):
     @property
     def models_dir(self) -> Path:
         return self.home / "models"
+
+    @property
+    def memory_path(self) -> Path:
+        return self.home / "memory.db"
 
     def ensure_dirs(self) -> None:
         (self.home / "logs").mkdir(parents=True, exist_ok=True)

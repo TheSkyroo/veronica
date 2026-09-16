@@ -96,6 +96,31 @@ def _match_candidate(candidate: str) -> Intent | None:
     return None
 
 
+_MEMORY_LEAD_RE = re.compile(r"^(?:hey\s+veronica|veronica)[,\s]+", re.IGNORECASE)
+_REMEMBER_RE = re.compile(r"^remember\s+(?:that\s+)?(.+)$", re.IGNORECASE)
+_FORGET_RE = re.compile(r"^forget\s+(?:that\s+)?(.+)$", re.IGNORECASE)
+
+
+def match_memory_intent(text: str) -> tuple[str, str] | None:
+    """Match "remember (that) X" / "forget (that) X" against a heard
+    utterance. Unlike match_intent (exact-phrase matching against a
+    normalized string), this carries a payload, so it preserves the
+    original casing/punctuation of X rather than normalizing it — only an
+    optional leading "veronica"/"hey veronica" and a trailing sentence-ending
+    period are stripped. Returns ("remember", X) or ("forget", X), or None
+    if the utterance doesn't start with "remember"/"forget"."""
+    raw = (text or "").strip()
+    raw = _MEMORY_LEAD_RE.sub("", raw, count=1).strip()
+    for kind, pattern in (("remember", _REMEMBER_RE), ("forget", _FORGET_RE)):
+        m = pattern.match(raw)
+        if m:
+            arg = m.group(1).strip().rstrip(".!?").strip()
+            if arg and arg.lower() != "that":
+                return (kind, arg)
+            return None
+    return None
+
+
 def match_intent(text: str) -> Intent | None:
     """Match a heard utterance (as-spoken, not yet normalized) against the
     local intent phrase sets. Tries the whole normalized utterance first

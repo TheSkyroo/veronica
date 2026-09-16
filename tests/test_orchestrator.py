@@ -1532,3 +1532,87 @@ async def test_muted_announcement_delivered_on_unmute():
 
     assert o.tts.said == ["Timer done"]
     assert "speaking" in states
+
+
+# -- memory (remember/forget intents, turn logging) --------------------------
+
+class FakeStore:
+    def __init__(self):
+        self.turns = []
+        self.facts = []
+
+    def add_turn(self, heard, reply):
+        self.turns.append((heard, reply))
+
+    def add_fact(self, text):
+        self.facts.append(text)
+        return len(self.facts)
+
+    def delete_fact_matching(self, text):
+        before = len(self.facts)
+        self.facts = [f for f in self.facts if text.lower() not in f.lower()]
+        return before - len(self.facts)
+
+
+async def test_handle_text_logs_turn_when_store_present():
+    store = FakeStore()
+    o, _ = build()
+    o.store = store
+    out = await o.handle_text("hello")
+    assert out == ["Sure.", "Done."]
+    assert store.turns == [("hello", "Sure. Done.")]
+
+
+async def test_handle_text_skips_logging_without_store():
+    o, _ = build()
+    assert o.store is None
+    await o.handle_text("hello")  # no store -> no error
+
+
+async def test_handle_text_skips_logging_when_memory_disabled():
+    store = FakeStore()
+    o, _ = build()
+    o.store = store
+    o.s.memory_enabled = False
+    await o.handle_text("hello")
+    assert store.turns == []
+
+
+async def test_remember_intent_stores_fact_and_says_got_it():
+    store = FakeStore()
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == ["I like tea"]
+    assert "Got it." in o.tts.said
+
+
+async def test_remember_intent_skips_claude():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
+    await o.one_turn()
+    assert o.brain.asked == []
+
+
+async def test_forget_intent_deletes_and_says_forgotten():
+    store = FakeStore()
+    store.facts = ["I like tea"]
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["forget that I like tea"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == []
+    assert "Forgotten." in o.tts.said
+
+
+async def test_forget_intent_no_match_says_didnt_have_that():
+    store = FakeStore()
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["forget that I like tea"])
+    o.store = store
+    await o.one_turn()
+    assert "I didn't have that." in o.tts.said
+
+
+async def test_remember_without_store_still_says_got_it():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
+    assert o.store is None
+    await o.one_turn()
+    assert "Got it." in o.tts.said
