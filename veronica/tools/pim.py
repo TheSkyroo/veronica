@@ -450,6 +450,22 @@ async def reminder_create(args: dict) -> dict:
     return await _osascript(script, ok_text=f"Created reminder '{title}'")
 
 
+# -- notes -----------------------------------------------------------------
+@tool("notes_create", "Create a note in Notes.app", {"title": str, "body": str})
+@_guard
+async def notes_create(args: dict) -> dict:
+    title = str(args.get("title", "")).strip()
+    if not title:
+        return _err("title is required")
+    body = str(args.get("body", "") or "")
+    script = (
+        'tell application "Notes"\n'
+        f'make new note at folder "Notes" with properties {{name:"{_q(title)}", body:"{_q(body)}"}}\n'
+        "end tell\n"
+    )
+    return await _osascript(script, ok_text=f"Created note '{title}'")
+
+
 # -- timers -----------------------------------------------------------------
 service = None  # bound by build_orchestrator via bind()
 
@@ -508,6 +524,7 @@ TOOLS = [
     calendar_events, calendar_create,
     mail_unread, mail_search, mail_send,
     reminder_create, reminders_due,
+    notes_create,
     timer_set, timer_list, timer_cancel,
 ]
 PIM_TOOL_NAMES = [t.name for t in TOOLS]

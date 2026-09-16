@@ -227,6 +227,34 @@ async def test_reminder_create_escapes_title(fake_run):
     assert '\\"hi\\"' in argv[2]
 
 
+# -- notes_create ----------------------------------------------------------------
+
+async def test_notes_create(fake_run):
+    res = await pim.notes_create.handler({"title": "Groceries", "body": "milk, eggs"})
+    argv = argv_of(fake_run)
+    assert 'tell application "Notes"' in argv[2]
+    assert 'name:"Groceries"' in argv[2]
+    assert 'body:"milk, eggs"' in argv[2]
+    assert "Created note 'Groceries'" in text(res)
+
+
+async def test_notes_create_missing_title_is_error(fake_run):
+    res = await pim.notes_create.handler({"title": "", "body": "x"})
+    assert res["is_error"] and fake_run == []
+
+
+async def test_notes_create_no_body(fake_run):
+    await pim.notes_create.handler({"title": "Reminder"})
+    argv = argv_of(fake_run)
+    assert 'body:""' in argv[2]
+
+
+async def test_notes_create_escapes_quotes(fake_run):
+    await pim.notes_create.handler({"title": 'Say "hi"', "body": 'he said "hi"'})
+    argv = argv_of(fake_run)
+    assert argv[2].count('\\"hi\\"') == 2
+
+
 # -- reminders_due --------------------------------------------------------------
 
 async def test_reminders_due_argv_and_days_clamp(fake_run):
@@ -343,6 +371,7 @@ def test_server_and_names():
         "calendar_events", "calendar_create",
         "mail_unread", "mail_search", "mail_send",
         "reminder_create", "reminders_due",
+        "notes_create",
         "timer_set", "timer_list", "timer_cancel",
     }
 

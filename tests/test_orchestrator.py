@@ -1874,3 +1874,105 @@ async def test_ptt_start_while_speaking_barges_then_captures():
     assert interrupted == [True]
     assert o.player.stops >= 1
     assert o.brain.asked == ["stop that"]
+
+
+# -- batch A: notes & dictation (A4) -------------------------------------------
+
+from veronica.tools import pim as pim_tools_mod
+from veronica.tools import mac as mac_tools_mod
+
+
+async def test_note_intent_creates_note_and_says_noted(monkeypatch):
+    calls = []
+
+    async def fake_notes_create(args):
+        calls.append(args)
+        return {"content": [{"type": "text", "text": "Created note 'x'"}]}
+
+    monkeypatch.setattr(pim_tools_mod.notes_create, "handler", fake_notes_create)
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["take a note: buy milk"])
+    await o.one_turn()
+    assert "Noted." in o.tts.said
+    assert calls[0]["body"] == "buy milk"
+    assert calls[0]["title"].startswith("buy milk")
+    assert any(k == "tool" and p.get("decision") == "auto" for k, p in ev)
+    assert o.brain.asked == []
+
+
+async def test_note_intent_error_says_sorry(monkeypatch):
+    async def fake_notes_create(args):
+        return {"content": [{"type": "text", "text": "error: nope"}], "is_error": True}
+
+    monkeypatch.setattr(pim_tools_mod.notes_create, "handler", fake_notes_create)
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["note that call mom"])
+    await o.one_turn()
+    assert "Sorry, I couldn't save that note." in o.tts.said
+
+
+async def test_note_title_is_first_40_chars_plus_timestamp(monkeypatch):
+    calls = []
+
+    async def fake_notes_create(args):
+        calls.append(args)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(pim_tools_mod.notes_create, "handler", fake_notes_create)
+    long_body = "x" * 100
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=[f"note that {long_body}"])
+    await o.one_turn()
+    title = calls[0]["title"]
+    assert title.startswith("x" * 40)
+    assert "x" * 41 not in title.split(" — ")[0] + " "  # body portion capped at 40 chars
+
+
+async def test_dictation_captures_until_stop_and_types(monkeypatch):
+    typed = []
+
+    def fake_dictate_type(text):
+        typed.append(text)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(mac_tools_mod, "dictate_type", fake_dictate_type)
+    o, _, ev = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["dictate", "hello there", "how are you", "stop dictation"],
+    )
+    await o.one_turn()
+    assert "Go ahead." in o.tts.said
+    assert typed == ["hello there how are you"]
+    assert "Done." in o.tts.said
+    assert o.brain.asked == []
+
+
+async def test_dictation_ends_on_silence_without_stop_phrase(monkeypatch):
+    typed = []
+    monkeypatch.setattr(
+        mac_tools_mod, "dictate_type",
+        lambda text: (typed.append(text), {"content": [{"type": "text", "text": "ok"}]})[1],
+    )
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["dictate", "just one line"],
+    )
+    await o.one_turn()
+    assert typed == ["just one line"]
+    assert "Done." in o.tts.said
+
+
+async def test_dictation_nothing_said_speaks_fallback():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["start dictation"])
+    await o.one_turn()
+    assert "I didn't catch anything." in o.tts.said
+
+
+async def test_dictation_type_error_speaks_fallback(monkeypatch):
+    monkeypatch.setattr(
+        mac_tools_mod, "dictate_type",
+        lambda text: {"content": [{"type": "text", "text": "error: no access"}], "is_error": True},
+    )
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["dictate", "hello"],
+    )
+    await o.one_turn()
+    assert "Sorry, I couldn't type that." in o.tts.said

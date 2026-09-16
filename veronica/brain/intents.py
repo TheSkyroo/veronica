@@ -225,6 +225,54 @@ def match_screen_intent(text: str) -> bool:
     return False
 
 
+# Note-taking and dictation (A4) — matched with their own functions (like
+# match_memory_intent) since they carry a payload / aren't in the plain
+# Intent enum.
+_TAKE_NOTE_RE = re.compile(r"^take a note[:,]?\s+(.+)$", re.IGNORECASE)
+_NOTE_THAT_RE = re.compile(r"^note that\s+(.+)$", re.IGNORECASE)
+
+DICTATE_PHRASES = frozenset({"dictate", "start dictation", "begin dictation"})
+STOP_DICTATION_PHRASES = frozenset({"stop dictation", "stop dictating", "end dictation"})
+
+
+def match_note_intent(text: str) -> str | None:
+    """Match "take a note: X" / "take a note X" / "note that X" against a
+    heard utterance, returning X (original casing/punctuation preserved,
+    only a trailing sentence-ending period stripped) or None."""
+    raw = (text or "").strip()
+    raw = _MEMORY_LEAD_RE.sub("", raw, count=1).strip()
+    for pattern in (_TAKE_NOTE_RE, _NOTE_THAT_RE):
+        m = pattern.match(raw)
+        if m:
+            arg = m.group(1).strip().rstrip(".!?").strip()
+            if arg:
+                return arg
+    return None
+
+
+def match_dictation_intent(text: str) -> bool:
+    """True if `text` asks Veronica to start dictating — matched the same
+    way as match_intent (whole utterance, then each clause)."""
+    norm_whole = normalize(text)
+    for candidate in _candidates_for(norm_whole):
+        if candidate in DICTATE_PHRASES:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in DICTATE_PHRASES:
+                return True
+    return False
+
+
+def is_stop_dictation(text: str) -> bool:
+    """True if `text` is the "stop dictation" utterance that ends an
+    in-progress dictation capture."""
+    return normalize(text) in STOP_DICTATION_PHRASES
+
+
 def match_intent(text: str) -> Intent | None:
     """Match a heard utterance (as-spoken, not yet normalized) against the
     local intent phrase sets. Tries the whole normalized utterance first

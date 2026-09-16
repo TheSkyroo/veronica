@@ -1,9 +1,12 @@
 import pytest
 
 from veronica.brain.intents import (
+    is_stop_dictation,
+    match_dictation_intent,
     match_intent,
     match_memory_intent,
     match_music_intent,
+    match_note_intent,
     match_screen_intent,
     normalize,
 )
@@ -184,3 +187,55 @@ def test_match_screen_intent(heard, expected):
 )
 def test_match_music_intent(heard, expected):
     assert match_music_intent(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("take a note: buy milk", "buy milk"),
+        ("take a note buy milk", "buy milk"),
+        ("Take a note, call mom tomorrow.", "call mom tomorrow"),
+        ("note that the wifi password is abc123", "the wifi password is abc123"),
+        ("Veronica, note that I owe Sam $20", "I owe Sam $20"),
+        ("take a note", None),
+        ("note that", None),
+        ("what time is it", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_match_note_intent(heard, expected):
+    assert match_note_intent(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("dictate", True),
+        ("start dictation", True),
+        ("begin dictation", True),
+        ("Veronica, start dictation", True),
+        ("dictation", False),
+        ("what time is it", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_match_dictation_intent(heard, expected):
+    assert match_dictation_intent(heard) == expected
+
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("stop dictation", True),
+        ("stop dictating", True),
+        ("end dictation", True),
+        ("Stop dictation.", True),
+        ("stop", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_stop_dictation(heard, expected):
+    assert is_stop_dictation(heard) == expected

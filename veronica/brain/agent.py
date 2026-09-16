@@ -81,6 +81,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return f"Create reminder {input.get('title', '')}"
         if short == "reminders_due":
             return "Check reminders"
+        if short == "notes_create":
+            return f"Create note {input.get('title', '')}"
         if short == "timer_set":
             return f"Set timer {input.get('minutes', '')} min"
         if short == "timer_list":

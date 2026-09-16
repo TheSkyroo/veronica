@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import datetime as dt
 import logging
 import re
 import time
@@ -10,14 +11,19 @@ import numpy as np
 
 from veronica.audio.chime import tone
 from veronica.brain.intents import (
+    is_stop_dictation,
+    match_dictation_intent,
     match_intent,
     match_memory_intent,
     match_music_intent,
+    match_note_intent,
     match_screen_intent,
     normalize,
 )
 from veronica.config import Settings
+from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
+from veronica.tools import pim as pim_tools
 from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
 
@@ -427,6 +433,52 @@ class Orchestrator:
         if self._ptt_active:
             self.recorder.finish()
 
+    # -- notes & dictation (A4) --------------------------------------------------
+    async def _note_turn(self, body: str) -> None:
+        """Local fast path for "take a note: X" / "note that X": create the
+        note directly (no brain round trip) and confirm with "Noted."."""
+        ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        title = f"{body[:40]} — {ts}"
+        self._emit("tool", {"summary": f"Create note {title}", "decision": "auto"})
+        res = await pim_tools.notes_create.handler({"title": title, "body": body})
+        await self.say("Sorry, I couldn't save that note." if res.get("is_error") else "Noted.")
+
+    _STOP_DICTATION_WAIT_S = 3
+
+    async def _dictation_turn(self) -> None:
+        """Local fast path for "dictate"/"start dictation": listen (each
+        utterance endpointed normally by the VAD, looped like a follow-up
+        window) until "stop dictation" is heard or STOP_DICTATION_WAIT_S of
+        silence passes with nothing said, then type the accumulated text
+        into whatever app is currently focused."""
+        self.player.reset()
+        await self.say("Go ahead.")
+        self._set("listening")
+        parts: list[str] = []
+        deadline = self._clock() + self.s.dictation_max_s
+        while self._clock() < deadline:
+            pcm = await self.recorder.capture(max_s=self._STOP_DICTATION_WAIT_S, partial=True)
+            self._end_partial_window()
+            if pcm is None:
+                break
+            text = await self.stt.atranscribe(pcm)
+            self._emit("heard", text)
+            if not text:
+                break
+            if is_stop_dictation(text):
+                break
+            parts.append(text)
+        self._set("thinking")
+        full_text = " ".join(parts).strip()
+        if not full_text:
+            await self.say("I didn't catch anything.")
+            self._set("idle")
+            return
+        self._emit("tool", {"summary": "Dictate text", "decision": "auto"})
+        res = await asyncio.to_thread(mac_tools.dictate_type, full_text)
+        await self.say("Sorry, I couldn't type that." if res.get("is_error") else "Done.")
+        self._set("idle")
+
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
         if self.muted:
@@ -603,6 +655,15 @@ class Orchestrator:
                 None if (intent is not None or mem is not None or screen_intent)
                 else match_music_intent(text)
             )
+            note_body = (
+                None if (intent is not None or mem is not None or screen_intent or music_action)
+                else match_note_intent(text)
+            )
+            dictation_intent = (
+                False
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
+                else match_dictation_intent(text)
+            )
             if intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
@@ -638,6 +699,17 @@ class Orchestrator:
             elif music_action:
                 self.player.reset()
                 await self._music_turn(music_action)
+            elif note_body is not None:
+                self.player.reset()
+                await self._note_turn(note_body)
+            elif dictation_intent:
+                barged = await self._run_with_barge(self._dictation_turn())
+                if barged:
+                    pcm = await self._listen_after_wake()
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
             elif screen_intent:
                 barged = await self._run_with_barge(self._screen_turn(text))
                 if barged:

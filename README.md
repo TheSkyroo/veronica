@@ -120,6 +120,51 @@ Disable memory entirely (no DB, no injection, no remember/forget intents) with:
 
     VERONICA_MEMORY_ENABLED=false
 
+## Screen awareness
+
+Ask "what's on my screen", "look at my screen", "summarize this page/screen", or "what does this error say" and
+Veronica takes a screenshot of the main display herself (downscaled to fit within 1568 px on the long edge) and
+sends it to Claude along with your question in one turn — the HUD shows a "Look at screen" action line. Claude can
+also decide to look at the screen on its own mid-conversation via the `screenshot` tool (allow-class, runs
+automatically). Requires **Screen Recording** access — see Permissions below.
+
+## Push-to-talk
+
+Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
+release it when you're done. Works even while she's speaking (it interrupts her, like saying the wake word does).
+Disable with `VERONICA_PTT_ENABLED=false`, or change the key with `VERONICA_PTT_KEYCODE` (macOS virtual keycode;
+61 is Right Option).
+
+Push-to-talk needs **Accessibility** access (see Permissions below). If it isn't granted, the menu bar shows
+"Enable Push-to-talk… (Accessibility)" — click it to jump straight to the right System Settings pane.
+
+## Music
+
+"Pause" / "pause music", "resume" / "play music", "next song" / "skip", "previous", and "what's playing" control
+Spotify (if it's running) or Music.app (otherwise) directly, no round-trip to Claude. Claude can also control
+playback and search for a track/artist mid-conversation via `music_play`, `music_pause`, `music_next`, `music_prev`,
+`music_now_playing`, and `music_volume` (all allow-class).
+
+## Notes & dictation
+
+- **Take a note** — "take a note: buy milk" / "note that the wifi password is abc123": creates a note in Notes.app
+  titled with the first 40 characters of what you said plus a timestamp, and says "Noted."
+- **Dictate** — "dictate" / "start dictation": say "Go ahead.", then listen until you say "stop dictation" or pause
+  for 3 seconds, and types everything you said into whichever app is currently focused (via System Events —
+  requires **Accessibility** access, same as push-to-talk).
+
+## Permissions
+
+Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
+**System Settings → Privacy & Security**:
+
+- **Microphone** — wake word and voice commands (asked automatically on first run).
+- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used).
+- **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
+- **Accessibility** (Input Monitoring) — push-to-talk's global hotkey and dictation's typing into other apps. Not
+  asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Accessibility)" item if
+  push-to-talk shows as unavailable.
+
 ## Run
     uv run python -m veronica                 # menu bar app
     uv run python -m veronica --text "hello"  # no audio, debug
@@ -134,10 +179,13 @@ Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a t
 (`make icon` re-renders `assets/Veronica.icns` from the HUD orb first, if you want a fresh icon — the built
 one is already committed, so this is optional.)
 
-On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail, or
-Reminders it asks for **Automation** access to that app — approve both (System Settings → Privacy & Security).
-Because the bundle is ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier
-(`io.manik.veronica`) doesn't change.
+On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail,
+Reminders, Notes, Music, or Spotify it asks for **Automation** access to that app; the first `screenshot` prompts
+for **Screen Recording** — approve all of these (System Settings → Privacy & Security). **Accessibility** (for
+push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
+Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Accessibility)" item. Because the bundle is
+ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier (`io.manik.veronica`)
+doesn't change.
 
 The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
 `.venv` (and `.env`, models, `claude auth login`) you set up for `uv run` — there's no separate install step.
