@@ -18,6 +18,23 @@ def test_system_prompt_has_date_and_rules():
     assert "one to three spoken sentences" in p
     assert "For information from the internet, use WebSearch or WebFetch rather than shell commands. Use shell commands only for actions on this Mac." in p
     assert "Your working directory is the user's home folder. Only modify files the user explicitly names." in p
+    assert (
+        "You can read the user's calendar, unread mail and reminders and set timers "
+        "with your tools; prefer them over shell commands for these."
+    ) in p
+
+
+def test_summarize_detail_pim_tools():
+    assert summarize_detail("mcp__pim__calendar_events", {"day": "today"}) == "Check calendar"
+    assert summarize_detail("mcp__pim__calendar_create", {"title": "Lunch"}) == "Create event Lunch"
+    assert summarize_detail("mcp__pim__mail_unread", {}) == "Read unread mail"
+    assert summarize_detail("mcp__pim__mail_search", {"query": "invoice"}) == "Search mail: invoice"
+    assert summarize_detail("mcp__pim__mail_send", {"to": "a@b.com"}) == "Send mail to a@b.com"
+    assert summarize_detail("mcp__pim__reminder_create", {"title": "Buy milk"}) == "Create reminder Buy milk"
+    assert summarize_detail("mcp__pim__reminders_due", {}) == "Check reminders"
+    assert summarize_detail("mcp__pim__timer_set", {"minutes": 5}) == "Set timer 5 min"
+    assert summarize_detail("mcp__pim__timer_list", {}) == "List timers"
+    assert summarize_detail("mcp__pim__timer_cancel", {"label": "tea"}) == "Cancel timer tea"
 
 
 def test_summarize_tool():
@@ -96,6 +113,7 @@ async def test_options_wired(brain):
     assert o.can_use_tool is not None
     assert o.setting_sources == []
     assert "mac" in o.mcp_servers
+    assert "pim" in o.mcp_servers
     assert not o.allowed_tools
     assert o.cwd == str(Path.home())
 

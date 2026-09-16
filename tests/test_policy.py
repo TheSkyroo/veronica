@@ -110,6 +110,19 @@ CASES = [
     ("mcp__mac__volume_set", {"level": 30}, ALLOW),
     ("mcp__mac__applescript", {"script": "beep"}, CONFIRM),
     ("mcp__mac__unknown", {}, CONFIRM),
+    # pim tools
+    ("mcp__pim__calendar_events", {"day": "today"}, ALLOW),
+    ("mcp__pim__calendar_create", {"title": "x", "start": "2026-09-20 10:00"}, CONFIRM),
+    ("mcp__pim__mail_unread", {}, ALLOW),
+    ("mcp__pim__mail_search", {"query": "x"}, ALLOW),
+    ("mcp__pim__mail_send", {"to": "a@b.com", "subject": "s", "body": "b"}, CONFIRM),
+    ("mcp__pim__reminder_create", {"title": "x"}, CONFIRM),
+    ("mcp__pim__reminders_due", {}, ALLOW),
+    ("mcp__pim__timer_set", {"minutes": 1}, ALLOW),
+    ("mcp__pim__timer_list", {}, ALLOW),
+    ("mcp__pim__timer_cancel", {"label": "x"}, ALLOW),
+    ("mcp__pim__unknown", {}, CONFIRM),
+    ("mcp__unknownserver__anything", {}, CONFIRM),
 ]
 
 
