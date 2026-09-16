@@ -3,6 +3,7 @@ import pathlib
 import pytest
 
 HUD = pathlib.Path(__file__).resolve().parents[1] / "veronica" / "ui" / "hud" / "index.html"
+SCREENSHOT_DIR = pathlib.Path(__file__).resolve().parents[1] / ".superpowers"
 
 
 @pytest.mark.live
@@ -142,6 +143,34 @@ def test_confirm_hint_appears_and_clears():
         )
         assert page.inner_text("#hint .msg") == ""
 
+        browser.close()
+
+
+@pytest.mark.live
+def test_orb_screenshot():
+    from playwright.sync_api import sync_playwright
+
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    errors = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240}, device_scale_factor=2)
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'speaking'})")
+        page.evaluate(
+            "window.hud.push({kind:'voice', payload:{step_ms:50, "
+            "levels:[0.2,0.5,0.8,1,0.9,0.6,0.3,0.7,1,0.5,0.2,0.6,0.9,0.4,0.1]}})"
+        )
+        page.wait_for_timeout(400)
+
+        page.locator("#orb").screenshot(path=str(SCREENSHOT_DIR / "holo-orb.png"))
+
+        assert not errors, f"page errors: {errors}"
         browser.close()
 
 
