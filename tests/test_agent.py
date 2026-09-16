@@ -197,7 +197,7 @@ def test_summarize_mac_tools():
     assert summarize_tool("mcp__mac__open_app", {"name": "Safari"}) == "Open Safari"
     assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
     assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
-    assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'Run AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'AppleScript: tell app "Music" to play'
     assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
 
 

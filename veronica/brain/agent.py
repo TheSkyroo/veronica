@@ -35,7 +35,7 @@ def summarize_tool(tool_name: str, input: dict) -> str:
         if short == "clipboard_write":
             return "Copy to clipboard: " + str(input.get("text", ""))[:60]
         if short == "applescript":
-            return "Run AppleScript: " + str(input.get("script", ""))[:60]
+            return "AppleScript: " + str(input.get("script", ""))[:60]
         return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
