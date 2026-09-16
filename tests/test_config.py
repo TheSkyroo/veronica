@@ -14,6 +14,7 @@ def test_defaults(tmp_home):
     assert s.followup_skip_ms == 300
     assert s.confirm_listen_s == 10
     assert s.listen_wait_s == 6
+    assert s.capture_extra_s == 3.0
     assert s.wake_retry_s == 10
     assert s.wake_threshold == 0.35
     assert s.wake_hits == 2

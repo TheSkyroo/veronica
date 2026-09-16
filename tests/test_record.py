@@ -264,15 +264,16 @@ async def test_repeated_false_onsets_bounded_by_hard_wait_cap(monkeypatch):
     """Repeated false onsets (e.g. a bursty noise source alternating short
     speech bursts with gaps) must not let the reset-and-keep-waiting logic
     inflate the real wait far past max_s: a hard cap on total live-frame
-    elapsed time (wait_frames + max_frames) always wins, regardless of
-    started/reset state."""
+    elapsed time spent waiting for a real onset (wait_frames + extra_frames)
+    always wins, regardless of reset state — as long as no utterance is
+    actually in progress (`not started`)."""
     monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
     s = Settings(
-        vad_silence_ms=90, min_speech_ms=150, max_utterance_s=1,
+        vad_silence_ms=90, min_speech_ms=150, max_utterance_s=1, capture_extra_s=3.0,
     )
     fm = s.frame_ms
     wait_frames = 1000 // fm       # max_s=1
-    max_frames = s.max_utterance_s * 1000 // fm
+    extra_frames = int(s.capture_extra_s * 1000 // fm)
     consumed = []
 
     def infinite_burst_gap():
@@ -287,4 +288,23 @@ async def test_repeated_false_onsets_bounded_by_hard_wait_cap(monkeypatch):
     r = Recorder(s, frames=infinite_burst_gap)
     pcm = await r.capture(max_s=1)
     assert pcm is None
-    assert len(consumed) <= wait_frames + max_frames + 1
+    assert len(consumed) <= wait_frames + extra_frames + 1
+
+
+async def test_real_speech_in_progress_not_cut_by_onset_wait_cap(monkeypatch):
+    """Once real speech has started within the wait budget, the onset-wait
+    hard cap (wait_frames + extra_frames) must not apply — the utterance is
+    bounded only by max_utterance_s, same as before."""
+    s_ms = 30
+    wait_s = 1
+    wait_frames = wait_s * 1000 // s_ms
+    # speech starts one frame before the wait budget would expire, and lasts
+    # 2 s (well past wait_frames + extra_frames worth of *silence*, but this
+    # is speech, not silence, so the cap must not fire).
+    speech_frames = 2000 // s_ms
+    pattern = "." * (wait_frames - 1) + "s" * speech_frames + "....."
+    r = make(pattern, monkeypatch, max_utterance_s=5, capture_extra_s=0.5)
+    pcm = await r.capture(max_s=wait_s)
+    assert pcm is not None
+    # full speech run + 3 silence frames (90 ms) to endpoint
+    assert len(pcm) == FRAME * (speech_frames + 3)

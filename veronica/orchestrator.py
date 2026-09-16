@@ -453,6 +453,7 @@ class Orchestrator:
         if pcm is None:
             self._set("idle")
             return
+        is_followup = False
         while True:
             text = await self.stt.atranscribe(pcm)
             self._emit("heard", text)
@@ -465,12 +466,21 @@ class Orchestrator:
                 self._set("idle")
                 return
             if not text:
+                if is_followup:
+                    # A follow-up capture (not the first listen after wake,
+                    # nor the re-listen after a barge) that came back empty
+                    # just means the user didn't say anything more — go
+                    # quiet rather than nag with "Sorry, didn't catch that."
+                    # and reopen yet another follow-up window.
+                    self._set("idle")
+                    return
                 self.player.reset()
                 await self.say("Sorry, didn't catch that.")
             else:
                 barged = await self._run_with_barge(self.handle_text(text))
                 if barged:
                     pcm = await self._listen_after_wake()
+                    is_followup = False
                     if pcm is None:
                         break
                     continue
@@ -479,6 +489,7 @@ class Orchestrator:
             pcm = await self.recorder.capture(
                 max_s=max(1, self.s.followup_window_s), partial=True, skip_ms=self.s.followup_skip_ms
             )
+            is_followup = True
             self._end_partial_window()
             if pcm is None:
                 break

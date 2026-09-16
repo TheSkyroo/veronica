@@ -1257,6 +1257,42 @@ async def test_non_end_phrase_is_not_treated_as_end():
     assert o.brain.asked == ["stop the timer"]
 
 
+async def test_followup_empty_transcript_ends_silently():
+    """An empty transcript on a follow-up capture (not the first listen
+    after wake) must not say "Sorry, didn't catch that." nor reopen another
+    follow-up window — just go idle."""
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)],
+        stt_texts=["hi", ""],
+    )
+    await o.one_turn()
+    assert o.tts.said == ["Sure.", "Done."]
+    assert states[-1] == "idle"
+    assert states.count("followup") == 1
+
+
+async def test_first_capture_empty_transcript_keeps_sorry_and_followup():
+    """The first capture after wake (not a follow-up) keeps today's
+    behavior: "Sorry, didn't catch that." then a follow-up window."""
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[""])
+    await o.one_turn()
+    assert o.tts.said == ["Sorry, didn't catch that."]
+    assert o.brain.asked == []
+
+
+async def test_empty_transcript_after_barge_relisten_keeps_sorry():
+    """The re-listen after a barge-in is not a follow-up capture: an empty
+    transcript there should still get "Sorry, didn't catch that."."""
+    o, states = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["hi", ""],
+    )
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = SlowBrain()
+    await o.one_turn()
+    assert "Sorry, didn't catch that." in o.tts.said
+
+
 async def test_followup_window_default_is_four_seconds():
     assert Settings().followup_window_s == 4
 

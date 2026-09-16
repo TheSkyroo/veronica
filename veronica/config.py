@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     followup_skip_ms: int = 300
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
+    capture_extra_s: float = 3.0
 
     # wake word
     wake_engine: str = "whisper"
