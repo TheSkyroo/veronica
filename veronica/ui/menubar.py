@@ -126,6 +126,9 @@ class VeronicaApp(rumps.App):
     def quit(self, _item) -> None:
         self._quitting = True
         self._hud.close()
+        orch = getattr(self, "_orch", None)
+        if orch is not None:
+            orch.player.close()
         self._loop.call_soon_threadsafe(self._loop.stop)
         rumps.quit_application()
 

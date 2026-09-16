@@ -196,8 +196,20 @@ async def test_stream_exception_closes_client(brain, monkeypatch):
 
 def test_summarize_tool_prefers_description():
     inp = {"command": "curl -s https://wttr.in", "description": "Fetch weather from wttr.in"}
-    assert summarize_tool("Bash", inp) == "Fetch weather from wttr.in"
+    assert summarize_tool("Bash", inp) == "Fetch weather from wttr.in via curl"
     assert summarize_detail("Bash", inp) == "Bash: curl -s https://wttr.in"
+
+
+def test_summarize_tool_bash_description_falls_back_without_head():
+    # unparsable command: no head to append "via <head>" for.
+    inp = {"command": "ls 'unterminated", "description": "List files"}
+    assert summarize_tool("Bash", inp) == "List files"
+
+
+def test_summarize_tool_write_edit_description_includes_basename():
+    inp = {"file_path": "/Users/mani/notes/todo.md", "description": "Jot down a reminder"}
+    assert summarize_tool("Write", inp) == "Jot down a reminder in todo.md"
+    assert summarize_tool("Edit", inp) == "Jot down a reminder in todo.md"
 
 
 def test_summarize_tool_description_stripped_truncated_no_trailing_period():

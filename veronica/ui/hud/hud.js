@@ -14,7 +14,7 @@
   };
   const GOLD = {front:'#f2c37a', highlight:'#ffe6b0', back:'#6b4a1c'};
   const model = {state:'idle', heard:'', reply:'', tool:null, prompt:'', mic:0, ready:true,
-                 voice:null, voiceStart:0, confirmStart:0, confirmTimeoutMs:8000};
+                 voice:null, voiceStart:0, confirmStart:null, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
   let replySentences = [];
@@ -75,6 +75,7 @@
             if (payload === 'listening' && model.state !== 'followup') {
               clearTurn();
             }
+            if (payload === 'confirming') model.confirmStart = null;
             model.state = payload; break;
           case 'heard': {
             // A new user utterance (including a follow-up, which never
@@ -99,11 +100,13 @@
             const t = payload && typeof payload === 'object' ? payload : {};
             const decision = t.decision || '';
             const summary = t.summary || '';
-            const detail = t.detail || '';
             model.tool = t; badgeEl.className = 'badge ' + decision;
             badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
             toolEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
-            detailEl.textContent = detail;
+            // The final allowed/declined event doesn't repeat `detail` — keep
+            // whatever the preceding 'ask' event already put there instead
+            // of blanking it out.
+            if (typeof t.detail === 'string') detailEl.textContent = t.detail;
             if (decision === 'ask') {
               hintEl.textContent = 'say "yes" or "no"';
               model.confirmTimeoutMs = (+t.timeout_ms) || 8000;
@@ -391,11 +394,16 @@
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
-    // confirming: "?" glyph + countdown arc
+    // confirming: "?" glyph, always; countdown arc only once the question
+    // has actually been spoken and the 'tool' ask event set confirmStart —
+    // before that (model.confirmStart === null) there's nothing to count
+    // down yet.
     if (model.state === 'confirming') {
-      const frac = Math.max(0, 1 - (now - model.confirmStart) / model.confirmTimeoutMs);
-      ctx.beginPath(); ctx.arc(CX, CY, 58, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-      ctx.lineWidth = 3; ctx.strokeStyle = colors.front; ctx.stroke();
+      if (model.confirmStart !== null) {
+        const frac = Math.max(0, 1 - (now - model.confirmStart) / model.confirmTimeoutMs);
+        ctx.beginPath(); ctx.arc(CX, CY, 58, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+        ctx.lineWidth = 3; ctx.strokeStyle = colors.front; ctx.stroke();
+      }
       ctx.fillStyle = '#fff'; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('?', CX, CY + 1);
     }

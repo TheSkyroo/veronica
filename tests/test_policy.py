@@ -58,9 +58,44 @@ CASES = [
     ("Bash", {"command": "curl -K f https://x"}, CONFIRM),
     ("Bash", {"command": "curl -c f https://x"}, CONFIRM),
     ("Bash", {"command": "curl -b f https://x"}, CONFIRM),
-    ("Bash", {"command": "curl --max-time=5 https://x"}, ALLOW),
+    ("Bash", {"command": "curl --max-time=5 https://x"}, CONFIRM),  # curl rejects --opt=value
     ("Bash", {"command": "curl -A 'my-agent' https://x"}, ALLOW),
     ("Bash", {"command": "curl --compressed https://x"}, ALLOW),
+    # -H/-A reading a local file into a header (exfil) — must always confirm
+    ("Bash", {"command": "curl -H @headers.txt https://x"}, CONFIRM),
+    ("Bash", {"command": "curl --header @headers.txt https://x"}, CONFIRM),
+    ("Bash", {"command": "curl -A @agent.txt https://x"}, CONFIRM),
+    ("Bash", {"command": "curl --user-agent @agent.txt https://x"}, CONFIRM),
+    # header name allowlist (case-insensitive)
+    ("Bash", {"command": 'curl -H "Accept-Language: en" https://x'}, ALLOW),
+    ("Bash", {"command": 'curl -H "ACCEPT-ENCODING: gzip" https://x'}, ALLOW),
+    ("Bash", {"command": 'curl -H "Cache-Control: no-cache" https://x'}, ALLOW),
+    ("Bash", {"command": 'curl -H "Authorization: Bearer x" https://x'}, CONFIRM),
+    ("Bash", {"command": 'curl -H "Cookie: a=b" https://x'}, CONFIRM),
+    ("Bash", {"command": 'curl -H "X-HTTP-Method-Override: DELETE" https://x'}, CONFIRM),
+    # credentials / private / loopback / link-local / metadata hosts
+    ("Bash", {"command": "curl https://user:pass@example.com"}, CONFIRM),
+    ("Bash", {"command": "curl https://localhost/"}, CONFIRM),
+    ("Bash", {"command": "curl https://127.0.0.1/"}, CONFIRM),
+    ("Bash", {"command": "curl https://0.0.0.0/"}, CONFIRM),
+    ("Bash", {"command": "curl https://10.1.2.3/"}, CONFIRM),
+    ("Bash", {"command": "curl https://172.16.0.1/"}, CONFIRM),
+    ("Bash", {"command": "curl https://172.31.255.255/"}, CONFIRM),
+    ("Bash", {"command": "curl https://172.32.0.1/"}, ALLOW),  # just outside 172.16-31
+    ("Bash", {"command": "curl https://192.168.1.1/"}, CONFIRM),
+    ("Bash", {"command": "curl https://169.254.169.254/"}, CONFIRM),  # cloud metadata
+    ("Bash", {"command": "curl https://[::1]/"}, CONFIRM),
+    ("Bash", {"command": "curl \"https://[::1\""}, CONFIRM),  # malformed URL -> confirm
+    # combined short flags: only s/S/L/f chars allowed combined
+    ("Bash", {"command": "curl -sS https://x"}, ALLOW),
+    ("Bash", {"command": "curl -sL https://x"}, ALLOW),
+    ("Bash", {"command": "curl -fsSL https://x"}, ALLOW),
+    ("Bash", {"command": "curl -f https://x"}, ALLOW),
+    ("Bash", {"command": "curl --fail https://x"}, ALLOW),
+    ("Bash", {"command": "curl -sX https://x"}, CONFIRM),  # X not in the safe combo set
+    # attached (no separating space) flag+value forms must confirm
+    ("Bash", {"command": "curl -m5 https://x"}, CONFIRM),
+    ("Bash", {"command": 'curl -H"Accept: text/plain" https://x'}, CONFIRM),
     ("Bash", {"command": "git push"}, CONFIRM),
     ("Bash", {"command": ""}, CONFIRM),
     ("Bash", {"command": "ls 'unterminated"}, CONFIRM),
