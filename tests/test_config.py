@@ -1,3 +1,5 @@
+import pathlib
+
 from veronica.config import Settings
 
 
@@ -9,12 +11,15 @@ def test_defaults(tmp_home):
     assert s.max_utterance_s == 15
     assert s.min_speech_ms == 300
     assert s.followup_window_s == 4
+    assert s.followup_skip_ms == 300
     assert s.confirm_listen_s == 10
     assert s.listen_wait_s == 6
     assert s.wake_retry_s == 10
     assert s.wake_threshold == 0.35
     assert s.wake_hits == 2
     assert s.brain_timeout_s == 60
+    assert s.max_turns is None
+    assert s.brain_cwd == pathlib.Path.home()
     assert s.wake_model == "hey_veronica"
     assert s.wake_engine == "whisper"
     assert s.wake_whisper_model == "tiny.en"

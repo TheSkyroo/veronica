@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import datetime as dt
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ def test_system_prompt_has_date_and_rules():
     assert "2026-09-15" in p
     assert "one to three spoken sentences" in p
     assert "For information from the internet, use WebSearch or WebFetch rather than shell commands. Use shell commands only for actions on this Mac." in p
+    assert "Your working directory is the user's home folder. Only modify files the user explicitly names." in p
 
 
 def test_summarize_tool():
@@ -88,13 +90,14 @@ async def test_options_wired(brain):
     [s async for s in brain.ask("x")]
     o = FakeClient.instances[0].options
     assert o.effort == "low"
-    assert o.max_turns == 8
+    assert o.max_turns is None
     assert o.permission_mode == "default"
     assert "You are Veronica" in o.system_prompt
     assert o.can_use_tool is not None
     assert o.setting_sources == []
     assert "mac" in o.mcp_servers
     assert not o.allowed_tools
+    assert o.cwd == str(Path.home())
 
 
 async def test_resume_from_saved_session(brain, tmp_home):
@@ -168,6 +171,24 @@ async def test_error_result_speaks_error(brain, tmp_home, monkeypatch):
     monkeypatch.setattr(Brain, "_client_cls", ErrClient)
     out = [s async for s in brain.ask("x")]
     assert out == ["Claude returned an error, check the log."]
+    assert brain._client is None
+    assert not (tmp_home / "session").exists()
+
+
+async def test_context_overflow_result_starts_fresh_conversation(brain, tmp_home, monkeypatch):
+    (tmp_home / "session").write_text("old-sess")
+
+    class OverflowClient(FakeClient):
+        def __init__(self, options=None):
+            super().__init__(options)
+            r = _Result("sess-overflow")
+            r.is_error = True
+            r.result = "prompt is too long"
+            self.script = [r]
+
+    monkeypatch.setattr(Brain, "_client_cls", OverflowClient)
+    out = [s async for s in brain.ask("x")]
+    assert out == ["My memory got full, starting a fresh conversation."]
     assert brain._client is None
     assert not (tmp_home / "session").exists()
 
