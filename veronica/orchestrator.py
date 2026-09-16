@@ -328,7 +328,7 @@ class Orchestrator:
         return spoken
 
     # -- confirmation gate ----------------------------------------------------
-    async def confirm(self, summary: str, detail: str = "") -> bool:
+    async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
             return False
@@ -358,7 +358,8 @@ class Orchestrator:
                     log.info("confirm aborted by barge")
                     return result
                 self.player.reset()
-                await self._say_unlocked(f"Run {summary}?", kind="prompt")
+                prompt = question if question is not None else f"Run {summary}?"
+                await self._say_unlocked(prompt, kind="prompt")
                 if self._barged:
                     # barged while the prompt was being spoken.
                     log.info("confirm aborted by barge")
@@ -503,7 +504,7 @@ class Orchestrator:
                 await self.say("Okay.")
             elif intent == "quit":
                 self.player.reset()
-                if await self.confirm("Quit Veronica"):
+                if await self.confirm("Quit Veronica", question="Quit Veronica?"):
                     await self.say("Goodbye.")
                     self._on_quit()
                     self._set("idle")

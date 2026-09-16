@@ -115,6 +115,17 @@ async def test_confirm_yes_and_no():
     assert o.tts.said[0] == "Run Bash: ls?"
 
 
+async def test_confirm_question_override_replaces_default_prompt():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    assert await o.confirm("Quit Veronica", question="Quit Veronica?") is True
+    assert o.tts.said == ["Quit Veronica?"]
+    assert ("prompt", "Quit Veronica?") in ev
+    tools = [p for k, p in ev if k == "tool"]
+    # the "ask" tool event still carries the original summary, independent
+    # of the spoken question override
+    assert tools[0]["summary"] == "Quit Veronica"
+
+
 async def test_confirm_no_speech_is_deny():
     o, _ = build(rec_pcms=[None])
     assert await o.confirm("Write file a") is False
@@ -1683,6 +1694,8 @@ async def test_quit_intent_yes_says_goodbye_and_calls_on_quit():
     assert called == [True]
     assert "Goodbye." in o.tts.said
     assert states[-1] == "idle"
+    # natural prompt wording, not the generic confirm() "Run {summary}?" form
+    assert o.tts.said[0] == "Quit Veronica?"
 
 
 async def test_quit_intent_no_does_not_quit_and_continues_turn():
