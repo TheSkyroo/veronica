@@ -239,3 +239,39 @@ def test_match_dictation_intent(heard, expected):
 )
 def test_is_stop_dictation(heard, expected):
     assert is_stop_dictation(heard) == expected
+
+
+# -- batch B: voice / speed --------------------------------------------------
+
+from veronica.brain.intents import match_voice_intent
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("use a male voice", ("voice", "male")),
+    ("Veronica, use a british voice please", ("voice", "british")),
+    ("switch to Adam's voice", ("voice", "adams")),
+    ("switch to adam voice", ("voice", "adam")),
+    ("change to the british male voice", ("voice", "british male")),
+    ("speak in a female voice", ("voice", "female")),
+    ("speak with a british voice", ("voice", "british")),
+    ("use the default voice", ("voice", "default")),
+    ("change your voice", ("voice", "next")),
+    ("different voice", ("voice", "next")),
+    ("use a different voice", ("voice", "next")),
+    ("speak faster", ("speed", "faster")),
+    ("talk faster", ("speed", "faster")),
+    ("faster please", ("speed", "faster")),
+    ("speed up", ("speed", "faster")),
+    ("speak slower", ("speed", "slower")),
+    ("talk slower", ("speed", "slower")),
+    ("slow down", ("speed", "slower")),
+    ("normal speed", ("speed", "normal")),
+    ("default speed", ("speed", "normal")),
+    ("reset speed", ("speed", "normal")),
+    ("what's your voice like", None),
+    ("faster internet please", None),
+    ("use a voice", None),
+    ("the voice of reason", None),
+])
+def test_match_voice_intent(text, expected):
+    assert match_voice_intent(text) == expected

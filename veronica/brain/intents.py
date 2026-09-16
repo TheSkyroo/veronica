@@ -209,6 +209,71 @@ def match_music_intent(text: str) -> MusicAction | None:
     return None
 
 
+# Voice / speed fast path (B1): "use a british voice", "switch to adam
+# voice", "change your voice", "speak faster", "normal speed". Carries a
+# payload (the requested voice descriptor, or which way to nudge speed) so
+# it has its own function like match_memory_intent; resolving the
+# descriptor to an actual Kokoro voice id is veronica.speech.voices' job.
+VoiceAction = tuple[Literal["voice", "speed"], str]
+
+_VOICE_PICK_RE = re.compile(
+    r"^(?:use|switch to|change to|speak (?:in|with))\s+(?:a |an |the )?(.+?)\s+voice$"
+)
+_ARTICLES = frozenset({"a", "an", "the"})
+_VOICE_NEXT_PHRASES = frozenset({
+    "change your voice", "different voice", "use a different voice",
+    "change voice", "another voice", "use another voice",
+})
+# Bare "faster"/"slower" are here because normalize()+_strip_wrapper turn
+# "faster please" into "faster".
+_SPEED_PHRASES: dict[str, str] = {
+    "speak faster": "faster", "talk faster": "faster", "faster please": "faster",
+    "faster": "faster", "speed up": "faster", "speak quicker": "faster",
+    "speak slower": "slower", "talk slower": "slower", "slower please": "slower",
+    "slower": "slower", "slow down": "slower",
+    "normal speed": "normal", "default speed": "normal", "reset speed": "normal",
+    "reset your speed": "normal", "speak normally": "normal",
+}
+
+
+def _match_voice_candidate(candidate: str) -> VoiceAction | None:
+    if candidate in _VOICE_NEXT_PHRASES:
+        return ("voice", "next")
+    if candidate in _SPEED_PHRASES:
+        return ("speed", _SPEED_PHRASES[candidate])
+    m = _VOICE_PICK_RE.match(candidate)
+    if m:
+        req = m.group(1).strip()
+        # "use a voice": the optional-article group backtracks so the
+        # descriptor is just the article — no voice was actually named.
+        if not req or req in _ARTICLES:
+            return None
+        if req in ("different", "another"):
+            return ("voice", "next")
+        return ("voice", req)
+    return None
+
+
+def match_voice_intent(text: str) -> VoiceAction | None:
+    """"use a british voice" / "switch to adam voice" / "speak faster" ...
+    Same candidate strategy as match_intent: whole normalized utterance,
+    then each clause. Returns ("voice", <descriptor or "next">) or
+    ("speed", "faster"|"slower"|"normal"), or None."""
+    for candidate in _candidates_for(normalize(text)):
+        result = _match_voice_candidate(candidate)
+        if result is not None:
+            return result
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            result = _match_voice_candidate(candidate)
+            if result is not None:
+                return result
+    return None
+
+
 def match_screen_intent(text: str) -> bool:
     """True if `text` (as-spoken) asks Veronica to look at the screen —
     matched the same way as match_intent (whole utterance, then each
