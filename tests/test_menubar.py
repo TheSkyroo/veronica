@@ -53,6 +53,27 @@ class FakePlayer:
         self.stopped = True
 
 
+class FakeHud:
+    def __init__(self, *_a, **_k):
+        self.pushed = []
+        self.states = []
+        self.ticks = 0
+        self.closed = False
+        self.available = True
+
+    def push(self, event):
+        self.pushed.append(event)
+
+    def on_state(self, state):
+        self.states.append(state)
+
+    def tick(self):
+        self.ticks += 1
+
+    def close(self):
+        self.closed = True
+
+
 class FakeOrch:
     def __init__(self, on_state=None):
         self.player = FakePlayer()
@@ -103,12 +124,13 @@ def fake_env(monkeypatch, tmp_home, request):
 
     orch_holder = {}
 
-    def fake_build_orchestrator(s, on_state=None, *, audio=True):
+    def fake_build_orchestrator(s, on_state=None, on_event=None, *, audio=True):
         orch = FakeOrch(on_state=on_state)
         orch_holder["orch"] = orch
         return orch
 
     monkeypatch.setattr(menubar, "build_orchestrator", fake_build_orchestrator)
+    monkeypatch.setattr(menubar, "HudWindow", FakeHud)
     return menubar, fake_rumps, orch_holder
 
 
@@ -129,13 +151,13 @@ def test_state_is_warming_during_build_orchestrator(fake_env, monkeypatch):
     seen = {}
     original = menubar.build_orchestrator
 
-    def wrapped(s, on_state=None, *, audio=True):
+    def wrapped(s, on_state=None, on_event=None, *, audio=True):
         # on_state is the VeronicaApp instance's bound _on_state method, so
         # __self__ recovers the app without racing its constructor's
         # `app = VeronicaApp()` assignment on the main thread.
         app = on_state.__self__
         seen["state"] = app._state
-        return original(s, on_state=on_state, audio=audio)
+        return original(s, on_state=on_state, on_event=on_event, audio=audio)
 
     monkeypatch.setattr(menubar, "build_orchestrator", wrapped)
     app, orch = _make_app(menubar, orch_holder)
@@ -225,6 +247,24 @@ def test_quit_does_not_log_error(fake_env, caplog):
     error_records = [r for r in caplog.records if r.name == "veronica.ui" and r.levelno >= logging.ERROR]
     assert error_records == []
     assert app._state != "error"
+
+
+def test_events_drained_to_hud(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    app._events.put(("mic", 0.1)); app._events.put(("mic", 0.9)); app._events.put(("state", "listening")); app._events.put(("heard", "hi"))
+    app._drain(None)
+    kinds = [e["kind"] for e in app._hud.pushed]
+    assert kinds.count("mic") == 1 and app._hud.pushed[[i for i, e in enumerate(app._hud.pushed) if e["kind"] == "mic"][0]]["payload"] == 0.9
+    assert app._hud.states == ["listening"] and app._hud.ticks == 1
+    _quit_and_join(app)
+
+
+def test_quit_closes_hud(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    app.quit(None)
+    assert app._hud.closed
 
 
 def test_real_rumps_restored_after_fixture_teardown():

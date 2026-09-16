@@ -97,19 +97,32 @@ class HudWindow:
             self.hide()
 
     # -- visibility -----------------------------------------------------------
+    def _fade(self, alpha: float, then=None) -> None:
+        def _do():
+            try:
+                import AppKit
+                AppKit.NSAnimationContext.beginGrouping()
+                AppKit.NSAnimationContext.currentContext().setDuration_(0.15)
+                self._panel.animator().setAlphaValue_(alpha)
+                AppKit.NSAnimationContext.endGrouping()
+            except Exception:
+                self._panel.setAlphaValue_(alpha)
+            if then:
+                then()
+        self._main(_do)
+
     def show(self) -> None:
         def _do():
             self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(true)", None)
-            self._panel.setAlphaValue_(1.0)
             self._panel.orderFrontRegardless()
+            self._fade(1.0)
         self._main(_do)
 
     def hide(self) -> None:
         def _do():
             if not self._closed:
                 self._web.evaluateJavaScript_completionHandler_("window.hud.setVisible(false)", None)
-            self._panel.setAlphaValue_(0.0)
-            self._panel.orderOut_(None)
+            self._fade(0.0, then=lambda: self._panel.orderOut_(None))
         self._main(_do)
 
     def close(self) -> None:

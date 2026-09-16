@@ -15,6 +15,7 @@ Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is i
 - First run downloads the whisper `small.en` model (~470 MB).
 - Say the wake word while Veronica is talking to interrupt her (barge-in).
 - Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
+- A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
 
 ## Run
     uv run python -m veronica                 # menu bar app
