@@ -217,7 +217,11 @@ def test_reader_reopens_without_closing_when_portaudio_refreshed_elsewhere(fake_
         gen = mic.mic_frames(Settings(), 1280, "wake")
         _drain(gen, 2)
         devices.refresh_portaudio()
-        _drain(gen, 4)
+        # the reader runs ahead of the consumer (frames queue up), so drain
+        # until it has actually noticed the refresh and reopened
+        deadline = time.monotonic() + 2
+        while fake_sd.calls.count("open") < 2 and time.monotonic() < deadline:
+            _drain(gen, 1)
         gen.close()
     time.sleep(0.02)
     assert fake_sd.calls == ["open", "terminate", "initialize", "open"]
