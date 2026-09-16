@@ -11,7 +11,7 @@
   };
   const model = {state:'idle', heard:'', reply:'', tool:null, mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:0};
-  let micSmooth = 0, replyQueue = [], typing = false;
+  let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
 
   const $ = id => document.getElementById(id);
   const heardEl = $('heard').querySelector('.msg');
@@ -19,39 +19,78 @@
   const toolEl = $('tool').querySelector('.msg');
   const badgeEl = $('tool').querySelector('.badge');
 
+  function clearReply() {
+    replyGen++;
+    replyQueue = [];
+    typing = false;
+    if (pendingTimeout !== null) { clearTimeout(pendingTimeout); pendingTimeout = null; }
+  }
+
   function typeNext() {
     if (typing || replyQueue.length === 0) return;
     typing = true;
+    const gen = replyGen;
     const s = replyQueue.shift();
     const start = replyEl.textContent.length ? replyEl.textContent + ' ' : '';
     let i = 0;
     const step = () => {
-      i = Math.min(s.length, i + 2);           // ~40 chars/s at 20 fps ticks
-      replyEl.textContent = start + s.slice(0, i);
-      if (i < s.length) setTimeout(step, 50); else { typing = false; typeNext(); }
+      if (gen !== replyGen) { typing = false; return; }
+      try {
+        i = Math.min(s.length, i + 2);           // ~40 chars/s at 20 fps ticks
+        replyEl.textContent = start + s.slice(0, i);
+        if (i < s.length) { pendingTimeout = setTimeout(step, 50); return; }
+      } finally {
+        if (i >= s.length) { typing = false; pendingTimeout = null; }
+      }
+      typeNext();
     };
     step();
   }
 
   const hud = {
     push(ev) {
-      const {kind, payload} = ev || {};
-      switch (kind) {
-        case 'state':
-          if (payload === 'listening' && model.state !== 'followup') { model.heard=''; model.reply=''; replyQueue=[]; replyEl.textContent=''; heardEl.textContent=''; model.tool=null; badgeEl.className='badge'; badgeEl.textContent=''; toolEl.textContent=''; }
-          if (payload === 'confirming') model.confirmStart = performance.now();
-          model.state = payload; break;
-        case 'heard': model.heard = payload || ''; heardEl.textContent = model.heard; break;
-        case 'sentence': model.reply += (model.reply ? ' ' : '') + payload; replyQueue.push(payload); typeNext(); break;
-        case 'tool': model.tool = payload; badgeEl.className = 'badge ' + payload.decision;
-          badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[payload.decision] || '';
-          toolEl.textContent = (payload.summary || '').slice(0, 60); break;
-        case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
-        case 'voice': model.voice = payload; model.voiceStart = performance.now(); break;
-        case 'warm': model.ready = !!(payload && payload.ready); break;
+      const payload = ev && ev.payload;
+      const kind = ev && ev.kind;
+      try {
+        switch (kind) {
+          case 'state':
+            if (payload === 'listening' && model.state !== 'followup') {
+              model.heard = ''; model.reply = ''; clearReply();
+              replyEl.textContent = ''; heardEl.textContent = '';
+              model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = '';
+            }
+            if (payload === 'confirming') model.confirmStart = performance.now();
+            model.state = payload; break;
+          case 'heard': model.heard = payload || ''; heardEl.textContent = model.heard; break;
+          case 'sentence': {
+            const s = String(payload ?? '');
+            if (!s) break;
+            model.reply += (model.reply ? ' ' : '') + s; replyQueue.push(s); typeNext(); break;
+          }
+          case 'tool': {
+            const t = payload && typeof payload === 'object' ? payload : {};
+            const decision = t.decision || '';
+            const summary = t.summary || '';
+            model.tool = t; badgeEl.className = 'badge ' + decision;
+            badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
+            toolEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
+            break;
+          }
+          case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
+          case 'voice': model.voice = payload; model.voiceStart = performance.now(); break;
+          case 'warm': model.ready = !!(payload && payload.ready); break;
+        }
+      } catch (err) {
+        console.error('hud.push failed', err);
       }
     },
     state() { return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready}; },
+    setVisible(visible) {
+      visible = !!visible;
+      if (visible === rafActive) return;
+      rafActive = visible;
+      if (visible) { t0 = performance.now(); requestAnimationFrame(frame); }
+    },
   };
   window.hud = hud;
 
@@ -61,6 +100,16 @@
   canvas.width = 150 * dpr; canvas.height = 150 * dpr; ctx.scale(dpr, dpr);
   const particles = Array.from({length: 28}, (_, i) => ({a: (i / 28) * Math.PI * 2, r: 52 + (i % 5) * 4, s: 0.2 + (i % 7) * 0.05}));
   let t0 = performance.now(), rot = 0;
+  let rafActive = !(typeof document !== 'undefined' && document.visibilityState === 'hidden');
+
+  if (typeof document !== 'undefined' && 'visibilityState' in document) {
+    document.addEventListener('visibilitychange', () => {
+      const visible = document.visibilityState !== 'hidden';
+      if (visible === rafActive) return;
+      rafActive = visible;
+      if (visible) { t0 = performance.now(); requestAnimationFrame(frame); }
+    });
+  }
 
   function voiceLevel(now) {
     const v = model.voice; if (!v || !v.levels || !v.levels.length) return 0;
@@ -122,7 +171,7 @@
       ctx.beginPath(); ctx.arc(cx, cy, 58, rot * 2, rot * 2 + Math.PI * 0.6);
       ctx.lineWidth = 3; ctx.strokeStyle = p.ring; ctx.stroke();
     }
-    requestAnimationFrame(frame);
+    if (rafActive) requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
+  if (rafActive) requestAnimationFrame(frame);
 })();

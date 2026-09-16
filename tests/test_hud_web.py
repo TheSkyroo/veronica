@@ -34,3 +34,51 @@ def test_hud_dom_and_canvas_react():
         st = page.evaluate("window.hud.state()")
         assert st["state"] == "speaking" and st["reply"] == "It is noon."
         browser.close()
+
+
+@pytest.mark.live
+def test_hud_robust_to_bad_events_and_clear():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        # Malformed / unknown events must not throw or wedge the typewriter.
+        page.evaluate("window.hud.push({kind:'sentence'})")
+        page.evaluate("window.hud.push({kind:'tool', payload:null})")
+        page.evaluate("window.hud.push({kind:'nope'})")
+
+        long_sentence = "This is a perfectly valid sentence that should still type out fully."
+        page.evaluate(
+            "window.hud.push({kind:'sentence', payload:" + repr(long_sentence) + "})"
+        )
+        page.wait_for_function(
+            "document.querySelector('#reply .msg').textContent === " + repr(long_sentence),
+            timeout=3000,
+        )
+
+        # A fresh turn (state:listening) must cancel the in-flight typewriter
+        # so it doesn't keep writing the old sentence into the cleared reply.
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'state', payload:'speaking'})")
+        page.evaluate(
+            "window.hud.push({kind:'sentence', payload:'This is a long sentence that keeps typing.'})"
+        )
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.wait_for_timeout(600)
+        assert page.inner_text("#reply .msg") == ""
+
+        # Tool summaries longer than 60 chars are truncated with an ellipsis.
+        summary_70 = "x" * 70
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:" + repr(summary_70) + ", decision:'auto'}})"
+        )
+        rendered = page.inner_text("#tool .msg")
+        assert rendered.endswith("…")
+        assert len(rendered) == 60
+
+        browser.close()
