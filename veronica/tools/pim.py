@@ -4,12 +4,13 @@ through `osascript` (Apple Events), same argv-only pattern as `tools/mac.py`.
 """
 import asyncio
 import datetime as dt
+import math
 import subprocess
 from collections.abc import Awaitable, Callable
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-TIMEOUT_S = 20
+TIMEOUT_S = 30
 CALENDAR_DAYS_MAX = 30
 REMINDERS_DAYS_MAX = 60
 MAIL_LIMIT_MAX = 20
@@ -144,7 +145,8 @@ def _format_events(raw: str) -> str:
 
 @tool(
     "calendar_events",
-    "List Calendar.app events in a date range: title, start/end time, calendar, location",
+    "List Calendar.app events in a date range: title, start/end time, calendar, location. "
+    "Recurring-event instances are not expanded; a recurring series shows only its master event.",
     {"day": str, "days": int},
 )
 @_guard
@@ -156,6 +158,21 @@ async def calendar_events(args: dict) -> dict:
         return _err(f"invalid day: {day!r}")
     days = _clamp(args.get("days", 1), 1, CALENDAR_DAYS_MAX, 1)
 
+    # Server-side date filtering (`whose start date ≥ … and < …`) is the
+    # actual fix for the timeout: the old code fetched every event's start
+    # date one at a time via `repeat ... in (events of cal)` and filtered in
+    # AppleScript, which is O(every event ever, including recurring
+    # instances, in every calendar) rather than O(events in range).
+    #
+    # NOTE: fetching properties as a batched list (`summary of evs`,
+    # `start date of evs`, …) was tried and found to be unreliable against
+    # real Calendar.app data — live-tested here, it raised
+    # "Can't get summary of {event id ...}" (-1728) for a genuine,
+    # just-created event even though `summary of (item 1 of evs)` for the
+    # very same event works fine. So each matched event's properties are
+    # fetched individually (`item i of evs`), which is one round trip per
+    # event rather than one per event per property, but avoids that failure
+    # mode entirely.
     script = (
         _SANITIZE_HANDLER
         + 'tell application "Calendar"\n'
@@ -163,18 +180,21 @@ async def calendar_events(args: dict) -> dict:
         + _set_date_script("startDate", start)
         + f"set endDate to startDate + ({days} * days)\n"
         + "repeat with cal in calendars\n"
-        + "repeat with evt in (events of cal)\n"
+        + "set evs to (every event of cal whose start date ≥ startDate and start date < endDate)\n"
+        + "set evCount to count of evs\n"
+        + "set calName to name of cal\n"
+        + "repeat with i from 1 to evCount\n"
+        + "set evt to item i of evs\n"
         + "set sd to start date of evt\n"
-        + "if sd ≥ startDate and sd < endDate then\n"
         + "set ed to end date of evt\n"
         + "set loc to \"\"\n"
         + "try\n"
-        + "set loc to sanitize(location of evt)\n"
+        + "set loc to location of evt\n"
         + "end try\n"
-        + "set output to output & sanitize(summary of evt) & tab & (hours of sd) & tab & "
+        + "if loc is missing value then set loc to \"\"\n"
+        + "set output to output & my sanitize(summary of evt) & tab & (hours of sd) & tab & "
           "(minutes of sd) & tab & (hours of ed) & tab & (minutes of ed) & tab & "
-          "sanitize(name of cal) & tab & loc & linefeed\n"
-        + "end if\n"
+          "my sanitize(calName) & tab & my sanitize(loc) & linefeed\n"
         + "end repeat\n"
         + "end repeat\n"
         + "end tell\n"
@@ -205,14 +225,27 @@ async def calendar_create(args: dict) -> dict:
     calendar = str(args.get("calendar", "") or "").strip()
 
     # Calendar.app's scripting dictionary has no "default calendar" property;
-    # fall back to the first calendar in the list when none is named.
-    cal_ref = f'calendar "{_q(calendar)}"' if calendar else "calendar 1"
+    # when none is named, use the first writable calendar (a subscribed/
+    # read-only calendar can't accept new events), falling back to the first
+    # calendar in the list if that lookup itself fails for any reason.
     script = (
         'tell application "Calendar"\n'
         + _set_date_script("startDate", start.date(), start.hour, start.minute)
         + f"set endDate to startDate + ({minutes} * minutes)\n"
-        + f"tell {cal_ref}\n"
-        + f'make new event with properties {{summary:"{_q(title)}", start date:startDate, end date:endDate}}\n'
+    )
+    if calendar:
+        script += f'tell calendar "{_q(calendar)}"\n'
+    else:
+        script += (
+            "try\n"
+            "set targetCal to first calendar whose writable is true\n"
+            "on error\n"
+            "set targetCal to calendar 1\n"
+            "end try\n"
+            "tell targetCal\n"
+        )
+    script += (
+        f'make new event with properties {{summary:"{_q(title)}", start date:startDate, end date:endDate}}\n'
         + "end tell\n"
         + "end tell\n"
     )
@@ -234,24 +267,6 @@ def _format_mail(raw: str) -> str:
     return "\n".join(out) if out else "No messages."
 
 
-_MAIL_RECORD = (
-    "set snd to sanitize(sender of m)\n"
-    "set subj to sanitize(subject of m)\n"
-    "set dt to date received of m\n"
-    "set prev to \"\"\n"
-    "try\n"
-    "set c to sanitize(content of m as string)\n"
-    "if (length of c) > 200 then\n"
-    "set prev to text 1 thru 200 of c\n"
-    "else\n"
-    "set prev to c\n"
-    "end if\n"
-    "end try\n"
-    "set output to output & snd & tab & subj & tab & "
-    "((year of dt) as string) & \"-\" & (my pad(month of dt as integer)) & \"-\" & (my pad(day of dt)) & "
-    '" " & (my pad(hours of dt)) & ":" & (my pad(minutes of dt)) & tab & prev & linefeed\n'
-)
-
 _PAD_HANDLER = (
     "on pad(n)\n"
     "if n < 10 then\n"
@@ -263,26 +278,51 @@ _PAD_HANDLER = (
 )
 
 
-@tool("mail_unread", "List unread Mail.app inbox messages: sender, subject, date, preview", {"limit": int})
-@_guard
-async def mail_unread(args: dict) -> dict:
-    limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
-    script = (
+def _mail_script(filter_expr: str, limit: int) -> str:
+    """Server-side filter (`messages of inbox whose ...`) does the actual
+    perf work (only matching messages come back at all, instead of the old
+    code testing every inbox message one at a time), followed by `items 1
+    thru n` to cap it at `limit` before touching any properties.
+    Properties are fetched per matched message (`item i of msgs`), not as a
+    batched property list — batched list fetches (`sender of msgs`, etc.)
+    were live-tested against Calendar.app and found to fail for otherwise
+    normal data (see calendar_events), so the same batched-list shape is
+    avoided here defensively even though it wasn't reproduced against Mail
+    directly (no unread mail was available on the test Mac to try it on)."""
+    return (
         _SANITIZE_HANDLER
         + _PAD_HANDLER
         + 'tell application "Mail"\n'
         + "set output to \"\"\n"
-        + "set n to 0\n"
-        + "repeat with m in (messages of inbox)\n"
-        + "if read status of m is false then\n"
-        + _MAIL_RECORD
-        + "set n to n + 1\n"
-        + f"if n ≥ {limit} then exit repeat\n"
+        + f"set msgs to (messages of inbox whose {filter_expr})\n"
+        + "set n to count of msgs\n"
+        + f"if n > {limit} then set n to {limit}\n"
+        + "repeat with i from 1 to n\n"
+        + "set m to item i of msgs\n"
+        + "set dt to date received of m\n"
+        + "set prev to \"\"\n"
+        + "try\n"
+        + "set c to my sanitize(content of m as string)\n"
+        + "if (length of c) > 200 then\n"
+        + "set prev to text 1 thru 200 of c\n"
+        + "else\n"
+        + "set prev to c\n"
         + "end if\n"
+        + "end try\n"
+        + "set output to output & my sanitize(sender of m) & tab & my sanitize(subject of m) & tab & "
+          "((year of dt) as string) & \"-\" & (my pad(month of dt as integer)) & \"-\" & (my pad(day of dt)) & "
+          '" " & (my pad(hours of dt)) & ":" & (my pad(minutes of dt)) & tab & prev & linefeed\n'
         + "end repeat\n"
         + "end tell\n"
         + "return output"
     )
+
+
+@tool("mail_unread", "List unread Mail.app inbox messages: sender, subject, date, preview", {"limit": int})
+@_guard
+async def mail_unread(args: dict) -> dict:
+    limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
+    script = _mail_script("read status is false", limit)
     res = await _osascript(script)
     if res.get("is_error"):
         return res
@@ -296,23 +336,8 @@ async def mail_search(args: dict) -> dict:
     if not query:
         return _err("query is required")
     limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
-    script = (
-        _SANITIZE_HANDLER
-        + _PAD_HANDLER
-        + 'tell application "Mail"\n'
-        + "set output to \"\"\n"
-        + "set n to 0\n"
-        + f'set q to "{_q(query)}"\n'
-        + "repeat with m in (messages of inbox)\n"
-        + "if (subject of m contains q) or (sender of m contains q) then\n"
-        + _MAIL_RECORD
-        + "set n to n + 1\n"
-        + f"if n ≥ {limit} then exit repeat\n"
-        + "end if\n"
-        + "end repeat\n"
-        + "end tell\n"
-        + "return output"
-    )
+    q = f'"{_q(query)}"'
+    script = _mail_script(f"(subject contains {q}) or (sender contains {q})", limit)
     res = await _osascript(script)
     if res.get("is_error"):
         return res
@@ -363,7 +388,11 @@ def _format_reminders(raw: str) -> str:
     return "\n".join(out) if out else "No reminders due."
 
 
-@tool("reminders_due", "List incomplete Reminders.app reminders due within N days", {"days": int})
+@tool(
+    "reminders_due",
+    "List incomplete Reminders.app reminders due within N days (including overdue)",
+    {"days": int},
+)
 @_guard
 async def reminders_due(args: dict) -> dict:
     days = _clamp(args.get("days", 1), 1, REMINDERS_DAYS_MAX, 1)
@@ -377,9 +406,9 @@ async def reminders_due(args: dict) -> dict:
         + "set dd to due date of r\n"
         + "if dd is not missing value then\n"
         + "if dd < endDate then\n"
-        + "set output to output & sanitize(name of r) & tab & (year of dd) & tab & "
+        + "set output to output & my sanitize(name of r) & tab & (year of dd) & tab & "
           "(month of dd as integer) & tab & (day of dd) & tab & (hours of dd) & tab & "
-          "(minutes of dd) & tab & sanitize(name of lst) & linefeed\n"
+          "(minutes of dd) & tab & my sanitize(name of lst) & linefeed\n"
         + "end if\n"
         + "end if\n"
         + "end repeat\n"
@@ -440,8 +469,9 @@ async def timer_set(args: dict) -> dict:
         minutes = float(args.get("minutes", 0))
     except (TypeError, ValueError):
         return _err("minutes must be a number")
-    if minutes <= 0:
-        return _err("minutes must be positive")
+    if not math.isfinite(minutes) or minutes <= 0:
+        return _err("minutes must be a positive, finite number")
+    minutes = min(minutes, 24 * 60)
     label = str(args.get("label", "") or "")
     tid = service.set(minutes, label)
     return _ok(f"Timer set for {minutes} min (id {tid})")

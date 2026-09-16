@@ -37,6 +37,17 @@ def argv_of(fake_run):
     return fake_run[0][0]
 
 
+def assert_my_sanitize_calls(script: str) -> None:
+    """Every call to the `sanitize` handler inside a `tell application` block
+    must be `my sanitize(...)` — a bare `sanitize(...)` gets routed to the
+    target application instead of the script's own handler and fails at
+    runtime with 'Can't continue sanitize (-1708)'."""
+    assert "my sanitize(" in script
+    for line in script.split("\n"):
+        if "sanitize(" in line and "on sanitize(" not in line:
+            assert "my sanitize(" in line, f"bare sanitize( call: {line!r}"
+
+
 # -- calendar_events ----------------------------------------------------------
 
 async def test_calendar_events_argv_shape(fake_run):
@@ -44,6 +55,8 @@ async def test_calendar_events_argv_shape(fake_run):
     argv = argv_of(fake_run)
     assert len(argv) == 3 and "shell" not in fake_run[0][1]
     assert 'tell application "Calendar"' in argv[2]
+    assert "whose start date ≥ startDate and start date < endDate" in argv[2]
+    assert_my_sanitize_calls(argv[2])
 
 
 async def test_calendar_events_formats_output(monkeypatch):
@@ -92,7 +105,8 @@ async def test_calendar_create_argv_and_escaping(fake_run):
     assert "set day of startDate to 20" in argv[2]
     assert "set time of startDate to 36000" in argv[2]
     assert "(30 * minutes)" in argv[2]
-    assert "calendar 1" in argv[2]
+    assert "first calendar whose writable is true" in argv[2]
+    assert "calendar 1" in argv[2]  # on-error fallback
     assert not res.get("is_error")
 
 
@@ -126,13 +140,15 @@ async def test_mail_unread_argv_and_limit(fake_run):
     await pim.mail_unread.handler({"limit": 3})
     argv = argv_of(fake_run)
     assert 'tell application "Mail"' in argv[2]
-    assert "if n ≥ 3 then exit repeat" in argv[2]
+    assert "if n > 3 then set n to 3" in argv[2]
+    assert "whose read status is false" in argv[2]
+    assert_my_sanitize_calls(argv[2])
 
 
 async def test_mail_unread_limit_clamped(fake_run):
     await pim.mail_unread.handler({"limit": 1000})
     argv = argv_of(fake_run)
-    assert f"if n ≥ {pim.MAIL_LIMIT_MAX} then exit repeat" in argv[2]
+    assert f"if n > {pim.MAIL_LIMIT_MAX} then set n to {pim.MAIL_LIMIT_MAX}" in argv[2]
 
 
 async def test_mail_unread_formats_output(monkeypatch):
@@ -157,7 +173,9 @@ async def test_mail_search_requires_query(fake_run):
 async def test_mail_search_escapes_query(fake_run):
     await pim.mail_search.handler({"query": 'foo"bar'})
     argv = argv_of(fake_run)
-    assert 'set q to "foo\\"bar"' in argv[2]
+    assert '"foo\\"bar"' in argv[2]
+    assert "subject contains" in argv[2] and "sender contains" in argv[2]
+    assert_my_sanitize_calls(argv[2])
 
 
 # -- mail_send ------------------------------------------------------------------
@@ -215,6 +233,7 @@ async def test_reminders_due_argv_and_days_clamp(fake_run):
     await pim.reminders_due.handler({"days": 200})
     argv = argv_of(fake_run)
     assert f"({pim.REMINDERS_DAYS_MAX} * days)" in argv[2]
+    assert_my_sanitize_calls(argv[2])
 
 
 async def test_reminders_due_formats_output(monkeypatch):
@@ -290,6 +309,30 @@ async def test_timer_set_bad_minutes():
         assert res["is_error"]
         res = await pim.timer_set.handler({"minutes": "nope"})
         assert res["is_error"]
+    finally:
+        pim.bind(None)
+
+
+@pytest.mark.parametrize("minutes", [float("inf"), float("-inf"), float("nan")])
+async def test_timer_set_rejects_non_finite(minutes):
+    svc = FakeTimerService()
+    pim.bind(svc)
+    try:
+        res = await pim.timer_set.handler({"minutes": minutes})
+        assert res["is_error"]
+        assert svc.calls == []
+    finally:
+        pim.bind(None)
+
+
+@pytest.mark.parametrize("minutes", [1e6, 1e300])
+async def test_timer_set_clamps_to_24h(minutes):
+    svc = FakeTimerService()
+    pim.bind(svc)
+    try:
+        res = await pim.timer_set.handler({"minutes": minutes, "label": "long"})
+        assert not res.get("is_error")
+        assert svc.calls == [(24 * 60, "long")]
     finally:
         pim.bind(None)
 

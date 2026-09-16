@@ -46,7 +46,8 @@ class Orchestrator:
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
         self.state = "idle"
-        self.muted = False
+        self._muted = False
+        self._unmute_event = asyncio.Event()
         self.ready = False
         self._speech_lock = asyncio.Lock()
         self._speech_queue: asyncio.Queue | None = None
@@ -72,6 +73,28 @@ class Orchestrator:
         self._last_spoken_until = 0.0
         self._clock = time.monotonic
         self._announce_queue: asyncio.Queue = asyncio.Queue()
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    @muted.setter
+    def muted(self, value: bool) -> None:
+        was_muted = self._muted
+        self._muted = bool(value)
+        if was_muted and not self._muted:
+            # Unmuting: wake run_forever's wait (if it's parked there) so any
+            # announcement that queued up while muted is delivered right
+            # away instead of waiting for the next wake word. `muted` can be
+            # set from a different thread (e.g. the menu bar's AppKit
+            # thread), so this must go through call_soon_threadsafe rather
+            # than setting the asyncio.Event directly.
+            loop = self._loop
+            if loop is not None:
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._unmute_event.set)
+            else:
+                self._unmute_event.set()
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
@@ -510,32 +533,56 @@ class Orchestrator:
         self._set("idle")
 
     async def run_forever(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self._set("idle")
         while True:
             # Deliver anything queued while we were away (e.g. a timer that
-            # fired mid-turn) before waiting on the wake word again.
-            while not self._announce_queue.empty():
+            # fired mid-turn), unless muted — while muted, announcements just
+            # sit in the queue (no state flicker) until unmuted.
+            while not self.muted and not self._announce_queue.empty():
                 await self._deliver_announcement(self._announce_queue.get_nowait())
 
             wake_task = asyncio.ensure_future(self.wake.wait())
-            announce_task = asyncio.ensure_future(self._announce_queue.get())
+            waiting_on_unmute = self.muted
+            if waiting_on_unmute:
+                # Don't consume the queue while muted: race the wake
+                # listener against the unmute signal instead, so a queued
+                # announcement is neither delivered (flicker) nor lost.
+                self._unmute_event.clear()
+                signal_task = asyncio.ensure_future(self._unmute_event.wait())
+            else:
+                signal_task = asyncio.ensure_future(self._announce_queue.get())
             done, _ = await asyncio.wait(
-                {wake_task, announce_task}, return_when=asyncio.FIRST_COMPLETED
+                {wake_task, signal_task}, return_when=asyncio.FIRST_COMPLETED
             )
 
-            if announce_task in done:
-                # We're idle right now (run_forever only waits here between
-                # turns): stop the wake listener, speak, then loop back
-                # around to start a fresh one — "resuming" it.
+            if wake_task not in done:
+                # Only signal_task resolved: we're idle right now
+                # (run_forever only waits here between turns), so stop the
+                # wake listener, then loop back around to start a fresh one
+                # — "resuming" it. An unmute signal just loops back to the
+                # top, which delivers the now-unmuted queue; a real
+                # announcement is spoken directly.
                 self.wake.stop()
                 with contextlib.suppress(BaseException):
                     await wake_task
-                await self._deliver_announcement(announce_task.result())
+                if not waiting_on_unmute:
+                    await self._deliver_announcement(signal_task.result())
                 continue
 
-            announce_task.cancel()
-            with contextlib.suppress(BaseException):
-                await announce_task
+            if signal_task in done:
+                if not waiting_on_unmute:
+                    # Both resolved in the same tick: a genuine wake-word
+                    # detection must not be swallowed by a same-tick
+                    # announcement, so prefer the wake path and put the
+                    # announcement back — it'll be delivered after this turn
+                    # ends (top of the next iteration finds the queue
+                    # non-empty).
+                    self._announce_queue.put_nowait(signal_task.result())
+            else:
+                signal_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await signal_task
 
             try:
                 detected = wake_task.result()

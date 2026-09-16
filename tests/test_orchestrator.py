@@ -1466,3 +1466,69 @@ async def test_announce_delivered_after_turn_ends():
 
     assert o.tts.said == ["Sure.", "Done.", "Timer done"]
     assert "followup" in states
+
+
+async def test_wake_and_announce_same_tick_prefers_wake_and_requeues():
+    """If the wake word and a queued announcement both resolve in the same
+    tick, the wake path wins (a real detection must not be swallowed) and
+    the announcement is put back to be delivered after the turn."""
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hello"])
+    wake = _WakeOnceThenCancel()
+    o.wake = wake
+    # Scheduled (not put_nowait'd) before run_forever starts, so it lands in
+    # the queue during run_forever's first real suspension — after the
+    # top-of-loop drain already found the queue empty, but before wake_task
+    # and signal_task run their (synchronous, non-suspending) first step —
+    # landing both of them in the same `done` set.
+    asyncio.ensure_future(o.announce("Timer done"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+
+    assert o.brain.asked == ["hello"]
+    assert "Sure." in o.tts.said and "Timer done" in o.tts.said
+    assert o.tts.said.index("Timer done") > o.tts.said.index("Sure.")
+
+
+async def test_muted_announcement_held_no_flicker():
+    """Queued while muted: no state change, no chime/say (both no-ops while
+    muted), and it's still in the queue afterward."""
+    o, states = build()
+    o.muted = True
+    wake = _WakeBlocksThenCancel()
+    o.wake = wake
+
+    async def deliver_soon():
+        await asyncio.sleep(0.01)
+        await o.announce("Timer done")
+        await asyncio.sleep(0.05)
+        wake.stop()  # break the test out via the blocked wake_task
+
+    asyncio.ensure_future(deliver_soon())
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+
+    assert o.tts.said == []
+    assert "speaking" not in states
+    assert not o._announce_queue.empty()
+
+
+async def test_muted_announcement_delivered_on_unmute():
+    o, states = build()
+    o.muted = True
+    wake = _WakeBlocksThenCancel()
+    o.wake = wake
+
+    async def deliver_then_unmute():
+        await asyncio.sleep(0.01)
+        await o.announce("Timer done")
+        await asyncio.sleep(0.01)
+        assert o.tts.said == []  # still held while muted
+        o.muted = False
+
+    asyncio.ensure_future(deliver_then_unmute())
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+
+    assert o.tts.said == ["Timer done"]
+    assert "speaking" in states

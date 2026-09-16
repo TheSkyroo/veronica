@@ -50,7 +50,7 @@ async def test_set_no_label_message(monkeypatch):
     svc = TimerService(on_fire=on_fire)
     svc.set(0.05 / 60)
     await asyncio.sleep(0.2)
-    assert fired == ["Timer  done"]
+    assert fired == ["Timer done"]
 
 
 async def test_list_reports_remaining(monkeypatch):

@@ -62,7 +62,7 @@ class TimerService:
         if entry is None:
             return
         label = entry["label"]
-        text = f"Timer {label or ''} done"
+        text = f"Timer {label} done" if label else "Timer done"
         try:
             await self._on_fire(text)
         except Exception:
