@@ -1,15 +1,16 @@
 import asyncio
 import difflib
 import logging
-import queue
 import string
 import threading
 from collections.abc import Callable, Iterator
 
 import numpy as np
-import sounddevice as sd
 from faster_whisper import WhisperModel
 
+from veronica.audio.devices import InputWatch
+from veronica.audio.mic import mic_frames
+from veronica.audio.play import close_registered_streams
 from veronica.config import Settings
 from veronica.ui.events import rms
 
@@ -69,45 +70,11 @@ class WhisperWake:
         self._backlog: Callable[[], int] = lambda: 0
 
     def _mic_frames(self) -> Iterator[bytes]:
-        """Mic frames, read on a dedicated thread into a queue.
-
-        The wake loop transcribes a window every hop and tiny.en can take
-        longer than one hop under CPU load; reading the device inline would
-        let PortAudio's ring buffer overflow during that stall and silently
-        drop audio — chopping the wake word in half. The reader thread keeps
-        draining the device no matter how long a transcription takes, so
-        the loop only ever falls behind, never loses frames. Closing this
-        generator (or _wait returning) stops the thread and the stream."""
-        q: queue.Queue[bytes | None] = queue.Queue()
-        done = threading.Event()
-
-        def reader() -> None:
-            try:
-                with sd.RawInputStream(
-                    samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=CHUNK
-                ) as stream:
-                    while not done.is_set():
-                        data, overflowed = stream.read(CHUNK)
-                        if overflowed:
-                            log.warning("wake mic overflow (reader thread stalled)")
-                        q.put(bytes(data))
-            except Exception:
-                log.exception("wake mic reader died")
-            finally:
-                q.put(None)
-
-        t = threading.Thread(target=reader, name="wake-mic", daemon=True)
-        t.start()
-        self._backlog = q.qsize
-        try:
-            while True:
-                frame = q.get()
-                if frame is None:
-                    return
-                yield frame
-        finally:
-            done.set()
-            self._backlog = lambda: 0
+        """Mic frames via the shared reader-thread source (see
+        veronica.audio.mic.mic_frames); `_backlog` tracks its queue depth so
+        _wait can skip hops while behind real time."""
+        return mic_frames(self.s, CHUNK, "wake", watch=InputWatch(), before_refresh=close_registered_streams,
+                          on_backlog=lambda f: setattr(self, "_backlog", f))
 
     def stop(self) -> None:
         """Request that the in-flight (or next) wait() stop. Thread-safe, one-shot: a
@@ -183,7 +150,10 @@ class WhisperWake:
             since_hop = 0
             if self._backlog() * CHUNK > self._hop_samples:
                 continue  # behind real time: catch up before transcribing again
-            if rms(self._buf) < self.s.wake_min_rms:
+            level = rms(self._buf)
+            below = level < self.s.wake_min_rms
+            log.debug("wake hop rms=%.4f gate=%.4f%s", level, self.s.wake_min_rms, " (below gate)" if below else "")
+            if below:
                 continue
             segments = self._transcribe(self._buf)
             text = self._segments_text(segments)

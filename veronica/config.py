@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
@@ -41,9 +42,9 @@ class Settings(BaseSettings):
     wake_retry_s: int = 10
     barge_threshold: float = 0.8  # openwakeword engine only; the whisper engine uses own-speech suppression instead
     wake_whisper_model: str = "tiny.en"
-    wake_window_s: float = 1.6
-    wake_hop_s: float = 0.4
-    wake_min_rms: float = 0.01
+    wake_window_s: float = 1.2
+    wake_hop_s: float = 0.25
+    wake_min_rms: float = 0.003   # far-field speech sits around 0.003-0.01; near-field 0.012-0.05
     wake_phrases: list[str] = Field(
         default_factory=lambda: ["veronica", "veronika", "hey veronica", "hi veronica"]
     )
@@ -147,7 +148,15 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "wake_min_rms": EditableField(
         "float", "Wake sensitivity (min level)",
-        "Lower = more sensitive; raise if she wakes on noise.", min=0.002, max=0.05,
+        "Lower = hears you from farther away, more false wakes.", min=0.001, max=0.05, restart=True,
+    ),
+    "wake_window_s": EditableField(
+        "float", "Wake window (seconds)", "How much audio each wake check listens to.",
+        min=0.8, max=2.5, restart=True,
+    ),
+    "wake_hop_s": EditableField(
+        "float", "Wake hop (seconds)", "How often the wake check runs; lower = faster, more CPU.",
+        min=0.15, max=0.6, restart=True,
     ),
     "wake_phrases": EditableField("list", "Wake phrases", "Comma-separated; 'veronica' is recommended."),
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Option)"),
@@ -230,12 +239,25 @@ def load_settings(overrides: dict | None = None) -> Settings:
 settings = load_settings(prefs.load().get("settings"))
 
 
-def setup_logging(level: int = logging.INFO) -> logging.Logger:
+def log_level_from_env(default: int = logging.INFO) -> int:
+    """Log level named by VERONICA_LOG_LEVEL (e.g. DEBUG), or `default` if
+    unset/unrecognised. DEBUG turns on per-hop wake rms lines and the like."""
+    name = os.environ.get("VERONICA_LOG_LEVEL", "").strip().upper()
+    if not name:
+        return default
+    level = logging.getLevelName(name)
+    if not isinstance(level, int):
+        log.warning("ignoring unknown VERONICA_LOG_LEVEL=%r", name)
+        return default
+    return level
+
+
+def setup_logging(level: int | None = None) -> logging.Logger:
     settings.ensure_dirs()
     log = logging.getLogger("veronica")
     if log.handlers:
         return log
-    log.setLevel(level)
+    log.setLevel(level if level is not None else log_level_from_env())
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     fh = RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=5)
     fh.setFormatter(fmt)

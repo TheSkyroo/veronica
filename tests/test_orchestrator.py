@@ -707,7 +707,7 @@ async def test_suppress_stays_active_for_wake_window_after_playback():
     await o.say("I am Veronica.")
     assert o._now_speaking == ""
 
-    # still within wake_window_s (1.6) + wake_hop_s (0.6) = 2.2 s of playback ending
+    # still within wake_window_s (1.2) + wake_hop_s (0.25) = 1.45 s of playback ending
     now[0] += 1.0
     assert "veronica" in o._suppress_text().lower()
 

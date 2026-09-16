@@ -291,6 +291,20 @@ Logs: `~/.veronica/logs/veronica.log` (the app's own log; when running from the 
 only the file handler is attached — nothing is lost, it's just not duplicated to a terminal) and
 `~/.veronica/logs/launchd.log` (stdout/stderr captured by launchd when started via "Start at Login").
 
+## Troubleshooting
+
+**She only wakes when I lean into the mic.** The wake check ignores audio quieter than the "Wake sensitivity
+(min level)" gate (`wake_min_rms`, default 0.003). Lower it in Settings to hear you from across the room (you
+may get more false wakes; raise it if she wakes on noise). "Wake window" and "Wake hop" (`wake_window_s`,
+`wake_hop_s`) control how much audio each check sees and how often it runs. Run with
+`VERONICA_LOG_LEVEL=DEBUG` and watch `~/.veronica/logs/veronica.log` for `wake hop rms=... gate=...` lines
+to see how loud your voice actually lands at the mic.
+
+**AirPods / USB mic / headphones.** Mic switching is automatic: Veronica polls macOS's default input device
+every couple of seconds and reopens the mic on the new device (`input device changed (...); reopening mic` in
+the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
+in-flight recording finishes.
+
 ## Test
     uv run pytest            # unit
     uv run pytest -m live    # needs mic/speaker/models/login

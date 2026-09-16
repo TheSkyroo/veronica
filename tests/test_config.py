@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from veronica.config import EDITABLE_SETTINGS, Settings, coerce_setting, load_settings, setup_logging
+from veronica.config import EDITABLE_SETTINGS, Settings, coerce_setting, load_settings, log_level_from_env, setup_logging
 
 
 def test_defaults(tmp_home):
@@ -28,9 +28,9 @@ def test_defaults(tmp_home):
     assert s.wake_model == "hey_veronica"
     assert s.wake_engine == "whisper"
     assert s.wake_whisper_model == "tiny.en"
-    assert s.wake_window_s == 1.6
-    assert s.wake_hop_s == 0.4
-    assert s.wake_min_rms == 0.01
+    assert s.wake_window_s == 1.2
+    assert s.wake_hop_s == 0.25
+    assert s.wake_min_rms == 0.003
     assert s.wake_phrases == ["veronica", "veronika", "hey veronica", "hi veronica"]
     assert s.session_file == tmp_home / "session"
     assert s.log_file == tmp_home / "logs" / "veronica.log"
@@ -119,8 +119,35 @@ def test_coerce_setting_clamps_int():
 
 
 def test_coerce_setting_clamps_float():
-    assert coerce_setting("wake_min_rms", 0.0001) == 0.002
+    assert coerce_setting("wake_min_rms", 0.0001) == 0.001
     assert coerce_setting("wake_min_rms", 999) == 0.05
+
+
+def test_wake_timing_fields_editable_with_restart():
+    for name, lo, hi in (("wake_min_rms", 0.001, 0.05), ("wake_window_s", 0.8, 2.5), ("wake_hop_s", 0.15, 0.6)):
+        field = EDITABLE_SETTINGS[name]
+        assert field.kind == "float" and field.restart is True
+        assert (field.min, field.max) == (lo, hi)
+        assert coerce_setting(name, 0.0) == lo
+        assert coerce_setting(name, 99) == hi
+
+
+def test_log_level_from_env(monkeypatch):
+    monkeypatch.delenv("VERONICA_LOG_LEVEL", raising=False)
+    assert log_level_from_env() == logging.INFO
+    monkeypatch.setenv("VERONICA_LOG_LEVEL", "debug")
+    assert log_level_from_env() == logging.DEBUG
+    monkeypatch.setenv("VERONICA_LOG_LEVEL", "loud")
+    assert log_level_from_env() == logging.INFO
+
+
+def test_setup_logging_honours_env_level(tmp_home, monkeypatch):
+    _fresh_veronica_logger()
+    monkeypatch.setenv("VERONICA_LOG_LEVEL", "DEBUG")
+    try:
+        assert setup_logging().level == logging.DEBUG
+    finally:
+        _fresh_veronica_logger()
 
 
 def test_coerce_setting_clamps_vad_silence_ms():

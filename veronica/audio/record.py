@@ -7,6 +7,7 @@ import numpy as np
 import sounddevice as sd
 import webrtcvad
 
+from veronica.audio import devices
 from veronica.config import Settings
 from veronica.ui.events import rms
 
@@ -39,13 +40,26 @@ class Recorder:
         # when partial live transcription is enabled.
         self.on_audio = on_audio
         self._audio_error_logged = False
+        # A PortAudio re-init (default input device changed) must wait until
+        # this capture's RawInputStream is closed; each capture opens a fresh
+        # stream, so it lands on the new device by itself afterwards.
+        devices.busy = lambda: self._capturing
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
-        with sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=n) as stream:
+        # Opened under refresh_lock (and with _capturing already True, see
+        # arm()) so a default-input-device refresh can't terminate PortAudio
+        # underneath this stream; each capture opens fresh, so after a
+        # refresh it lands on the new device by itself.
+        with devices.refresh_lock:
+            stream = sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=n)
+            stream.__enter__()
+        try:
             while True:
                 data, _ = stream.read(n)
                 yield bytes(data)
+        finally:
+            stream.__exit__(None, None, None)
 
     def stop(self) -> None:
         """Request that the in-flight capture() stop early, returning None.

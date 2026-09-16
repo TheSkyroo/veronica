@@ -271,3 +271,47 @@ async def test_stream_open_retries_after_portaudio_reinit(monkeypatch):
     stream = fsd.streams[-1]
     await pump(stream, 1)
     await task
+
+
+@pytest.mark.asyncio
+async def test_close_stream_keeps_playing_and_reopens_on_next_play(fake_sd):
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+    await asyncio.sleep(0.01)
+    stream1 = fake_sd.streams[-1]
+    p.close_stream()                    # device switched: drop the old stream
+    stream1.finished_callback()         # PortAudio reports the stream finished
+    await task                          # in-flight play() returns rather than hangs
+    assert stream1.closed >= 1          # (play()'s inactive-stream path may close it again)
+    assert p._stopped is False          # not a stop(): playback is still allowed
+
+    task = asyncio.create_task(p.play(np.ones(2048, dtype=np.float32) * 0.5))
+    await asyncio.sleep(0.01)
+    assert len(fake_sd.streams) == 2    # next play() opened a fresh stream
+    await pump(fake_sd.streams[-1], 2)
+    await task
+
+
+@pytest.mark.asyncio
+async def test_registered_players_close_streams_on_refresh_hook(fake_sd):
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    p._timeout_margin_s = 0.2
+    play_mod.register_for_refresh(p)
+    play_mod.register_for_refresh(p)    # idempotent
+    try:
+        task = asyncio.create_task(p.play(np.ones(1024, dtype=np.float32)))
+        await asyncio.sleep(0.01)
+        play_mod.close_registered_streams()
+        assert fake_sd.streams[-1].closed == 1
+        assert p._stream is None and p._stopped is False
+        fake_sd.streams[-1].finished_callback()
+        await task
+    finally:
+        play_mod._registry.remove(p)
+
+
+def test_close_stream_without_stream_is_noop(fake_sd):
+    p = play_mod.Player()
+    p.close_stream()
+    assert fake_sd.streams == []

@@ -7,11 +7,30 @@ from collections import deque
 import numpy as np
 import sounddevice as sd
 
+from veronica.audio import devices
+
 log = logging.getLogger("veronica.audio.play")
 _PortAudioError = sd.PortAudioError  # bound here so tests can swap `sd` for a fake
 
 FADE_MS = 3
 DEFAULT_TIMEOUT_MARGIN_S = 2.0
+
+# Players whose persistent output stream must be closed before PortAudio is
+# re-initialised (see veronica.audio.devices.refresh_portaudio).
+_registry: list["Player"] = []
+
+
+def register_for_refresh(player: "Player") -> None:
+    if player not in _registry:
+        _registry.append(player)
+
+
+def close_registered_streams() -> None:
+    """`before` hook for devices.refresh_portaudio: closes every registered
+    Player's output stream (playback resumes on the next play(), on the
+    new default device)."""
+    for player in list(_registry):
+        player.close_stream()
 
 
 class Player:
@@ -64,26 +83,29 @@ class Player:
     def _ensure_stream(self):
         if self._stream is not None:
             return self._stream
-        try:
-            stream = self._open_stream()
-        except _PortAudioError as e:
-            # PortAudio's device table goes stale when the default output
-            # device changes mid-session (headphones plugged in, AirPods
-            # connected): opening a new stream then fails with an internal
-            # error until PortAudio is re-initialised. One retry.
-            log.warning("output stream open failed (%s); re-initialising PortAudio", e)
-            with contextlib.suppress(Exception):
-                sd._terminate()
-            sd._initialize()
-            stream = self._open_stream()
-        try:
-            stream.start()
-        except Exception:
-            with contextlib.suppress(Exception):
-                stream.close()
-            raise
-        self._stream = stream
-        return stream
+        # Under devices.refresh_lock so the mic reader's device refresh can't
+        # terminate PortAudio between this open and the stream starting.
+        with devices.refresh_lock:
+            try:
+                stream = self._open_stream()
+            except _PortAudioError as e:
+                # PortAudio's device table goes stale when the default output
+                # device changes mid-session (headphones plugged in, AirPods
+                # connected): opening a new stream then fails with an internal
+                # error until PortAudio is re-initialised. One retry.
+                log.warning("output stream open failed (%s); re-initialising PortAudio", e)
+                with contextlib.suppress(Exception):
+                    sd._terminate()
+                sd._initialize()
+                stream = self._open_stream()
+            try:
+                stream.start()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    stream.close()
+                raise
+            self._stream = stream
+            return stream
 
     def _on_finished(self) -> None:
         # The stream itself ended (device error/disconnect, or an explicit
@@ -101,11 +123,18 @@ class Player:
         with contextlib.suppress(Exception):
             stream.close()
 
-    def close(self) -> None:
+    def close_stream(self) -> None:
+        """Close the persistent output stream without stopping playback for
+        good: `_stopped` is untouched, so the next play() reopens a fresh
+        stream (on whatever the default output device is by then). A play()
+        in flight sees the stream go inactive and returns early."""
         with self._lock:
             stream, self._stream = self._stream, None
         if stream is not None:
             self._close_stream_obj(stream)
+
+    def close(self) -> None:
+        self.close_stream()
 
     def _cb(self, outdata, frames, time_info, status) -> None:
         out = outdata[:, 0] if outdata.ndim > 1 else outdata

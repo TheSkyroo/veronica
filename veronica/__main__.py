@@ -5,7 +5,7 @@ import os
 import sys
 
 from veronica import prefs, proactive
-from veronica.audio.play import Player
+from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
 from veronica.brain.agent import Brain
@@ -121,6 +121,8 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
             announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
             calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
         )
+    player = Player()
+    register_for_refresh(player)
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
@@ -129,7 +131,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         partial_stt=partial_stt,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
         tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed, hindi_voice=saved_hindi_voice),
-        player=Player(),
+        player=player,
         store=store,
         on_state=on_state,
         on_event=on_event,
