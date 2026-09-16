@@ -60,6 +60,8 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "followup_window_s": EditableField("int", "Follow-up window (seconds)", "How long she keeps listening after answering.", min=1, max=15, restart=False),
     "confirm_listen_s": EditableField("int", "Confirmation timeout (seconds)", "How long she waits for yes/no.", min=3, max=30, restart=False),
     "hud_hide_after_s": EditableField("float", "Hide HUD after (seconds)", "", min=1, max=30, restart=False),
+    "vad_silence_ms": EditableField("int", "End-of-speech silence (ms)", "How long you can pause before Veronica decides you're done talking. Raise if she cuts you off mid-sentence.", min=300, max=3000, restart=False),
+    "max_utterance_s": EditableField("int", "Max utterance length (seconds)", "Hard cap on one spoken command.", min=5, max=60, restart=False),
     "wake_min_rms": EditableField("float", "Wake sensitivity (min level)", "Lower = more sensitive; raise if she wakes on noise.", min=0.002, max=0.05),
     "wake_phrases": EditableField("list", "Wake phrases", "Comma-separated; 'veronica' is recommended."),
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Option)"),
