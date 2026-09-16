@@ -1293,6 +1293,63 @@ async def test_empty_transcript_after_barge_relisten_keeps_sorry():
     assert "Sorry, didn't catch that." in o.tts.said
 
 
+# -- commit 2: local voice intents --------------------------------------------
+
+async def test_end_intent_emits_hud_hide():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["stop"])
+    await o.one_turn()
+    assert ("hud", {"mode": "hide"}) in ev
+    assert o.tts.said == []
+
+
+async def test_end_intent_spoken_variant_says_okay_and_hides_hud():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["thanks veronica"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "hide"}) in ev
+
+
+async def test_end_intent_new_phrase_go_idle():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["go idle"])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+
+
+async def test_hud_hide_intent_is_silent_and_goes_idle():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["hide"])
+    await o.one_turn()
+    assert o.tts.said == []
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+    assert ("hud", {"mode": "hide"}) in ev
+    assert "followup" not in states
+
+
+async def test_hud_mini_intent_says_okay_emits_hud_and_continues_followup():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["shrink"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "mini"}) in ev
+    assert "followup" in states
+    assert o.brain.asked == []
+
+
+async def test_hud_full_intent_says_okay_emits_hud_and_continues_followup():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["expand"])
+    await o.one_turn()
+    assert o.tts.said == ["Okay."]
+    assert ("hud", {"mode": "full"}) in ev
+    assert "followup" in states
+
+
+async def test_non_intent_text_goes_to_brain():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it"])
+    await o.one_turn()
+    assert o.brain.asked == ["what time is it"]
+
+
 async def test_followup_window_default_is_four_seconds():
     assert Settings().followup_window_s == 4
 
