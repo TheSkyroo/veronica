@@ -13,3 +13,4 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 .badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
 .badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}
 .row.hidden{opacity:0}
+#hint .msg{font-size:11px;opacity:.6;color:#ffcc66}

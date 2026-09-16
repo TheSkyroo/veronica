@@ -212,7 +212,7 @@ class Orchestrator:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
             return False
-        self._emit("tool", {"summary": summary, "decision": "ask"})
+        self._emit("tool", {"summary": summary, "decision": "ask", "timeout_ms": self.s.confirm_listen_s * 1000})
         prev = self.state
         self._set("confirming")
         result = False

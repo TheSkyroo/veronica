@@ -122,6 +122,30 @@ def test_long_reply_and_followup_stay_in_card():
 
 
 @pytest.mark.live
+def test_confirm_hint_appears_and_clears():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 240})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Bash: rm x', decision:'ask', timeout_ms:8000}})"
+        )
+        assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
+
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Bash: rm x', decision:'allowed'}})"
+        )
+        assert page.inner_text("#hint .msg") == ""
+
+        browser.close()
+
+
+@pytest.mark.live
 def test_hud_setvisible_does_not_double_schedule_raf():
     from playwright.sync_api import sync_playwright
 

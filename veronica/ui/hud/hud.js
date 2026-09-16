@@ -10,7 +10,7 @@
     error:      {core:'#ef4444', ring:'#f87171', glow:'rgba(239,68,68,.40)', speed:0.0},
   };
   const model = {state:'idle', heard:'', reply:'', tool:null, mic:0, ready:true,
-                 voice:null, voiceStart:0, confirmStart:0};
+                 voice:null, voiceStart:0, confirmStart:0, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
   let replySentences = [];
@@ -20,6 +20,7 @@
   const replyEl = $('reply').querySelector('.msg');
   const toolEl = $('tool').querySelector('.msg');
   const badgeEl = $('tool').querySelector('.badge');
+  const hintEl = $('hint').querySelector('.msg');
 
   function clearReply() {
     replyGen++;
@@ -32,6 +33,7 @@
     model.heard = ''; model.reply = ''; replySentences = []; clearReply();
     replyEl.textContent = ''; heardEl.textContent = '';
     model.tool = null; badgeEl.className = 'badge'; badgeEl.textContent = ''; toolEl.textContent = '';
+    hintEl.textContent = '';
   }
 
   function typeNext() {
@@ -94,6 +96,12 @@
             model.tool = t; badgeEl.className = 'badge ' + decision;
             badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
             toolEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
+            if (decision === 'ask') {
+              hintEl.textContent = 'say "yes" or "no"';
+              model.confirmTimeoutMs = (+t.timeout_ms) || 8000;
+            } else {
+              hintEl.textContent = '';
+            }
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
@@ -191,7 +199,7 @@
 
     // confirming: "?" + countdown arc (5 s)
     if (model.state === 'confirming') {
-      const frac = Math.max(0, 1 - (now - model.confirmStart) / 5000);
+      const frac = Math.max(0, 1 - (now - model.confirmStart) / model.confirmTimeoutMs);
       ctx.beginPath(); ctx.arc(cx, cy, 58, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
       ctx.lineWidth = 3; ctx.strokeStyle = p.ring; ctx.stroke();
       ctx.fillStyle = '#fff'; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';

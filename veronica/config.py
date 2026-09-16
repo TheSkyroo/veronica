@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     max_utterance_s: int = 15
     min_speech_ms: int = 300
     followup_window_s: int = 8
-    confirm_listen_s: int = 5
+    confirm_listen_s: int = 8
     listen_wait_s: int = 6
 
     # wake word
