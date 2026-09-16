@@ -1,6 +1,8 @@
+import logging
 import pathlib
+import sys
 
-from veronica.config import Settings
+from veronica.config import Settings, setup_logging
 
 
 def test_defaults(tmp_home):
@@ -50,3 +52,33 @@ def test_dirs_created(tmp_home):
     s.ensure_dirs()
     assert (tmp_home / "logs").is_dir()
     assert (tmp_home / "models").is_dir()
+
+
+def _fresh_veronica_logger():
+    log = logging.getLogger("veronica")
+    for h in list(log.handlers):
+        log.removeHandler(h)
+    return log
+
+
+def test_setup_logging_drops_stream_handler_when_not_a_tty(tmp_home, monkeypatch):
+    log = _fresh_veronica_logger()
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    try:
+        log = setup_logging()
+        assert not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+                        for h in log.handlers)
+        assert any(isinstance(h, logging.FileHandler) for h in log.handlers)
+    finally:
+        _fresh_veronica_logger()
+
+
+def test_setup_logging_keeps_stream_handler_when_tty(tmp_home, monkeypatch):
+    log = _fresh_veronica_logger()
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    try:
+        log = setup_logging()
+        assert any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+                    for h in log.handlers)
+    finally:
+        _fresh_veronica_logger()
