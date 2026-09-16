@@ -275,3 +275,49 @@ from veronica.brain.intents import match_voice_intent
 ])
 def test_match_voice_intent(text, expected):
     assert match_voice_intent(text) == expected
+
+
+# -- batch B: proactive briefings & nudges ------------------------------------
+
+from veronica.brain.intents import match_proactive_intent, parse_clock_time
+
+
+@pytest.mark.parametrize("s,expected", [
+    ("8", "08:00"), ("8 am", "08:00"), ("8am", "08:00"), ("8:30", "08:30"), ("8:30 am", "08:30"),
+    ("7 30 am", "07:30"), ("6 pm", "18:00"), ("6:15 pm", "18:15"), ("12 pm", "12:00"), ("12 am", "00:00"),
+    ("noon", "12:00"), ("midnight", "00:00"), ("18:45", "18:45"), ("25", None), ("8:75", None), ("", None),
+    # normalize() strips the colon before the intent regex sees the time
+    ("730", "07:30"), ("730 am", "07:30"), ("1845", "18:45"), ("2500", None), ("875", None),
+])
+def test_parse_clock_time(s, expected):
+    assert parse_clock_time(s) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("brief me", ("brief_now", None)),
+    ("Veronica, give me a briefing", ("brief_now", None)),
+    ("morning briefing", ("brief_now", None)),
+    ("what's my day look like", ("brief_now", None)),
+    ("what does my day look like", ("brief_now", None)),
+    ("give me a briefing every morning at 8", ("briefing_on", "08:00")),
+    ("give me a morning briefing at 7:30 am", ("briefing_on", "07:30")),
+    ("start the briefing every day at 6 pm", ("briefing_on", "18:00")),
+    ("turn on the morning briefing", ("briefing_on", None)),
+    ("stop the morning briefing", ("briefing_off", None)),
+    ("turn off briefings", ("briefing_off", None)),
+    ("cancel the briefing", ("briefing_off", None)),
+    ("remind me before my meetings", ("nudges_on", None)),
+    ("warn me 10 minutes before my meetings", ("nudges_on", 10)),
+    ("nudge me before events", ("nudges_on", None)),
+    ("turn on nudges", ("nudges_on", None)),
+    ("tell me 15 minutes before meetings", ("nudges_on", 15)),
+    ("stop the meeting nudges", ("nudges_off", None)),
+    ("turn off nudges", ("nudges_off", None)),
+    ("turn off reminders before meetings", ("nudges_off", None)),
+    ("what's on my calendar", None),
+    ("brief history of rome", None),
+    ("remind me to call mum", None),
+    ("give me a briefing every morning at 25", None),
+])
+def test_match_proactive_intent(text, expected):
+    assert match_proactive_intent(text) == expected

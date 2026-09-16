@@ -274,6 +274,107 @@ def match_voice_intent(text: str) -> VoiceAction | None:
     return None
 
 
+# Proactive briefings & nudges (B2): "brief me", "give me a briefing every
+# morning at 8", "stop the morning briefing", "warn me 10 minutes before my
+# meetings", "turn off nudges". Carries a payload (the briefing time as
+# "HH:MM", or the nudge lead in minutes) so it has its own function.
+ProactiveAction = tuple[
+    Literal["brief_now", "briefing_on", "briefing_off", "nudges_on", "nudges_off"], str | int | None
+]
+
+_BRIEF_NOW_PHRASES = frozenset({
+    "brief me", "give me a briefing", "give me my briefing", "morning briefing", "my briefing",
+    "whats my day look like", "what does my day look like", "what does my day look like today",
+    "how does my day look", "whats my day like",
+})
+_BRIEFING_ON_RE = re.compile(
+    r"^(?:give me|start|turn on|enable|set up)\s+(?:a |the |my )?(?:morning |daily )?briefings?"
+    r"(?:\s+(?:every day|every morning|daily|each morning))?(?:\s+at\s+(.+))?$"
+)
+_BRIEFING_OFF_RE = re.compile(
+    r"^(?:stop|turn off|cancel|disable)\s+(?:the |my )?(?:morning |daily )?briefings?$"
+)
+_NUDGES_ON_RE = re.compile(
+    r"^(?:remind me|warn me|nudge me|tell me|alert me|turn on nudges|enable nudges)"
+    r"(?:\s+(\d{1,2})\s+minutes?)?(?:\s+before\s+(?:my |the )?(?:meetings?|events?|calendar events?))?$"
+)
+_NUDGES_OFF_RE = re.compile(
+    r"^(?:stop|turn off|disable|cancel)\s+(?:the |my )?"
+    r"(?:meeting nudges|nudges|meeting reminders|reminders before (?:my )?meetings)$"
+)
+# "8", "8 am", "8:30", "7 30 am", "6:15 pm"
+_CLOCK_RE = re.compile(r"^(\d{1,2})(?:[:\s](\d{2}))?\s*(am|pm)?$")
+# normalize() strips the colon, so a time reaching the intent regexes looks
+# like "730 am" / "1845": 3-4 digits, last two are the minutes.
+_CLOCK_COMPACT_RE = re.compile(r"^(\d{1,2})(\d{2})\s*(am|pm)?$")
+
+
+def parse_clock_time(s: str) -> str | None:
+    """"8", "8 am", "8:30", "7 30 am", "730", "6 pm", "noon" -> "HH:MM"
+    (24h) or None if it isn't a clock time."""
+    s = (s or "").strip().lower().replace(".", "")
+    if s == "noon":
+        return "12:00"
+    if s == "midnight":
+        return "00:00"
+    m = _CLOCK_RE.match(s) or _CLOCK_COMPACT_RE.match(s)
+    if not m:
+        return None
+    h, mm, ap = int(m[1]), int(m[2] or 0), m[3]
+    if mm > 59:
+        return None
+    if ap:
+        if not 1 <= h <= 12:
+            return None
+        h = h % 12 + (12 if ap == "pm" else 0)
+    elif not 0 <= h <= 23:
+        return None
+    return f"{h:02d}:{mm:02d}"
+
+
+def _match_proactive_candidate(candidate: str) -> ProactiveAction | None:
+    if candidate in _BRIEF_NOW_PHRASES:
+        return ("brief_now", None)
+    if _BRIEFING_OFF_RE.match(candidate):
+        return ("briefing_off", None)
+    m = _BRIEFING_ON_RE.match(candidate)
+    if m:
+        if m.group(1):
+            t = parse_clock_time(m.group(1))
+            return ("briefing_on", t) if t else None
+        return ("briefing_on", None)
+    if _NUDGES_OFF_RE.match(candidate):
+        return ("nudges_off", None)
+    m = _NUDGES_ON_RE.match(candidate)
+    if m:
+        # "remind me" alone (no "before meetings") is a reminder request, not nudges
+        if "before" not in candidate and "nudges" not in candidate:
+            return None
+        return ("nudges_on", int(m.group(1)) if m.group(1) else None)
+    return None
+
+
+def match_proactive_intent(text: str) -> ProactiveAction | None:
+    """"brief me" / "give me a briefing every morning at 8" / "stop the
+    morning briefing" / "warn me 10 minutes before my meetings" / "turn off
+    nudges". Same candidate strategy as match_intent: whole normalized
+    utterance, then each clause. Returns (kind, payload) where payload is
+    the "HH:MM" briefing time, the nudge lead in minutes, or None."""
+    for candidate in _candidates_for(normalize(text)):
+        result = _match_proactive_candidate(candidate)
+        if result is not None:
+            return result
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            result = _match_proactive_candidate(candidate)
+            if result is not None:
+                return result
+    return None
+
+
 def match_screen_intent(text: str) -> bool:
     """True if `text` (as-spoken) asks Veronica to look at the screen —
     matched the same way as match_intent (whole utterance, then each
