@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 from veronica.config import Settings
 from veronica.ui.hud import HudWindow
@@ -65,3 +67,58 @@ def test_show_calls_set_visible_true_and_hide_calls_set_visible_false():
     assert web.js[-1] == "window.hud.setVisible(true)"
     h.hide()
     assert web.js[-1] == "window.hud.setVisible(false)"
+
+
+def test_hide_waits_for_animation_completion_before_ordering_out(monkeypatch):
+    # A panel that HAS an animator(), plus a fake AppKit.NSAnimationContext
+    # whose endGrouping() does NOT fire the completion handler, exercises the
+    # real (non-except) branch of _fade: the panel must not be ordered out
+    # until the completion handler set via setCompletionHandler_ is invoked.
+    class FakeAnimatorProxy:
+        def __init__(self, panel):
+            self._panel = panel
+
+        def setAlphaValue_(self, a):
+            self._panel.alpha = a
+
+    class FakePanelWithAnimator(FakePanel):
+        def animator(self):
+            return FakeAnimatorProxy(self)
+
+    class FakeContext:
+        def __init__(self):
+            self.completion = None
+
+        def setDuration_(self, d):
+            pass
+
+        def setCompletionHandler_(self, cb):
+            self.completion = cb
+
+    class FakeNSAnimationContext:
+        ctx = FakeContext()
+
+        @classmethod
+        def beginGrouping(cls):
+            pass
+
+        @classmethod
+        def currentContext(cls):
+            return cls.ctx
+
+        @classmethod
+        def endGrouping(cls):
+            pass  # deliberately does NOT invoke the completion handler
+
+    fake_appkit = types.SimpleNamespace(NSAnimationContext=FakeNSAnimationContext)
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+
+    web, panel = FakeWeb(), FakePanelWithAnimator()
+    h = HudWindow(Settings(), webview_factory=lambda s: web, panel_factory=lambda s, w: panel, main=lambda fn: fn())
+
+    h.hide()
+    assert "out" not in panel.orders
+    assert panel.alpha == 0.0
+
+    FakeNSAnimationContext.ctx.completion()
+    assert "out" in panel.orders

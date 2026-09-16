@@ -103,12 +103,14 @@ class HudWindow:
                 import AppKit
                 AppKit.NSAnimationContext.beginGrouping()
                 AppKit.NSAnimationContext.currentContext().setDuration_(0.15)
+                if then:
+                    AppKit.NSAnimationContext.currentContext().setCompletionHandler_(then)
                 self._panel.animator().setAlphaValue_(alpha)
                 AppKit.NSAnimationContext.endGrouping()
             except Exception:
                 self._panel.setAlphaValue_(alpha)
-            if then:
-                then()
+                if then:
+                    then()
         self._main(_do)
 
     def show(self) -> None:

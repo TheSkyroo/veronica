@@ -25,6 +25,12 @@ class _NoopHud:
     def tick(self) -> None:
         pass
 
+    def show(self) -> None:
+        pass
+
+    def hide(self) -> None:
+        pass
+
     def close(self) -> None:
         pass
 

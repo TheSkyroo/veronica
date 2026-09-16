@@ -60,12 +60,15 @@ class FakeHud:
         self.ticks = 0
         self.closed = False
         self.available = True
+        self.log = []  # combined order of on_state/push calls
 
     def push(self, event):
         self.pushed.append(event)
+        self.log.append(("push", event["kind"]))
 
     def on_state(self, state):
         self.states.append(state)
+        self.log.append(("state", state))
 
     def tick(self):
         self.ticks += 1
@@ -257,6 +260,28 @@ def test_events_drained_to_hud(fake_env):
     kinds = [e["kind"] for e in app._hud.pushed]
     assert kinds.count("mic") == 1 and app._hud.pushed[[i for i, e in enumerate(app._hud.pushed) if e["kind"] == "mic"][0]]["payload"] == 0.9
     assert app._hud.states == ["listening"] and app._hud.ticks == 1
+    # exact push order: state, then heard, then the coalesced mic last
+    assert kinds == ["state", "heard", "mic"]
+    # on_state("listening") is recorded before the corresponding state push
+    state_call_idx = app._hud.log.index(("state", "listening"))
+    state_push_idx = app._hud.log.index(("push", "state"))
+    assert state_call_idx < state_push_idx
+    _quit_and_join(app)
+
+
+def test_drain_overflow_drops_mic(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    # "heard" is queued first so it's within the first 64 popped by a single
+    # _drain() call, alongside enough mic events (queued after it) to push
+    # qsize() over the 1000 overflow threshold at the start of that call.
+    app._events.put(("heard", "hi"))
+    for i in range(1100):
+        app._events.put(("mic", i / 1100))
+    app._drain(None)
+    kinds = [e["kind"] for e in app._hud.pushed]
+    assert "mic" not in kinds
+    assert "heard" in kinds
     _quit_and_join(app)
 
 
