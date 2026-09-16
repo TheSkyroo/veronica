@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 
+from veronica import prefs, proactive
 from veronica.audio.play import Player
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
@@ -11,6 +12,7 @@ from veronica.brain.agent import Brain
 from veronica.config import Settings, settings, setup_logging
 from veronica.memory.store import MemoryStore
 from veronica.orchestrator import Orchestrator
+from veronica.speech import voices
 from veronica.speech.stt import Transcriber
 from veronica.speech.tts import Synthesizer
 from veronica.tools import memory_tools, pim
@@ -29,6 +31,57 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # local remember/forget intents and logs turns, and the brain still
     # wants facts/recent injected into its system prompt.
     store = MemoryStore(s.memory_path) if s.memory_enabled else None
+    # Voice/speed chosen at runtime ("use a british voice", "speak faster")
+    # outlive the process via prefs.json; Settings only supplies the default.
+    saved = prefs.load()
+    saved_voice = saved.get("tts_voice")
+    if saved_voice not in voices.VOICE_IDS:
+        if saved_voice:
+            logging.getLogger("veronica").warning("unknown saved voice %r; using %s", saved_voice, s.kokoro_voice)
+        saved_voice = s.kokoro_voice
+    try:
+        saved_speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
+    except (TypeError, ValueError):
+        saved_speed = voices.DEFAULT_SPEED
+
+    # Proactive briefings/nudges read the same pim tools the brain uses,
+    # just without going through Claude: the ticker gets the tools' text
+    # (or a mail count) and composes the announcement itself.
+    # A failed fetch (timeout, Automation denied) raises so build_briefing's
+    # guarded fetch logs it and drops the sentence, rather than reading the
+    # error text as "Nothing on your calendar today."
+    def _text_or_raise(res: dict) -> str:
+        text = res["content"][0]["text"]
+        if res.get("is_error"):
+            raise RuntimeError(text)
+        return text
+
+    async def _cal(day: str, days: int) -> str:
+        return _text_or_raise(await pim.calendar_events.handler({"day": day, "days": days}))
+
+    async def _mail_count() -> int:
+        # Mail's own unread count is the real number; the listing is capped
+        # at MAIL_LIMIT_MAX, so counting it is only a best-effort fallback.
+        try:
+            return await pim.mail_unread_count()
+        except Exception as exc:
+            logging.getLogger("veronica").warning("mail unread count failed, counting the listing: %s", exc)
+        res = await pim.mail_unread.handler({"limit": 50})
+        return proactive.count_mail(res["content"][0]["text"]) if not res.get("is_error") else 0
+
+    async def _rem(days: int) -> str:
+        return _text_or_raise(await pim.reminders_due.handler({"days": days}))
+
+    pro = None
+    if audio:
+        # holder["orch"] is set right after construction, and announce() is
+        # only called from ticks that start in run_forever, so the lambda
+        # never runs before the orchestrator exists.
+        pro = proactive.Proactive(
+            proactive.Schedule.from_prefs(saved.get("proactive", {})),
+            announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
+            calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
+        )
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
@@ -36,12 +89,13 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         stt=Transcriber(s.whisper_model) if audio else None,
         partial_stt=Transcriber(s.partial_stt_model) if (audio and s.partial_stt) else None,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
-        tts=Synthesizer(s.kokoro_voice, s.models_dir),
+        tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed),
         player=Player(),
         store=store,
         on_state=on_state,
         on_event=on_event,
         on_quit=on_quit,
+        proactive=pro,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

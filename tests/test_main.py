@@ -10,9 +10,10 @@ from veronica.tools import memory_tools
 
 
 class _FakeSynthesizer:
-    def __init__(self, voice, models_dir):
+    def __init__(self, voice, models_dir, speed=1.0):
         self.voice = voice
         self.models_dir = models_dir
+        self.speed = speed
 
 
 class _FakeBrain:
@@ -24,6 +25,7 @@ class _FakeBrain:
 
 
 async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
 
@@ -52,6 +54,7 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
 
 
 async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
 
@@ -60,6 +63,48 @@ async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp
     assert orch.store is None
     assert orch.brain.memory is None
     assert memory_tools.store is None
+
+
+async def test_build_orchestrator_applies_saved_voice_prefs(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "am_adam", "tts_speed": 9})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == "am_adam"
+    assert orch.tts.speed == 1.5   # clamped to SPEED_MAX
+
+
+async def test_build_orchestrator_defaults_without_voice_prefs(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == Settings().kokoro_voice
+    assert orch.tts.speed == 1.0
+
+
+async def test_build_orchestrator_ignores_unknown_voice_pref(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "zz_nobody"})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.voice == Settings().kokoro_voice
+
+
+async def test_build_orchestrator_ignores_bad_speed_pref(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_speed": "fast"})
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+
+    assert orch.tts.speed == 1.0
 
 
 class _FakeWakeWord:
@@ -91,6 +136,7 @@ class _FakeBrainWithOnTool:
 
 
 async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
     monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
@@ -109,6 +155,109 @@ async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_hom
     orch.store.close()
     memory_tools.bind(None)
 
+
+async def test_build_orchestrator_wires_proactive(monkeypatch, tmp_home):
+    from veronica.proactive import Schedule
+
+    saved = {"proactive": {"briefing_enabled": True, "briefing_time": "07:45", "nudge_minutes": 12}}
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: saved)
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+    assert orch.proactive is not None
+    assert orch.proactive.schedule == Schedule.from_prefs(saved["proactive"])
+    assert orch.proactive.schedule.briefing_time == "07:45"
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_no_proactive_in_text_mode(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+    assert orch.proactive is None
+    memory_tools.bind(None)
+
+
+async def _build_audio_orch(monkeypatch):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+    return main_mod.build_orchestrator(Settings(memory_enabled=False), audio=True)
+
+
+async def test_proactive_adapters_read_pim_tool_text(monkeypatch, tmp_home):
+    """Calendar/reminder adapters hand the pim tools' text to Proactive; the
+    mail adapter uses Mail's real unread count, not the (capped) listing."""
+    from veronica.tools import pim as pim_tools
+
+    calls = []
+
+    async def cal(args):
+        calls.append(("cal", args))
+        return {"content": [{"type": "text", "text": "09:00–09:30  Standup (Work)"}]}
+
+    async def listing(args):
+        calls.append(("mail_listing", args))
+        return {"content": [{"type": "text", "text": "A  Subject\n  preview\nB  Other\n  preview"}]}
+
+    async def count():
+        calls.append(("mail_count", None))
+        return 42
+
+    async def rem(args):
+        calls.append(("rem", args))
+        return {"content": [{"type": "text", "text": "2026-09-16 10:00  Pay rent"}]}
+
+    monkeypatch.setattr(pim_tools.calendar_events, "handler", cal)
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing)
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
+    monkeypatch.setattr(pim_tools.reminders_due, "handler", rem)
+
+    pro = (await _build_audio_orch(monkeypatch)).proactive
+    assert await pro._calendar_events("today", 1) == "09:00–09:30  Standup (Work)"
+    assert await pro._mail_unread_count() == 42
+    assert await pro._reminders_due(1) == "2026-09-16 10:00  Pay rent"
+    assert calls == [
+        ("cal", {"day": "today", "days": 1}),
+        ("mail_count", None),
+        ("rem", {"days": 1}),
+    ]
+    memory_tools.bind(None)
+
+
+async def test_proactive_mail_count_falls_back_to_listing(monkeypatch, tmp_home, caplog):
+    """If Mail's unread-count property fails, fall back to counting the
+    (capped) unread listing; a listing error counts as zero."""
+    from veronica.tools import pim as pim_tools
+
+    async def count():
+        raise RuntimeError("Mail got an error: Connection is invalid.")
+
+    async def listing(args):
+        assert args == {"limit": 50}
+        return {"content": [{"type": "text", "text": "A  Subject\n  preview\nB  Other\n  preview"}]}
+
+    async def listing_err(args):
+        return {"content": [{"type": "text", "text": "error: Mail isn't running"}], "is_error": True}
+
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing)
+    pro = (await _build_audio_orch(monkeypatch)).proactive
+    with caplog.at_level(logging.WARNING, logger="veronica"):
+        assert await pro._mail_unread_count() == 2
+    assert any("unread count" in r.getMessage() for r in caplog.records)
+
+    monkeypatch.setattr(pim_tools.mail_unread, "handler", listing_err)
+    assert await pro._mail_unread_count() == 0
+    memory_tools.bind(None)
 
 def test_main_text_mode_parses(monkeypatch):
     calls = []
@@ -244,3 +393,31 @@ def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):
     assert ok is False
     out = capsys.readouterr().out
     assert "[tool] Bash: rm x -> declined" in out
+
+
+async def test_proactive_adapters_raise_on_pim_error(monkeypatch, tmp_home):
+    """A Calendar/Reminders failure (timeout, Automation denied) must reach
+    Proactive as an exception, not as 'Nothing on your calendar today.'"""
+    from veronica.tools import pim as pim_tools
+
+    async def boom(args):
+        return {"content": [{"type": "text", "text": "boom"}], "is_error": True}
+
+    async def count():
+        return 0
+
+    monkeypatch.setattr(pim_tools.calendar_events, "handler", boom)
+    monkeypatch.setattr(pim_tools.reminders_due, "handler", boom)
+    monkeypatch.setattr(pim_tools, "mail_unread_count", count)
+
+    pro = (await _build_audio_orch(monkeypatch)).proactive
+    with pytest.raises(RuntimeError, match="boom"):
+        await pro._calendar_events("today", 1)
+    with pytest.raises(RuntimeError, match="boom"):
+        await pro._reminders_due(1)
+
+    text = await pro.build_briefing()
+    assert "Nothing on your calendar" not in text
+    assert "Reminders due" not in text
+    assert text.startswith("Good ")
+    memory_tools.bind(None)

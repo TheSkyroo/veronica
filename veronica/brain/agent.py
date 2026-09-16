@@ -19,6 +19,7 @@ from veronica.brain.policy import classify
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
+from veronica.tools.browser import browser_server
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -40,6 +41,7 @@ PIM_PREFIX = "mcp__pim__"
 MEMORY_PREFIX = "mcp__memory__"
 SCREEN_PREFIX = "mcp__screen__"
 MUSIC_PREFIX = "mcp__music__"
+BROWSER_PREFIX = "mcp__browser__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -125,6 +127,27 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "music_volume":
             return f"Set music volume {input.get('level', '')}"
         return short
+    if tool_name.startswith(BROWSER_PREFIX):
+        short = tool_name[len(BROWSER_PREFIX):]
+        if short == "browser_tabs":
+            return "List tabs"
+        if short == "browser_open":
+            return f"Open {input.get('url', '')}"
+        if short == "browser_read":
+            return "Read the page"
+        if short == "browser_find":
+            return f"Find '{input.get('text', '')}' on the page"
+        if short == "browser_click":
+            return f"Click '{input.get('target', '')}'"
+        if short == "browser_type":
+            text = str(input.get("text", ""))[:40]
+            desc = f"Type '{text}' into '{input.get('target', '')}'"
+            return desc + " and press Enter" if input.get("submit") else desc
+        if short == "browser_scroll":
+            return f"Scroll {input.get('direction', 'down')}"
+        if short == "browser_back":
+            return "Go back"
+        return short
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
     for key in ("command", "query", "url", "pattern", "file_path"):
@@ -203,6 +226,7 @@ class Brain:
             mcp_servers={
                 "mac": mac_server, "pim": pim_server, "memory": memory_server,
                 "screen": screen_server, "music": music_server,
+                "browser": browser_server,
             },
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool

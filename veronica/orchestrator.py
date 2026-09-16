@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from veronica import prefs
+from veronica import proactive as proactive_mod
 from veronica.audio.chime import tone
 from veronica.brain.intents import (
     is_stop_dictation,
@@ -17,10 +19,13 @@ from veronica.brain.intents import (
     match_memory_intent,
     match_music_intent,
     match_note_intent,
+    match_proactive_intent,
     match_screen_intent,
+    match_voice_intent,
     normalize,
 )
 from veronica.config import Settings
+from veronica.speech import voices
 from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
@@ -63,8 +68,13 @@ class Orchestrator:
                  partial_stt=None, store=None,
                  on_state: Callable[[str], None] | None = None,
                  on_event: Callable[[str, Any], None] | None = None,
-                 on_quit: Callable[[], None] | None = None) -> None:
+                 on_quit: Callable[[], None] | None = None,
+                 proactive=None) -> None:
         self.s = settings
+        # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
+        # Started once by run_forever; its schedule is what the "brief me"
+        # / "turn on nudges" intents edit. None in --text mode.
+        self.proactive = proactive
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
         self.partial_stt = partial_stt
@@ -414,6 +424,48 @@ class Orchestrator:
             text = "Sorry, I couldn't do that."
         await self.say(text)
 
+    # -- voice & speed (B1) ---------------------------------------------------------
+    async def _voice_turn(self, action: tuple[str, str]) -> None:
+        """Local fast path for "use a british voice" / "speak faster":
+        mutate the running Synthesizer, persist to prefs.json, and confirm
+        in the new voice/speed so the user hears the change immediately.
+        Also called by the menu bar's Voice/Speed items."""
+        kind, arg = action
+        if kind == "voice":
+            vid = voices.next_voice(self.tts.voice) if arg == "next" else voices.resolve_voice(arg)
+            if vid is None:
+                names = [voices.display_name(v) for v in voices.VOICE_IDS]
+                await self.say(
+                    "I don't have that voice. I have " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                )
+                return
+            self.tts.voice = vid
+            prefs.save({"tts_voice": vid})
+            self._emit("tool", {"summary": f"Voice: {voices.display_name(vid)}", "decision": "auto"})
+            await self.say(f"Okay, this is {voices.display_name(vid)}.")
+            return
+        # speed
+        cur = float(self.tts.speed)
+        if arg == "faster":
+            new = voices.clamp_speed(cur + voices.SPEED_STEP)
+            if new <= cur:
+                await self.say("That's as fast as I go.")
+                return
+        elif arg == "slower":
+            new = voices.clamp_speed(cur - voices.SPEED_STEP)
+            if new >= cur:
+                await self.say("That's as slow as I go.")
+                return
+        else:
+            new = voices.DEFAULT_SPEED
+            if abs(cur - new) < 1e-9:
+                await self.say("Already at normal speed.")
+                return
+        self.tts.speed = round(new, 2)
+        prefs.save({"tts_speed": self.tts.speed})
+        self._emit("tool", {"summary": f"Speed: {self.tts.speed:.2f}x", "decision": "auto"})
+        await self.say("Like this?")
+
     # -- push-to-talk (A2) --------------------------------------------------------
     def ptt_start(self) -> None:
         """Called (on the event-loop thread, via the hotkey monitor's
@@ -553,6 +605,59 @@ class Orchestrator:
                 self.recorder.stop()
                 with contextlib.suppress(BaseException):
                     await cap
+
+    # -- proactive briefings & nudges (B2) ---------------------------------------
+    @staticmethod
+    def _time_spoken(hhmm: str) -> str:
+        """"07:30" -> "7:30 am", "18:00" -> "6 pm", "00:15" -> "12:15 am"
+        (how the confirmation reads a 24h HH:MM back)."""
+        hour, minute = int(hhmm[:2]), int(hhmm[3:5])
+        suffix = "am" if hour < 12 else "pm"
+        h12 = hour % 12 or 12
+        return f"{h12} {suffix}" if minute == 0 else f"{h12}:{minute:02d} {suffix}"
+
+    async def _proactive_turn(self, action: tuple[str, object]) -> None:
+        """Local fast path for the briefing/nudge intents: "brief me" speaks
+        a briefing right now; the on/off phrases edit the Proactive
+        schedule, persist it to prefs.json and read the result back."""
+        kind, arg = action
+        if self.proactive is None:
+            await self.say("Briefings aren't available right now.")
+            return
+        sched = self.proactive.schedule
+        if kind == "brief_now":
+            # Dispatched through _run_with_barge by one_turn (see
+            # _brief_now_turn), so a long briefing can be cut off.
+            await self._brief_now_turn()
+            return
+        if kind == "briefing_on":
+            sched.briefing_enabled = True
+            if isinstance(arg, str):
+                sched.briefing_time = arg
+            reply = f"Okay, I'll brief you every day at {self._time_spoken(sched.briefing_time)}."
+        elif kind == "briefing_off":
+            sched.briefing_enabled = False
+            reply = "Okay, no more morning briefings."
+        elif kind == "nudges_on":
+            sched.nudges_enabled = True
+            if isinstance(arg, int) and 1 <= arg <= 60:
+                sched.nudge_minutes = arg
+            reply = f"Okay, I'll warn you {sched.nudge_minutes} minutes before each event."
+        else:
+            sched.nudges_enabled = False
+            reply = "Okay, no more meeting nudges."
+        proactive_mod.save_schedule(sched)
+        self._emit("tool", {"summary": "Update briefing schedule", "decision": "auto"})
+        await self.say(reply)
+
+    async def _brief_now_turn(self) -> None:
+        """"brief me": fetch (Calendar/Mail/Reminders can take a few seconds,
+        so show "thinking") and speak the briefing."""
+        self._emit("tool", {"summary": "Briefing", "decision": "auto"})
+        self._set("thinking")
+        text = await self.proactive.build_briefing()
+        self._set("speaking")
+        await self.say(text)
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -843,9 +948,19 @@ class Orchestrator:
                 None if (intent is not None or mem is not None or screen_intent or music_action)
                 else match_note_intent(text)
             )
+            voice_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
+                else match_voice_intent(text)
+            )
+            proactive_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
+                else match_proactive_intent(text)
+            )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -886,6 +1001,21 @@ class Orchestrator:
             elif note_body is not None:
                 self.player.reset()
                 await self._note_turn(note_body)
+            elif voice_action is not None:
+                self.player.reset()
+                await self._voice_turn(voice_action)
+            elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
+                self.player.reset()
+                barged = await self._run_with_barge(self._brief_now_turn())
+                if barged:
+                    pcm = await self._relisten(barged)
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
+            elif proactive_action is not None:
+                self.player.reset()
+                await self._proactive_turn(proactive_action)
             elif dictation_intent:
                 barged = await self._run_with_barge(self._dictation_turn())
                 if barged:
@@ -948,13 +1078,19 @@ class Orchestrator:
             await self.say("I'm back.")
 
     # -- announcements ----------------------------------------------------------
-    async def announce(self, text: str) -> None:
+    async def announce(self, text: str, *, expires_at: dt.datetime | None = None) -> None:
         """Queue `text` to be spoken next time we're idle (e.g. a timer
         firing): never interrupts an in-flight turn. Safe to call from any
-        task (e.g. TimerService's on_fire callback)."""
-        await self._announce_queue.put(text)
+        task (e.g. TimerService's on_fire callback). An announcement with
+        `expires_at` in the past by the time it's delivered (a "starts in 5
+        minutes" nudge that sat behind a long turn) is dropped, not spoken."""
+        await self._announce_queue.put((text, expires_at))
 
-    async def _deliver_announcement(self, text: str) -> None:
+    async def _deliver_announcement(self, item: tuple[str, dt.datetime | None]) -> None:
+        text, expires_at = item
+        if expires_at is not None and expires_at < dt.datetime.now():
+            log.info("announcement expired: %r", text)
+            return
         self._set("speaking")
         self.player.reset()
         await self.chime(self.s.chime_wake_hz, 120)
@@ -985,6 +1121,8 @@ class Orchestrator:
     async def run_forever(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._set("idle")
+        if self.proactive is not None:
+            await self.proactive.start()
         while True:
             # Deliver anything queued while we were away (e.g. a timer that
             # fired mid-turn), unless muted — while muted, announcements just

@@ -1442,7 +1442,49 @@ async def test_announce_queues():
     assert o._announce_queue.empty()
     await o.announce("Timer done")
     assert not o._announce_queue.empty()
-    assert o._announce_queue.get_nowait() == "Timer done"
+    assert o._announce_queue.get_nowait() == ("Timer done", None)
+
+
+async def test_announce_queue_stores_expiry_and_skips_stale():
+    """A queued announcement whose expires_at has passed is dropped at
+    delivery time (a "starts in 5 minutes" nudge after the meeting began);
+    one that's still in the future, or has no expiry, is spoken."""
+    import datetime as dt
+    o, states = build()
+    wake = _WakeBlocksThenCancel()
+    o.wake = wake
+    past = dt.datetime.now() - dt.timedelta(minutes=1)
+    future = dt.datetime.now() + dt.timedelta(hours=1)
+    await o.announce("Stale nudge", expires_at=past)
+    await o.announce("Fresh nudge", expires_at=future)
+    await o.announce("Timer done")
+    assert o._announce_queue.qsize() == 3
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "Stale nudge" not in o.tts.said
+    assert o.tts.said == ["Fresh nudge", "Timer done"]
+
+
+async def test_stale_announcement_via_signal_path_is_skipped():
+    """Same expiry check on the direct (idle-wait) delivery path."""
+    import datetime as dt
+    o, states = build()
+    wake = _WakeBlocksThenCancel()
+    o.wake = wake
+
+    async def deliver_soon():
+        await asyncio.sleep(0.01)
+        await o.announce("Stale nudge", expires_at=dt.datetime.now() - dt.timedelta(seconds=1))
+
+    asyncio.ensure_future(deliver_soon())
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert o.tts.said == []
+    assert "speaking" not in states
+    assert wake.calls >= 2
 
 
 async def test_announce_delivered_while_idle():
@@ -2305,7 +2347,7 @@ async def test_ptt_and_announcement_same_tick_requeues_announcement():
     rf = asyncio.create_task(o.run_forever())
     await _settle()
     o.ptt_start()
-    o._announce_queue.put_nowait("Timer done")
+    o._announce_queue.put_nowait(("Timer done", None))
     await _settle()
     assert "Timer done" not in o.tts.said          # held until the PTT turn ends
     o.ptt_end()
@@ -2669,3 +2711,257 @@ async def test_barge_teardown_logs_turn_exception(caplog):
     with caplog.at_level("ERROR", logger="veronica.orchestrator"):
         await o._barge_teardown(turn)
     assert any("torn down" in r.message for r in caplog.records)
+
+
+# -- batch B: voice / speed --------------------------------------------------
+
+from veronica import prefs as prefs_mod
+
+
+class TTS2(TTS):
+    def __init__(self):
+        super().__init__()
+        self.voice = "af_sarah"
+        self.speed = 1.0
+        self.spoken_with = []   # (text, voice, speed) at synth time
+
+    async def asynth(self, text):
+        self.spoken_with.append((text, self.voice, self.speed))
+        return await super().asynth(text)
+
+
+def build_voice(stt_texts, monkeypatch):
+    saved = []
+    monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(stt_texts),
+        brain=Brain(), tts=TTS2(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)),
+    )
+    return o, saved, events
+
+
+async def test_voice_intent_switches_voice_and_saves(monkeypatch):
+    o, saved, ev = build_voice(["use a british male voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "bm_george"
+    assert o.tts.spoken_with[-1] == ("Okay, this is George.", "bm_george", 1.0)
+    assert {"tts_voice": "bm_george"} in saved
+    assert ("tool", {"summary": "Voice: George", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+
+async def test_voice_intent_unknown_lists_voices(monkeypatch):
+    o, saved, _ = build_voice(["use a robot voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_sarah"
+    assert saved == []
+    assert o.tts.said[-1].startswith("I don't have that voice. I have Sarah, Bella")
+    assert o.tts.said[-1].endswith("George and Lewis.")
+
+
+async def test_voice_intent_next_cycles(monkeypatch):
+    o, saved, _ = build_voice(["change your voice"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_bella"
+    assert {"tts_voice": "af_bella"} in saved
+
+
+async def test_speed_faster_and_clamp(monkeypatch):
+    o, saved, _ = build_voice(["speak faster"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.speed == pytest.approx(1.15)
+    assert o.tts.spoken_with[-1][0] == "Like this?"
+    assert any(abs(d.get("tts_speed", 0) - 1.15) < 1e-9 for d in saved)
+
+    o.tts.speed = 1.5
+    o.stt = STT(["speak faster"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.speed == 1.5
+    assert o.tts.said[-1] == "That's as fast as I go."
+
+
+async def test_speed_slower_normal(monkeypatch):
+    o, saved, _ = build_voice(["slow down"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.speed == pytest.approx(0.85)
+    o.stt = STT(["normal speed"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.speed == 1.0
+    assert o.tts.said[-1] == "Like this?"
+    o.stt = STT(["normal speed"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.said[-1] == "Already at normal speed."
+
+
+# -- batch B: proactive -------------------------------------------------------
+
+from veronica import proactive as pr_mod
+
+
+class FakeProactive:
+    def __init__(self):
+        self.schedule = pr_mod.Schedule()
+        self.started = 0
+    async def start(self): self.started += 1
+    def stop(self): pass
+    async def build_briefing(self): return "Good morning, Manik. Nothing on your calendar today."
+
+
+class _WakeBlocks(Wake):
+    """Never detects: blocks until cancelled, so run_forever parks in its
+    idle wait instead of spinning."""
+    async def wait(self, threshold=None, suppress=None):
+        await asyncio.Event().wait()
+
+
+def build_pro(stt_texts, monkeypatch, wake=None):
+    saved = []
+    monkeypatch.setattr(pr_mod, "save_schedule", lambda s, save=None: saved.append(s.to_prefs()))
+    states, events = [], []
+    p = FakeProactive()
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=wake or Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT(stt_texts),
+        brain=Brain(), tts=TTS(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), proactive=p,
+    )
+    return o, p, saved, events
+
+
+async def test_brief_now_speaks_briefing(monkeypatch):
+    o, _, saved, ev = build_pro(["brief me"], monkeypatch)
+    await o.one_turn()
+    assert o.tts.said == ["Good morning, Manik. Nothing on your calendar today."]
+    assert ("tool", {"summary": "Briefing", "decision": "auto"}) in ev
+    assert o.brain.asked == [] and saved == []
+
+
+async def test_brief_now_thinks_before_speaking(monkeypatch):
+    o, _, _, _ = build_pro(["brief me"], monkeypatch)
+    states = []
+    o._on_state = states.append
+    await o.one_turn()
+    assert "thinking" in states and "speaking" in states
+    assert states.index("thinking") < states.index("speaking")
+    assert o.tts.said == ["Good morning, Manik. Nothing on your calendar today."]
+
+
+async def test_brief_now_can_be_barged(monkeypatch):
+    """A long briefing runs under _run_with_barge: the wake word cuts it
+    off and Veronica re-listens instead of finishing the briefing."""
+    class SlowProactive(FakeProactive):
+        async def build_briefing(self):
+            await asyncio.Event().wait()
+            return "never"
+
+    class BargeWake(Wake):
+        def __init__(self): self.barges = 0
+        async def wait(self, threshold=None, suppress=None):
+            if threshold is not None:
+                self.barges += 1
+                return True
+            return True
+
+    class InterruptibleBrain(Brain):
+        def __init__(self): super().__init__(); self.interrupts = 0
+        async def interrupt(self): self.interrupts += 1
+
+    o, _, _, _ = build_pro(["brief me", "hello"], monkeypatch, wake=BargeWake())
+    o.proactive = SlowProactive()
+    o.brain = InterruptibleBrain()
+    o.recorder = Rec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.wake.barges >= 1
+    assert "never" not in o.tts.said
+    assert o.brain.asked == ["hello"]
+
+
+async def test_time_spoken_12h():
+    ts = Orchestrator._time_spoken
+    assert ts("18:00") == "6 pm"
+    assert ts("07:30") == "7:30 am"
+    assert ts("12:00") == "12 pm"
+    assert ts("00:15") == "12:15 am"
+    assert ts("12:45") == "12:45 pm"
+
+
+async def test_briefing_on_with_time_saves_and_confirms(monkeypatch):
+    o, p, saved, ev = build_pro(["give me a briefing every morning at 7:30 am"], monkeypatch)
+    await o.one_turn()
+    assert p.schedule.briefing_enabled and p.schedule.briefing_time == "07:30"
+    assert saved[-1]["briefing_time"] == "07:30"
+    assert o.tts.said[-1] == "Okay, I'll brief you every day at 7:30 am."
+    assert ("tool", {"summary": "Update briefing schedule", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+
+async def test_briefing_on_without_time_keeps_stored(monkeypatch):
+    o, p, _, _ = build_pro(["turn on the morning briefing"], monkeypatch)
+    p.schedule.briefing_time = "09:15"
+    await o.one_turn()
+    assert p.schedule.briefing_enabled and p.schedule.briefing_time == "09:15"
+    assert o.tts.said[-1] == "Okay, I'll brief you every day at 9:15 am."
+
+
+async def test_briefing_off_nudges_on_off(monkeypatch):
+    o, p, saved, _ = build_pro(["stop the morning briefing"], monkeypatch)
+    p.schedule.briefing_enabled = True
+    await o.one_turn()
+    assert not p.schedule.briefing_enabled and o.tts.said[-1] == "Okay, no more morning briefings."
+
+    o.stt = STT(["warn me 10 minutes before my meetings"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 10
+    assert o.tts.said[-1] == "Okay, I'll warn you 10 minutes before each event."
+
+    o.stt = STT(["turn off nudges"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert not p.schedule.nudges_enabled and o.tts.said[-1] == "Okay, no more meeting nudges."
+    assert len(saved) == 3
+
+
+async def test_nudges_on_out_of_range_minutes_keeps_stored(monkeypatch):
+    o, p, _, _ = build_pro(["warn me 90 minutes before my meetings"], monkeypatch)
+    p.schedule.nudge_minutes = 7
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 7
+    assert o.tts.said[-1] == "Okay, I'll warn you 7 minutes before each event."
+
+
+async def test_proactive_intent_without_proactive_says_unavailable(monkeypatch):
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["brief me"])
+    await o.one_turn()
+    assert o.tts.said[-1] == "Briefings aren't available right now."
+    assert o.brain.asked == []
+
+
+async def test_nudges_on_default_minutes(monkeypatch):
+    o, p, saved, _ = build_pro(["turn on nudges"], monkeypatch)
+    await o.one_turn()
+    assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 5
+    assert o.tts.said == ["Okay, I'll warn you 5 minutes before each event."]
+    assert o.brain.asked == [] and saved == [p.schedule.to_prefs()]
+
+
+async def test_run_forever_starts_proactive(monkeypatch):
+    o, p, _, _ = build_pro([], monkeypatch, wake=_WakeBlocks())
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert p.started == 1
+
+
+async def test_run_forever_without_proactive_is_fine():
+    o, _ = build()
+    o.wake = _WakeBlocks()
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert o.proactive is None

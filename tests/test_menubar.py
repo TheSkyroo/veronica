@@ -14,6 +14,10 @@ class FakeMenuItem:
         self.title = title
         self.callback = callback
         self.state = False
+        self.children = []  # submenu entries; None models rumps' add(None) separator
+
+    def add(self, item):
+        self.children.append(item)
 
 
 class FakeTimer:
@@ -520,9 +524,24 @@ class _FakeMenuItemNS:
     def setEnabled_(self, enabled):
         self.enabled = enabled
 
+    def setSubmenu_(self, submenu):
+        self.submenu = submenu
+
+    def setRepresentedObject_(self, obj):
+        self._represented = obj
+
+    def representedObject(self):
+        return getattr(self, "_represented", None)
+
+
+class _FakeSeparator:
+    title = "-"
+    action = None
+
 
 class _FakeNSMenu:
-    def __init__(self):
+    def __init__(self, title=""):
+        self.title = title
         self.items = []
         self.popups = []
 
@@ -542,11 +561,14 @@ def _fake_appkit_for_menu():
         return m
 
     return types.SimpleNamespace(
-        NSMenu=types.SimpleNamespace(alloc=lambda: types.SimpleNamespace(init=new_menu)),
+        NSMenu=types.SimpleNamespace(
+            alloc=lambda: types.SimpleNamespace(init=new_menu, initWithTitle_=lambda title: _FakeNSMenu(title))
+        ),
         NSMenuItem=types.SimpleNamespace(
             alloc=lambda: types.SimpleNamespace(
                 initWithTitle_action_keyEquivalent_=lambda title, action, key: _FakeMenuItemNS(title, action, key)
-            )
+            ),
+            separatorItem=lambda: _FakeSeparator(),
         ),
     ), menu_holder
 
@@ -571,7 +593,7 @@ def test_popup_menu_uses_live_rumps_menu_when_available(fake_env):
         _quit_and_join(app)
 
 
-def test_build_popup_menu_fallback_has_four_titles_and_actions(fake_env, monkeypatch):
+def test_build_popup_menu_fallback_has_five_titles_and_actions(fake_env, monkeypatch):
     menubar, fake_rumps, orch_holder = fake_env
     app, orch = _make_app(menubar, orch_holder)
     try:
@@ -581,14 +603,14 @@ def test_build_popup_menu_fallback_has_four_titles_and_actions(fake_env, monkeyp
         menu = app._build_popup_menu()
 
         assert [i.title for i in menu.items] == [
-            "Mute", "HUD: Full", "Start at Login (build the app first)", "Quit",
+            "Mute", "HUD: Full", "Voice", "Start at Login (build the app first)", "Quit",
         ]
         assert [i.action for i in menu.items] == [
-            "onMute:", "onToggleHud:", "onToggleLogin:", "onQuit:",
+            "onMute:", "onToggleHud:", None, "onToggleLogin:", "onQuit:",
         ]
-        assert all(i.target is not None for i in menu.items)
+        assert all(i.target is not None for i in menu.items if i.action is not None)
         # login item is disabled (no callback) when not running from a bundle
-        assert menu.items[2].enabled is False
+        assert menu.items[3].enabled is False
     finally:
         _quit_and_join(app)
 
@@ -645,6 +667,182 @@ def test_popup_menu_handler_forwards_to_app_callbacks(fake_env):
     handler.onQuit_(None)
     app._thread.join(timeout=2)
     assert fake_rumps.quit_called is True
+
+
+# -- commit: Voice submenu (voices, faster/slower/normal) ----------------------
+
+VOICE_NAMES = ["Sarah", "Bella", "Nicole", "Sky", "Adam", "Michael", "Emma", "Isabella", "George", "Lewis"]
+
+
+class _ResettablePlayer(FakePlayer):
+    def __init__(self):
+        super().__init__()
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+
+class _VoiceOrch:
+    """Minimal orchestrator stand-in for the Voice menu: records the
+    (kind, arg) actions passed to _voice_turn and player.reset() calls."""
+
+    def __init__(self, voice="af_sarah"):
+        self.calls = []
+        self.tts = types.SimpleNamespace(voice=voice, speed=1.0)
+        self.player = _ResettablePlayer()
+
+    async def _voice_turn(self, action):
+        self.calls.append(action)
+
+
+def test_voice_submenu_lists_voices_and_speed(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        sub = app._voice_menu
+        assert sub.title == "Voice"
+        assert sub in app.menu
+        assert app.menu.index(sub) == app.menu.index(app._hud_mode_item) + 1
+        titles = [i.title if i is not None else None for i in sub.children]
+        assert titles[:10] == VOICE_NAMES
+        assert titles[10] is None  # separator
+        assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
+        assert list(app._voice_items) == VOICE_NAMES
+        assert list(app._speed_items) == ["Faster", "Slower", "Normal speed"]
+        assert all(i.callback == app._pick_voice for i in app._voice_items.values())
+        assert all(i.callback == app._speed for i in app._speed_items.values())
+    finally:
+        _quit_and_join(app)
+
+
+def test_voice_menu_click_schedules_voice_turn(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    _quit_and_join(app)  # stop the background loop so a fresh, non-running loop drives the test
+    vo = _VoiceOrch()
+    app._orch = vo
+    app._loop = asyncio.new_event_loop()
+    try:
+        app._pick_voice(app._voice_items["Adam"])
+        app._loop.run_until_complete(asyncio.sleep(0))
+        assert vo.calls == [("voice", "adam")]
+        assert vo.player.resets == 1
+        app._speed(app._speed_items["Faster"])
+        app._loop.run_until_complete(asyncio.sleep(0))
+        assert vo.calls[-1] == ("speed", "faster")
+        assert vo.player.resets == 2
+        app._speed(app._speed_items["Normal speed"])
+        app._loop.run_until_complete(asyncio.sleep(0))
+        assert vo.calls[-1] == ("speed", "normal")
+    finally:
+        app._loop.close()
+
+
+def test_voice_menu_click_threadsafe_on_running_loop(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        done = threading.Event()
+        vo = _VoiceOrch()
+
+        async def _voice_turn(action):
+            vo.calls.append(action)
+            done.set()
+
+        vo._voice_turn = _voice_turn
+        app._orch = vo
+        app._pick_voice(app._voice_items["George"])  # loop is running on the background thread
+        assert done.wait(2)
+        assert vo.calls == [("voice", "george")]
+    finally:
+        _quit_and_join(app)
+
+
+def test_voice_menu_click_noop_without_orch(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app = menubar.VeronicaApp.__new__(menubar.VeronicaApp)
+    app._voice_items = {"Adam": fake_rumps.MenuItem("Adam")}
+    app._speed_items = {"Faster": fake_rumps.MenuItem("Faster")}
+    app._pick_voice(app._voice_items["Adam"])  # must not raise: no self._orch set
+    app._speed(app._speed_items["Faster"])
+    app._refresh_voice_menu()
+    assert app._voice_items["Adam"].state == 0
+
+
+def test_refresh_voice_menu_checks_current(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = _VoiceOrch(voice="bm_george")
+        app._refresh_voice_menu()
+        assert app._voice_items["George"].state == 1
+        assert app._voice_items["Sarah"].state == 0
+        app._orch.tts.voice = "af_sarah"
+        app._refresh(None)  # the 0.25 s timer keeps the checkmark in sync after a voice change by voice
+        assert app._voice_items["George"].state == 0
+        assert app._voice_items["Sarah"].state == 1
+    finally:
+        _quit_and_join(app)
+
+
+def test_refresh_does_not_raise_before_orch_or_tts(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._refresh(None)  # FakeOrch has no .tts
+        assert all(i.state == 0 for i in app._voice_items.values())
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_voice_submenu_mirrors_menu_bar(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = _VoiceOrch(voice="am_adam")
+        fake_appkit, _ = _fake_appkit_for_menu()
+        monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+        menu = app._build_popup_menu()
+        voice_item = menu.items[2]
+        assert voice_item.title == "Voice"
+        sub = voice_item.submenu
+        assert sub.title == "Voice"
+        titles = [i.title for i in sub.items]
+        assert titles[:10] == VOICE_NAMES
+        assert titles[10] == "-"
+        assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
+        assert [i.action for i in sub.items[:10]] == ["onPickVoice:"] * 10
+        assert [i.action for i in sub.items[-3:]] == ["onSpeed:"] * 3
+        assert [i.representedObject() for i in sub.items[:10]] == VOICE_NAMES
+        assert [i.representedObject() for i in sub.items[-3:]] == ["Faster", "Slower", "Normal speed"]
+        assert all(i.target is not None for i in sub.items if i.action is not None)
+        assert [i.state for i in sub.items[:10]] == [1 if n == "Adam" else 0 for n in VOICE_NAMES]
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_handler_forwards_voice_and_speed(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        picked = []
+        monkeypatch_pick = lambda item: picked.append(("voice", item.title))
+        monkeypatch_speed = lambda item: picked.append(("speed", item.title))
+        app._pick_voice = monkeypatch_pick
+        app._speed = monkeypatch_speed
+        handler = menubar._make_menu_handler_class().alloc().initWithApp_(app)
+        handler.onPickVoice_(_represented("Adam"))
+        handler.onSpeed_(_represented("Slower"))
+        assert picked == [("voice", "Adam"), ("speed", "Slower")]
+    finally:
+        _quit_and_join(app)
+
+
+def _represented(name):
+    item = _FakeMenuItemNS(name, None, "")
+    item.setRepresentedObject_(name)
+    return item
 
 
 # -- push-to-talk (A2) --------------------------------------------------------

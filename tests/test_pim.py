@@ -165,6 +165,46 @@ async def test_mail_unread_no_messages(monkeypatch):
     assert text(res) == "No messages."
 
 
+async def test_mail_unread_count_script_and_value(monkeypatch):
+    scripts = []
+
+    async def fake_osascript(script, ok_text=None):
+        scripts.append(script)
+        return pim._ok("7")
+
+    monkeypatch.setattr(pim, "_osascript", fake_osascript)
+    assert await pim.mail_unread_count() == 7
+    assert len(scripts) == 1
+    assert 'tell application "Mail"' in scripts[0] and "unread count of inbox" in scripts[0]
+    assert "whose" not in scripts[0]
+
+
+async def test_mail_unread_count_zero(monkeypatch):
+    async def fake_osascript(script, ok_text=None):
+        return pim._ok("0")
+
+    monkeypatch.setattr(pim, "_osascript", fake_osascript)
+    assert await pim.mail_unread_count() == 0
+
+
+async def test_mail_unread_count_raises_on_error(monkeypatch):
+    async def fake_osascript(script, ok_text=None):
+        return pim._err("Mail got an error: Connection is invalid.")
+
+    monkeypatch.setattr(pim, "_osascript", fake_osascript)
+    with pytest.raises(RuntimeError, match="Connection is invalid"):
+        await pim.mail_unread_count()
+
+
+async def test_mail_unread_count_raises_on_garbage(monkeypatch):
+    async def fake_osascript(script, ok_text=None):
+        return pim._ok("lots")
+
+    monkeypatch.setattr(pim, "_osascript", fake_osascript)
+    with pytest.raises(RuntimeError, match="lots"):
+        await pim.mail_unread_count()
+
+
 async def test_mail_search_requires_query(fake_run):
     res = await pim.mail_search.handler({"query": ""})
     assert res["is_error"] and fake_run == []

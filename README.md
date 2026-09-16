@@ -128,6 +128,22 @@ sends it to Claude along with your question in one turn — the HUD shows a "Loo
 also decide to look at the screen on its own mid-conversation via the `screenshot` tool (allow-class, runs
 automatically). Requires **Screen Recording** access — see Permissions below.
 
+## Browser control
+
+Veronica can read and act on the page you have open in **Chrome** or **Safari**. Say "read this page", "summarize
+this article", "find pricing on this page", "click the login button", "type hello in the search box and press
+enter", or "open a new tab with github" — Claude picks the right browser tool for the request.
+
+One-time setup, per browser:
+
+- **Chrome** — menu bar **View ▸ Developer ▸ Allow JavaScript from Apple Events**.
+- **Safari** — enable the Develop menu in **Settings ▸ Advanced**, then **Develop ▸ Allow JavaScript from Apple
+  Events**.
+
+The first time a browser tool runs, macOS prompts for **Automation** access to the browser — allow it (see
+Permissions below). Reading, listing tabs, opening a URL, finding text, scrolling and going back run automatically;
+**clicking** and **typing** always ask for confirmation first, since they act inside your logged-in session.
+
 ## Push-to-talk
 
 Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
@@ -153,13 +169,43 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
   for 3 seconds, and types everything you said into whichever app is currently focused (via System Events —
   requires **Accessibility** access, same as push-to-talk).
 
+## Voice & speed
+
+- **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
+  (Sarah, Bella, Nicole, Sky, Adam, Michael, Emma, Isabella, George, Lewis), picked by name or by descriptor
+  (british/american, male/female); "use the default voice" goes back to the configured one. "Change your voice" /
+  "different voice" cycles to the next one. She confirms in the new voice ("Okay, this is George.") so you hear it
+  straight away; an unknown name gets the list back.
+- **Speed** — "speak faster" / "speak slower" / "normal speed" nudge the speaking rate in 0.15x steps (0.7x–1.5x)
+  and confirm with "Like this?".
+
+Both are handled locally (no round-trip to Claude), persist across restarts in `~/.veronica/prefs.json`, and are
+also in the menu bar / orb popup under **Voice** (the voice list plus Faster / Slower / Normal speed).
+
+## Briefings & nudges
+
+- **Brief me** — "brief me" / "give me a briefing" / "what's my day look like": a spoken summary of today's
+  calendar, unread mail count and reminders due, composed locally from Calendar.app, Mail.app and Reminders.app.
+- **Daily briefing** — "give me a briefing every morning at 8" / "start the briefing every day at 6 pm" turns on a
+  scheduled briefing at that time ("turn on the morning briefing" keeps the stored time, default 08:00); "stop the
+  morning briefing" / "turn off briefings" turns it off. A briefing more than two hours late (the Mac was asleep) is
+  skipped rather than read out mid-afternoon.
+- **Meeting nudges** — "warn me 10 minutes before my meetings" / "remind me before my meetings" / "turn on nudges"
+  announces "Heads up, <event> starts in 10 minutes." before each timed calendar event (1–60 minutes, default 5);
+  "turn off nudges" / "stop the meeting nudges" turns them off.
+
+Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
+fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
+
 ## Permissions
 
 Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
 **System Settings → Privacy & Security**:
 
 - **Microphone** — wake word and voice commands (asked automatically on first run).
-- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used).
+- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used);
+  **Google Chrome** and **Safari** for the browser tools; **System Events** for browser detection (which browser is
+  in front) and for dictation's typing.
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
 - **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
   asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if
@@ -180,7 +226,7 @@ Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a t
 one is already committed, so this is optional.)
 
 On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail,
-Reminders, Notes, Music, or Spotify it asks for **Automation** access to that app; the first `screenshot` prompts
+Reminders, Notes, Music, Spotify, Chrome, Safari or System Events it asks for **Automation** access to that app; the first `screenshot` prompts
 for **Screen Recording** — approve all of these (System Settings → Privacy & Security). **Accessibility** (for
 push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
 Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is

@@ -71,7 +71,9 @@ def _info_plist(version: str) -> dict:
         "LSMinimumSystemVersion": "13.0",
         "NSMicrophoneUsageDescription": "Veronica listens for the wake word and your voice commands.",
         "NSAppleEventsUsageDescription": (
-            "Veronica reads and creates Calendar events, Mail, and Reminders on your behalf."
+            "Veronica controls Calendar, Mail, Reminders, Notes, Music, Chrome and Safari on your "
+            "behalf (reading events, mail, reminders and web pages; creating notes), and uses "
+            "System Events to see which app is in front and to type dictation."
         ),
         "NSHighResolutionCapable": True,
     }
