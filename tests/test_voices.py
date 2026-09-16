@@ -54,3 +54,15 @@ def test_all_ten_voices_present():
     assert len(v.VOICES) == 10
     assert set(v.VOICES) == {"sarah", "bella", "nicole", "sky", "adam", "michael",
                              "emma", "isabella", "george", "lewis"}
+
+
+def test_hindi_voices():
+    assert v.resolve_voice("hindi") == "hf_alpha"
+    assert v.resolve_voice("indian") == "hf_alpha"
+    assert v.resolve_voice("hindi male") == "hm_omega"
+    assert v.resolve_voice("hindi female") == "hf_alpha"
+    assert v.resolve_voice("omega") == "hm_omega"
+    assert v.is_hindi_voice("hm_psi") and not v.is_hindi_voice("af_sarah")
+    assert set(v.HINDI_VOICE_IDS) == {"hf_alpha", "hf_beta", "hm_omega", "hm_psi"}
+    assert not set(v.HINDI_VOICE_IDS) & set(v.VOICE_IDS)      # cycling stays English
+    assert v.display_name("hf_alpha") == "Alpha"

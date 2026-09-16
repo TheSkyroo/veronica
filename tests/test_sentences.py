@@ -27,3 +27,13 @@ def test_strips_markdown_noise():
 def test_does_not_split_decimal():
     s = SentenceSplitter()
     assert s.feed("Pi is 3.14 roughly. Ok.") == ["Pi is 3.14 roughly.", "Ok."]
+
+
+def test_devanagari_danda_and_next_char():
+    s = SentenceSplitter()
+    out = s.feed("कल तीन बजे मीटिंग है। उसके बाद lunch है। ")
+    assert out == ["कल तीन बजे मीटिंग है।", "उसके बाद lunch है।"]
+    s = SentenceSplitter()
+    assert s.feed("Kal 3 baje meeting hai. 4 baje free ho. ") == ["Kal 3 baje meeting hai.", "4 baje free ho."]
+    s = SentenceSplitter()
+    assert s.feed("ठीक है") == [] and s.flush() == ["ठीक है"]

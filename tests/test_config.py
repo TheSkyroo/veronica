@@ -48,6 +48,9 @@ def test_defaults(tmp_home):
     assert s.ptt_enabled is True
     assert s.ptt_keycode == 61
     assert s.dictation_max_s == 60
+    assert s.language == "en"
+    assert s.whisper_multilingual_model == "small"
+    assert s.partial_stt_multilingual_model == "tiny"
 
 
 def test_dirs_created(tmp_home):
