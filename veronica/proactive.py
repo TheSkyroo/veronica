@@ -3,7 +3,6 @@ nudges before calendar events. Composes text from the pim tool outputs
 and hands it to Orchestrator.announce(), which only speaks when idle and
 not muted — this module never touches audio itself."""
 import asyncio
-import contextlib
 import datetime as dt
 import logging
 import re
@@ -54,7 +53,7 @@ def save_schedule(s: Schedule, save: Callable[[dict], None] = prefs.save) -> Non
 
 # -- parsing the pim tools' text ---------------------------------------------
 # pim._format_events: "HH:MM–HH:MM  title (calendar)" [" @ location"], en dash.
-EVENT_LINE_RE = re.compile(r"^(\d{2}):(\d{2})–(\d{2}):(\d{2})  (.+?) \([^()]*\)(?: @ .*)?$")
+EVENT_LINE_RE = re.compile(r"^(\d{2}):(\d{2})–(\d{2}):(\d{2})  (.+?) \((.*)\)(?: @ .*)?$")
 # pim._format_reminders: "YYYY-MM-DD HH:MM  name" [" (list)"]
 REMINDER_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}  (.+?)(?: \([^()]*\))?$")
 
@@ -116,6 +115,7 @@ def _clock(t: dt.datetime) -> str:
 class Proactive:
     TICK_S = 60
     EVENTS_CACHE_S = 300
+    BRIEFING_GRACE_S = 7200
     USER_NAME = "Manik"
     BRIEFING_MAX_TITLES = 4
     REMINDERS_MAX = 3
@@ -161,10 +161,16 @@ class Proactive:
 
     async def tick(self) -> None:
         now = self._now()
-        if self.schedule.briefing_enabled and now.strftime("%H:%M") == self.schedule.briefing_time \
-                and self._last_briefing_date != now.date():
-            self._last_briefing_date = now.date()
-            await self._announce(await self.build_briefing())
+        if self.schedule.briefing_enabled and self._last_briefing_date != now.date():
+            hh, mm = (int(p) for p in self.schedule.briefing_time.split(":"))
+            due = dt.datetime.combine(now.date(), dt.time(hh, mm))
+            if now >= due:
+                late_s = (now - due).total_seconds()
+                self._last_briefing_date = now.date()
+                if late_s <= self.BRIEFING_GRACE_S:
+                    await self._announce(await self.build_briefing())
+                else:
+                    log.info("briefing skipped: %.0fs late", late_s)
         if self.schedule.nudges_enabled:
             await self._check_nudges(now)
 
@@ -226,7 +232,7 @@ class Proactive:
             if e.all_day or e.start is None:
                 continue
             delta = e.start - now
-            if delta < dt.timedelta(0) or delta > window:
+            if delta < -dt.timedelta(seconds=self.TICK_S) or delta > window:
                 continue
             key = (e.title, e.start)
             if key in self._nudged:

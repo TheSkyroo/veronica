@@ -1,8 +1,6 @@
 import asyncio
 import datetime as dt
 
-import pytest
-
 from veronica import proactive as pr
 
 
@@ -25,9 +23,9 @@ def test_load_save_schedule():
 
 
 def test_parse_events():
-    text = "09:30–10:00  Standup (Work) @ Zoom\n00:00–00:00  Holiday (Home)\n13:00–14:00  Lunch with Sam (Personal)"
+    text = "09:30–10:00  Standup (Work) @ Zoom\n00:00–00:00  Holiday (Home)\n13:00–14:00  Lunch with Sam (Personal)\n09:00–09:30  Sync (Work (Shared))"
     evs = pr.parse_events(text, TODAY)
-    assert [e.title for e in evs] == ["Standup", "Holiday", "Lunch with Sam"]
+    assert [e.title for e in evs] == ["Standup", "Holiday", "Lunch with Sam", "Sync"]
     assert evs[0].start == dt.datetime(2026, 9, 16, 9, 30) and evs[0].end == dt.datetime(2026, 9, 16, 10, 0)
     assert evs[1].all_day and evs[1].start is None
     assert pr.parse_events("No events.", TODAY) == []
@@ -69,6 +67,12 @@ async def test_build_briefing_composition():
                     "B at 16:00 and 2 more. You have 3 unread emails. Reminders due: Pay rent.")
 
 
+async def test_build_briefing_singular_event():
+    p, _, _, _ = make(pr.Schedule(), events="09:30–10:00  Standup (Work)")
+    text = await p.build_briefing()
+    assert "You have 1 event today: Standup at 9:30." in text
+
+
 async def test_build_briefing_empty_and_greetings():
     p, _, clock, _ = make(pr.Schedule())
     assert await p.build_briefing() == "Good morning, Manik. Nothing on your calendar today."
@@ -96,11 +100,19 @@ async def test_briefing_fires_once_per_day_at_time():
     p, said, clock, _ = make(pr.Schedule(briefing_enabled=True, briefing_time="08:00"))
     clock.t = dt.datetime(2026, 9, 16, 7, 59)
     await p.tick(); assert said == []
-    clock.t = dt.datetime(2026, 9, 16, 8, 0)
+    clock.t = dt.datetime(2026, 9, 16, 8, 1)      # a tick at exactly 08:00 was missed
     await p.tick(); assert len(said) == 1 and said[0].startswith("Good morning")
     await p.tick(); assert len(said) == 1
     clock.t = dt.datetime(2026, 9, 17, 8, 0)
     await p.tick(); assert len(said) == 2
+
+
+async def test_briefing_skipped_when_far_past_time():
+    p, said, clock, _ = make(pr.Schedule(briefing_enabled=True, briefing_time="08:00"))
+    clock.t = dt.datetime(2026, 9, 16, 10, 30)     # 2h30m late: past BRIEFING_GRACE_S
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 10, 31)
+    await p.tick(); assert said == []
 
 
 async def test_briefing_disabled_never_fires():
@@ -127,6 +139,15 @@ async def test_nudge_fires_once_within_window_and_skips_all_day():
     clock.t = dt.datetime(2026, 9, 16, 10, 59)
     await p.tick(); assert said[-1] == "Heads up, Review starts in a minute."
     assert calls["events"] == 3                       # 10:59 is well past the 9:25 fetch: refetch
+
+
+async def test_nudge_still_fires_just_after_start():
+    ev = "09:30–10:00  Standup (Work)"
+    p, said, clock, _ = make(pr.Schedule(nudges_enabled=True, nudge_minutes=5), events=ev)
+    clock.t = dt.datetime(2026, 9, 16, 9, 24)
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 9, 30, 30)   # start slipped past by < one tick
+    await p.tick(); assert said == ["Heads up, Standup starts in a minute."]
 
 
 async def test_nudge_refetches_after_cache_expiry_and_ignores_past():
