@@ -20,6 +20,7 @@ Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is i
 - Say the wake word while Veronica is talking to interrupt her (barge-in).
 - Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
 - A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
+- The HUD can be dragged anywhere on screen (click and drag its background) — it reopens wherever you left it.
 
 ## Using Veronica
 
@@ -43,9 +44,25 @@ replaced by the final transcript once you finish talking. This costs a bit of CP
 `VERONICA_PARTIAL_STT=false` in `.env` to save power on slower Macs.
 
 She stops listening rather than eavesdropping indefinitely: the follow-up window after a reply is short (4 s by
-default — set `VERONICA_FOLLOWUP_WINDOW_S` in `.env` to change it), and you can end the conversation immediately by
-saying "thanks Veronica" / "thank you Veronica" (she replies "Okay.") or "that's all", "stop", "goodbye", "never
-mind" (she just goes quiet, no follow-up window).
+default — set `VERONICA_FOLLOWUP_WINDOW_S` in `.env` to change it), and if that follow-up capture comes back empty
+(you didn't say anything more) she just goes idle rather than asking you to repeat yourself. You can also end the
+conversation immediately by saying "thanks Veronica" / "thank you Veronica" (she replies "Okay.") or "that's all",
+"stop", "goodbye", "never mind", "go idle", "turn yourself off", "go to sleep", "sleep", "go away", "bye", "dismiss"
+(she just goes quiet, no follow-up window).
+
+### HUD voice commands
+
+A few phrases are handled locally (no round-trip to Claude) to control the HUD itself. Say them the same way as any
+other command — with or without "Veronica"/"hey Veronica" first, optionally ending in "please":
+
+- **Mini mode** — "shrink", "make yourself smaller", "minimize", "mini mode", "small mode", "go small": collapses
+  the HUD to a small Siri-style orb (just the orb plus a status dot in the corner).
+- **Full mode** — "expand", "make yourself bigger", "full mode", "show details", "go big": returns to the full card
+  layout (transcript, reply, tool activity).
+- **Hide** — "hide", "hide yourself", "hide the hud", "hide the panel": hides the HUD immediately and goes idle.
+
+The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
+switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
 
 ## Run
     uv run python -m veronica                 # menu bar app

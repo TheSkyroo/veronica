@@ -65,6 +65,9 @@ class FakeHud:
         self.closed = False
         self.available = True
         self.log = []  # combined order of on_state/push calls
+        self._mode = "full"
+        self.mode_calls = []
+        self.hide_calls = 0
 
     def push(self, event):
         self.pushed.append(event)
@@ -79,6 +82,13 @@ class FakeHud:
 
     def close(self):
         self.closed = True
+
+    def hide(self):
+        self.hide_calls += 1
+
+    def set_mode(self, mode):
+        self._mode = mode
+        self.mode_calls.append(mode)
 
 
 class FakeOrch:
@@ -309,6 +319,73 @@ def test_quit_closes_hud(fake_env):
     app.quit(None)
     assert app._hud.closed
     assert orch.player.closed
+
+
+# -- commit 3: HUD mini/full menu toggle + hud event drain --------------------
+
+def test_hud_menu_item_starts_labeled_full(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        assert app._hud_mode_item.title == "HUD: Full"
+    finally:
+        _quit_and_join(app)
+
+
+def test_toggle_hud_mode_switches_label_and_calls_set_mode(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        item = app._hud_mode_item
+        app.toggle_hud_mode(item)
+        assert app._hud.mode_calls == ["mini"]
+        assert app._hud_mode_item.title == "HUD: Mini"
+
+        app.toggle_hud_mode(item)
+        assert app._hud.mode_calls == ["mini", "full"]
+        assert app._hud_mode_item.title == "HUD: Full"
+    finally:
+        _quit_and_join(app)
+
+
+def test_drain_hud_mini_event_calls_set_mode_and_updates_menu_label(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._events.put(("hud", {"mode": "mini"}))
+        app._drain(None)
+        assert app._hud.mode_calls == ["mini"]
+        assert app._hud_mode_item.title == "HUD: Mini"
+        # the "hud" event is a control action, not forwarded to hud.push()
+        assert "hud" not in [e["kind"] for e in app._hud.pushed]
+    finally:
+        _quit_and_join(app)
+
+
+def test_drain_hud_hide_event_calls_hud_hide(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._events.put(("hud", {"mode": "hide"}))
+        app._drain(None)
+        assert app._hud.hide_calls == 1
+        assert app._hud.mode_calls == []
+    finally:
+        _quit_and_join(app)
+
+
+def test_noop_hud_supports_set_mode_and_hide_without_error():
+    # When the HUD is disabled/unavailable, drain must still be able to call
+    # set_mode()/hide() on the _NoopHud stand-in without raising.
+    hud = menubar_module()._NoopHud()
+    hud.set_mode("mini")
+    hud.hide()
+    assert hud._mode == "full"
+
+
+def menubar_module():
+    import veronica.ui.menubar as menubar
+    return menubar
 
 
 def test_real_rumps_restored_after_fixture_teardown():

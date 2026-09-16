@@ -16,6 +16,8 @@ class _NoopHud:
     """Stand-in for HudWindow when the HUD is disabled or unavailable, so
     _drain/quit never need to branch on whether a real HUD exists."""
 
+    _mode = "full"
+
     def push(self, event: dict) -> None:
         pass
 
@@ -34,6 +36,9 @@ class _NoopHud:
     def close(self) -> None:
         pass
 
+    def set_mode(self, mode: str) -> None:
+        pass
+
 
 class VeronicaApp(rumps.App):
     def __init__(self) -> None:
@@ -41,9 +46,15 @@ class VeronicaApp(rumps.App):
         self._state = "idle"
         self._muted = False
         self._quitting = False
-        self.menu = [rumps.MenuItem("Mute", callback=self.toggle_mute), None, rumps.MenuItem("Quit", callback=self.quit)]
+        hud_mode_item = rumps.MenuItem("HUD: Full", callback=self.toggle_hud_mode)
+        self.menu = [
+            rumps.MenuItem("Mute", callback=self.toggle_mute), hud_mode_item, None,
+            rumps.MenuItem("Quit", callback=self.quit),
+        ]
+        self._hud_mode_item = hud_mode_item
         hud = HudWindow(settings) if settings.hud_enabled else None
         self._hud = hud if (hud is not None and hud.available) else _NoopHud()
+        self._refresh_hud_mode_item()
         self._events: queue.Queue = queue.Queue()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -106,12 +117,29 @@ class VeronicaApp(rumps.App):
             if kind == "mic":
                 last_mic = payload
                 continue
+            if kind == "hud":
+                mode = payload.get("mode") if isinstance(payload, dict) else None
+                if mode == "hide":
+                    self._hud.hide()
+                elif mode in ("mini", "full"):
+                    self._hud.set_mode(mode)
+                    self._refresh_hud_mode_item()
+                continue
             if kind == "state":
                 self._hud.on_state(payload)
             self._hud.push({"kind": kind, "payload": payload})
         if last_mic is not None and not overflow:
             self._hud.push({"kind": "mic", "payload": last_mic})
         self._hud.tick()
+
+    def _refresh_hud_mode_item(self) -> None:
+        mode = getattr(self._hud, "_mode", "full")
+        self._hud_mode_item.title = f"HUD: {'Mini' if mode == 'mini' else 'Full'}"
+
+    def toggle_hud_mode(self, _item: rumps.MenuItem) -> None:
+        mode = getattr(self._hud, "_mode", "full")
+        self._hud.set_mode("full" if mode == "mini" else "mini")
+        self._refresh_hud_mode_item()
 
     def toggle_mute(self, item: rumps.MenuItem) -> None:
         self._muted = not self._muted

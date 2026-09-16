@@ -362,6 +362,49 @@ def test_partial_transcript_then_final():
         browser.close()
 
 
+@pytest.mark.live
+def test_mini_mode_shows_only_orb_and_dot():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        # Full mode by default: orb + text (status/chat) all visible.
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'heard', payload:'hi there'})")
+        assert page.is_visible("#orb")
+        assert page.is_visible("#heard")
+        assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") != "none"
+
+        # Switch to mini: only the orb + the status dot remain visible; the
+        # label, level bar, chat bubbles and action card are all hidden.
+        page.evaluate("window.hud.setMode('mini')")
+        assert "mini" in page.evaluate("document.body.className")
+        assert page.is_visible("#orb")
+        assert page.eval_on_selector("#status .dot", "el => getComputedStyle(el).display") != "none"
+        assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") == "none"
+        assert page.eval_on_selector("#chat", "el => getComputedStyle(el).display") == "none"
+        assert page.eval_on_selector("#action", "el => getComputedStyle(el).display") == "none"
+        orb_box = page.eval_on_selector("#orb", "el => el.getBoundingClientRect()")
+        assert round(orb_box["width"]) == 110 and round(orb_box["height"]) == 110
+
+        # Switch back to full: everything reappears.
+        page.evaluate("window.hud.setMode('full')")
+        assert "mini" not in page.evaluate("document.body.className")
+        assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") != "none"
+        card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        assert round(card_box["width"]) == 540 and round(card_box["height"]) == 300
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
 def _rects_intersect(a, b):
     return not (a["right"] <= b["left"] or b["right"] <= a["left"]
                 or a["bottom"] <= b["top"] or b["bottom"] <= a["top"])
