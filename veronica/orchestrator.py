@@ -67,6 +67,8 @@ class Orchestrator:
         self._now_speaking = ""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
+        self._ptt_active = False
+        self._ptt_task: asyncio.Task | None = None
         # Bumped every time a partial-eligible capture() returns, before STT
         # runs on it: any partial transcription still in flight (or one that
         # races in from the recorder thread right at that boundary) belongs
@@ -375,6 +377,55 @@ class Orchestrator:
         if res.get("is_error"):
             text = "Sorry, I couldn't do that."
         await self.say(text)
+
+    # -- push-to-talk (A2) --------------------------------------------------------
+    async def ptt_start(self) -> None:
+        """Called when the push-to-talk key goes down. If idle: stop the
+        wake listener and jump straight to a hold-mode capture (no wake
+        word needed). If Veronica is speaking/thinking: barge in first
+        (same cancel path as a wake-word barge-in) then start the
+        hold-mode capture. A no-op if a push-to-talk capture is already in
+        flight (key-repeat flags-changed events, or a stray double dispatch)."""
+        if self._ptt_active:
+            return
+        self._ptt_active = True
+        self._loop = asyncio.get_running_loop()
+        if self.state in ("speaking", "thinking"):
+            self.player.stop()
+            if self._confirm_capturing:
+                self.recorder.stop()
+            self._barged = True
+            await self.brain.interrupt()
+        self.wake.stop()
+        self._set("listening")
+        await self.chime(self.s.chime_wake_hz, 120)
+        self._ptt_task = asyncio.ensure_future(self._ptt_turn())
+
+    async def _ptt_turn(self) -> None:
+        try:
+            pcm = await self.recorder.capture(max_s=None, hold=True, partial=True)
+            self._end_partial_window()
+            if pcm is None:
+                self._set("idle")
+                return
+            text = await self.stt.atranscribe(pcm)
+            self._emit("heard", text)
+            log.info("ptt heard=%r", text)
+            if not text:
+                self._set("idle")
+                return
+            await self.handle_text(text)
+            self._set("idle")
+        finally:
+            self._ptt_active = False
+
+    async def ptt_end(self) -> None:
+        """Called when the push-to-talk key is released: end the in-flight
+        hold-mode capture gracefully — Recorder.finish() returns whatever
+        was recorded so far, unlike stop() which discards it. A no-op if no
+        push-to-talk capture is in flight."""
+        if self._ptt_active:
+            self.recorder.finish()
 
     # -- confirmation gate ----------------------------------------------------
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:

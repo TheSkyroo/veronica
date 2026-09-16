@@ -49,11 +49,15 @@ class HotkeyMonitor:
         self._tap = None
 
     # -- lifecycle --------------------------------------------------------------
-    def start(self) -> None:
-        """Start monitoring on a daemon thread. Safe to call from the
-        asyncio event loop thread; blocks briefly (bounded) for the tap to
-        be set up so `available` reflects reality by the time this returns."""
-        self._loop = asyncio.get_event_loop()
+    def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Start monitoring on a daemon thread. `loop` is the asyncio loop
+        callbacks should be marshalled onto (needed whenever start() is
+        called from a thread other than the one running that loop, e.g.
+        the menu bar's AppKit main thread starting a monitor for a
+        background orchestrator loop) — defaults to the calling thread's
+        own loop. Blocks briefly (bounded) for the tap to be set up so
+        `available` reflects reality by the time this returns."""
+        self._loop = loop or asyncio.get_event_loop()
         ready = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, args=(ready,), daemon=True)
         self._thread.start()

@@ -17,10 +17,16 @@ class Rec:
         self.pcms = list(pcms)
         self._has_speech = has_speech
         self.preroll_calls = []
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+        self.hold_calls = []
+        self.finish_calls = 0
+        self.stop_calls = 0
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
         self.preroll_calls.append(preroll)
+        self.hold_calls.append(hold)
         return self.pcms.pop(0) if self.pcms else None
     def has_speech(self, pcm): return self._has_speech
+    def finish(self): self.finish_calls += 1
+    def stop(self): self.stop_calls += 1
 
 class STT:
     def __init__(self, texts): self.texts = list(texts)
@@ -1813,3 +1819,58 @@ async def test_music_intent_error_speaks_fallback(monkeypatch):
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["skip"])
     await o.one_turn()
     assert "Sorry, I couldn't do that." in o.tts.said
+
+
+# -- batch A: push-to-talk (A2) ------------------------------------------------
+
+async def test_ptt_start_idle_stops_wake_chimes_and_captures_hold():
+    wake_stops = []
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["hello there"])
+    o.wake.stop = lambda: wake_stops.append(True)
+    await o.ptt_start()
+    await o._ptt_task
+    assert wake_stops == [True]
+    assert o.recorder.hold_calls == [True]
+    assert "Sure." in o.tts.said and "Done." in o.tts.said
+    assert o.brain.asked == ["hello there"]
+    assert states[-1] == "idle"
+
+
+async def test_ptt_start_ignored_while_already_active():
+    o, _ = build(rec_pcms=[None])
+    o._ptt_active = True
+    await o.ptt_start()
+    assert o.recorder.hold_calls == []
+
+
+async def test_ptt_end_calls_recorder_finish_only_when_active():
+    o, _ = build(rec_pcms=[None])
+    await o.ptt_end()
+    assert o.recorder.finish_calls == 0
+    o._ptt_active = True
+    await o.ptt_end()
+    assert o.recorder.finish_calls == 1
+
+
+async def test_ptt_start_no_speech_goes_idle_without_asking_brain():
+    o, states = build(rec_pcms=[None])
+    await o.ptt_start()
+    await o._ptt_task
+    assert o.brain.asked == []
+    assert states[-1] == "idle"
+
+
+async def test_ptt_start_while_speaking_barges_then_captures():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["stop that"])
+    o.state = "speaking"
+    interrupted = []
+
+    async def interrupt():
+        interrupted.append(True)
+
+    o.brain.interrupt = interrupt
+    await o.ptt_start()
+    await o._ptt_task
+    assert interrupted == [True]
+    assert o.player.stops >= 1
+    assert o.brain.asked == ["stop that"]

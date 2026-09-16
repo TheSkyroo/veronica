@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     memory_enabled: bool = True
     memory_recent_turns: int = 6
 
+    # push-to-talk
+    ptt_enabled: bool = True
+    ptt_keycode: int = 61   # Right Option
+
+    # dictation
+    dictation_max_s: int = 60
+
     # HUD
     hud_enabled: bool = True
     hud_hide_after_s: float = 3.0
