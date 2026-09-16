@@ -88,9 +88,14 @@ class HudWindow:
             log.warning("failed to load HUD prefs", exc_info=True)
         mode = saved.get("hud_mode") or settings.hud_mode
         self._mode = mode if mode in MODES else "full"
-        pos = saved.get("hud_pos")
-        self._pos = (float(pos[0]), float(pos[1])) if (
-            isinstance(pos, (list, tuple)) and len(pos) == 2) else None
+        # Dragged position persists per mode (full vs mini have very
+        # different default locations, so a drag in one shouldn't move the
+        # other).
+        self._pos: dict[str, tuple[float, float] | None] = {"full": None, "mini": None}
+        for m in MODES:
+            pos = saved.get(f"hud_pos_{m}")
+            if isinstance(pos, (list, tuple)) and len(pos) == 2:
+                self._pos[m] = (float(pos[0]), float(pos[1]))
 
         try:
             self._web = (webview_factory or _real_webview)(settings)
@@ -103,7 +108,7 @@ class HudWindow:
         # Only reposition/resize on construction if the saved state actually
         # differs from what the factories already built (full size, top
         # right) — keeps a fresh install's first launch untouched.
-        if self.available and (self._mode == "mini" or self._pos is not None):
+        if self.available and (self._mode == "mini" or self._pos[self._mode] is not None):
             self._apply_geometry()
 
     # -- mode / geometry --------------------------------------------------------
@@ -122,7 +127,7 @@ class HudWindow:
 
     def _geometry(self) -> tuple[int, int]:
         if self._mode == "mini":
-            return self.s.hud_mini_size, self.s.hud_mini_size
+            return self.s.hud_mini_width, self.s.hud_mini_height
         return self.s.hud_width, self.s.hud_height
 
     def _visible_frame(self):
@@ -139,6 +144,24 @@ class HudWindow:
         except Exception:
             return 0.0, 0.0
 
+    def _top_center_origin(self, w: int, h: int) -> tuple[float, float]:
+        """Mini mode's default spot: a notch/Dynamic-Island-style bar
+        centered under the menu bar, rather than the full card's top-right
+        corner."""
+        try:
+            screen = self._visible_frame()
+            return (
+                screen.origin.x + (screen.size.width - w) / 2,
+                screen.origin.y + screen.size.height - h - 8,
+            )
+        except Exception:
+            return 0.0, 0.0
+
+    def _default_origin(self, w: int, h: int) -> tuple[float, float]:
+        if self._mode == "mini":
+            return self._top_center_origin(w, h)
+        return self._top_right_origin(w, h)
+
     def _clamp_to_screen(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
         try:
             screen = self._visible_frame()
@@ -151,9 +174,10 @@ class HudWindow:
         return x, y
 
     def _origin(self, w: int, h: int) -> tuple[float, float]:
-        if self._pos is not None:
-            return self._clamp_to_screen(self._pos[0], self._pos[1], w, h)
-        return self._top_right_origin(w, h)
+        pos = self._pos[self._mode]
+        if pos is not None:
+            return self._clamp_to_screen(pos[0], pos[1], w, h)
+        return self._default_origin(w, h)
 
     def _apply_geometry(self) -> None:
         w, h = self._geometry()
@@ -181,9 +205,9 @@ class HudWindow:
             x, y = float(origin.x), float(origin.y)
         except Exception:
             return
-        self._pos = (x, y)
+        self._pos[self._mode] = (x, y)
         try:
-            self._prefs_save({"hud_pos": [x, y]})
+            self._prefs_save({f"hud_pos_{self._mode}": [x, y]})
         except Exception:
             log.warning("failed to save HUD position pref", exc_info=True)
 

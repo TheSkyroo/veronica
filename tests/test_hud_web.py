@@ -363,7 +363,7 @@ def test_partial_transcript_then_final():
 
 
 @pytest.mark.live
-def test_mini_mode_shows_only_orb_and_dot():
+def test_mini_mode_shows_only_orb_and_caption():
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -375,31 +375,87 @@ def test_mini_mode_shows_only_orb_and_dot():
         page.wait_for_function("window.hud !== undefined")
         page.wait_for_timeout(100)
 
-        # Full mode by default: orb + text (status/chat) all visible.
+        # Full mode by default: orb + text (status/chat) all visible, caption
+        # pill never shown.
         page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
         page.evaluate("window.hud.push({kind:'heard', payload:'hi there'})")
         assert page.is_visible("#orb")
         assert page.is_visible("#heard")
         assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") != "none"
+        assert page.eval_on_selector("#caption", "el => getComputedStyle(el).display") == "none"
 
-        # Switch to mini: only the orb + the status dot remain visible; the
-        # label, level bar, chat bubbles and action card are all hidden.
+        # Switch to mini: the orb (scaled to 64px) plus the caption pill are
+        # the only visible pieces; the full card's status/chat/action block
+        # is hidden wholesale.
         page.evaluate("window.hud.setMode('mini')")
         assert "mini" in page.evaluate("document.body.className")
         assert page.is_visible("#orb")
-        assert page.eval_on_selector("#status .dot", "el => getComputedStyle(el).display") != "none"
-        assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") == "none"
-        assert page.eval_on_selector("#chat", "el => getComputedStyle(el).display") == "none"
-        assert page.eval_on_selector("#action", "el => getComputedStyle(el).display") == "none"
         orb_box = page.eval_on_selector("#orb", "el => el.getBoundingClientRect()")
-        assert round(orb_box["width"]) == 110 and round(orb_box["height"]) == 110
+        assert round(orb_box["width"]) == 64 and round(orb_box["height"]) == 64
+        assert page.eval_on_selector("#text", "el => getComputedStyle(el).display") == "none"
+        # 'hi there' is still the last heard text, so the caption pill shows it.
+        assert page.eval_on_selector("#caption", "el => getComputedStyle(el).display") != "none"
+        assert page.inner_text("#caption .msg") == "hi there"
 
-        # Switch back to full: everything reappears.
+        # Switch back to full: everything reappears, caption hides again.
         page.evaluate("window.hud.setMode('full')")
         assert "mini" not in page.evaluate("document.body.className")
         assert page.eval_on_selector("#status .label", "el => getComputedStyle(el).display") != "none"
+        assert page.eval_on_selector("#caption", "el => getComputedStyle(el).display") == "none"
         card_box = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
         assert round(card_box["width"]) == 540 and round(card_box["height"]) == 300
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_compact_mini_caption():
+    from playwright.sync_api import sync_playwright
+
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 72}, device_scale_factor=2)
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.setMode('mini')")
+        assert page.eval_on_selector("#caption", "el => getComputedStyle(el).display") == "none"
+
+        page.evaluate("window.hud.push({kind:'state', payload:'listening'})")
+        page.evaluate("window.hud.push({kind:'heard_partial', payload:'what is'})")
+        assert page.eval_on_selector("#caption", "el => getComputedStyle(el).display") != "none"
+        assert page.inner_text("#caption .msg") == "what is"
+        assert "partial" in page.get_attribute("#caption .msg", "class")
+
+        page.evaluate("window.hud.push({kind:'heard', payload:'what is the weather'})")
+        assert page.inner_text("#caption .msg") == "what is the weather"
+        assert "partial" not in (page.get_attribute("#caption .msg", "class") or "")
+
+        page.evaluate("window.hud.push({kind:'state', payload:'speaking'})")
+        page.evaluate("window.hud.push({kind:'sentence', payload:'It is sunny.'})")
+        assert page.inner_text("#caption .msg") == "It is sunny."
+
+        cap_box = page.eval_on_selector("#caption", "el => el.getBoundingClientRect()")
+        assert cap_box["left"] >= 0 and cap_box["top"] >= 0
+        assert cap_box["right"] <= 400 and cap_box["bottom"] <= 72
+
+        page.locator("#card").screenshot(path=str(SCREENSHOT_DIR / "hud-compact.png"))
+
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
+        page.evaluate("window.hud.push({kind:'prompt', payload:'Fetch weather via curl?'})")
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Fetch weather via curl', "
+            "decision:'ask', timeout_ms:8000}})"
+        )
+        caption_text = page.inner_text("#caption .msg")
+        assert "Fetch weather via curl?" in caption_text
+        assert "say yes or no" in caption_text
 
         assert not errors, f"page errors: {errors}"
         browser.close()

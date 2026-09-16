@@ -45,6 +45,20 @@
   const statusLabelEl = statusEl.querySelector('.label');
   const statusLevelEl = statusEl.querySelector('.level i');
   statusEl.dataset.state = 'idle';
+  const captionEl = $('caption');
+  const captionMsgEl = captionEl.querySelector('.msg');
+  captionEl.dataset.state = 'idle';
+
+  // Mini mode's single-line caption: whatever set it last wins (see hud.push
+  // below for the precedence between partial/final transcript, "Thinking…",
+  // the current spoken sentence, and the confirmation prompt).
+  function setCaption(text, opts) {
+    opts = opts || {};
+    captionMsgEl.textContent = text || '';
+    captionMsgEl.classList.toggle('partial', !!opts.partial);
+    captionMsgEl.classList.toggle('prompt', !!opts.prompt);
+    captionEl.classList.toggle('hidden', !text);
+  }
 
   const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined'};
 
@@ -75,6 +89,7 @@
     hintEl.textContent = ''; hintRowEl.classList.add('hidden');
     countdownEl.classList.add('hidden');
     countdownBarEl.style.transition = 'none'; countdownBarEl.style.width = '100%';
+    setCaption('');
   }
 
   function typeNext() {
@@ -113,12 +128,16 @@
             if (payload === 'confirming') model.confirmStart = null;
             model.state = payload;
             statusEl.dataset.state = payload;
+            captionEl.dataset.state = payload;
             statusLabelEl.textContent = STATUS_LABELS[payload] || '';
+            if (payload === 'thinking') setCaption('Thinking…');
+            else if (payload === 'error') setCaption('Error');
             break;
           case 'heard_partial': {
             const s = String(payload ?? '');
             setBubble(heardRowEl, heardEl, s);
             heardEl.classList.add('partial');
+            setCaption(s, {partial: true});
             break;
           }
           case 'heard': {
@@ -129,6 +148,7 @@
             model.heard = payload || '';
             setBubble(heardRowEl, heardEl, model.heard);
             heardEl.classList.remove('partial');
+            setCaption(model.heard);
             break;
           }
           case 'sentence': {
@@ -140,7 +160,11 @@
               replySentences.shift();
               joined = replySentences.join(' ');
             }
-            model.reply = joined; replyQueue.push(s); typeNext(); break;
+            model.reply = joined; replyQueue.push(s); typeNext();
+            // Caption shows only the sentence currently being spoken, set
+            // instantly (no typewriter) rather than the accumulated reply.
+            setCaption(s);
+            break;
           }
           case 'tool': {
             const t = payload && typeof payload === 'object' ? payload : {};
@@ -176,6 +200,7 @@
               void countdownBarEl.offsetWidth;
               countdownBarEl.style.transition = 'width ' + model.confirmTimeoutMs + 'ms linear';
               countdownBarEl.style.width = '0%';
+              if (model.prompt) setCaption(model.prompt + ' · say yes or no', {prompt: true});
             } else {
               model.prompt = ''; promptEl.textContent = ''; promptRowEl.classList.add('hidden');
               hintEl.textContent = ''; hintRowEl.classList.add('hidden');
@@ -196,6 +221,7 @@
             promptRowEl.classList.toggle('hidden', !s);
             hintEl.textContent = s ? 'say "yes" or "no"' : '';
             hintRowEl.classList.toggle('hidden', !s);
+            if (s) setCaption(s, {prompt: true});
             break;
           }
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
