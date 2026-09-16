@@ -20,14 +20,16 @@ from veronica.brain.intents import _FILLERS_BY_LEN, _candidates_for, normalize
 
 QuickReply = tuple[str, str]
 _rng = random.Random()
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
 
 # -- phrase tables (written in normalize()+strip_wrapper form) -----------------
 _TIME = {"what time is it", "whats the time", "time", "current time", "tell me the time", "what is the time"}
-_TIME_HI = {"samay kya hai", "kitne baje hain", "kitne baje hai", "time kya hai", "time kya hua hai"}
+_TIME_HI = {"samay kya hai", "kitne baje hain", "kitne baje hai", "time kya hai", "time kya hua hai",
+            "समय क्या है", "कितने बजे हैं"}
 _DATE = {"whats the date", "what is the date", "whats todays date", "what date is it", "todays date", "what is todays date"}
-_DATE_HI = {"aaj kya tareekh hai", "aaj ki tareekh kya hai", "date kya hai", "aaj date kya hai"}
+_DATE_HI = {"aaj kya tareekh hai", "aaj ki tareekh kya hai", "date kya hai", "aaj date kya hai", "आज क्या तारीख है"}
 _DAY = {"what day is it", "what day is it today", "what day is today", "which day is it"}
-_DAY_HI = {"aaj kya din hai", "aaj kaun sa din hai", "aaj konsa din hai"}
+_DAY_HI = {"aaj kya din hai", "aaj kaun sa din hai", "aaj konsa din hai", "आज कौन सा दिन है"}
 _BATTERY = {"battery", "battery level", "whats the battery", "whats my battery", "how much battery",
             "how much battery do i have", "battery percentage", "whats the battery level"}
 _BATTERY_HI = {"battery kitni hai", "battery kitna hai"}
@@ -35,13 +37,15 @@ _VOLUME = {"whats the volume", "volume", "volume level", "how loud is it", "what
 _VOLUME_HI = {"volume kitna hai", "volume kitni hai"}
 
 _SOCIAL: list[tuple[set[str], set[str], list[str], list[str]]] = [
-    # (en phrases, hi phrases, en replies, hi replies)
+    # (en phrases, hi phrases, en replies, hi replies). "bye"/"goodbye"/
+    # "thanks veronica"/"thank you veronica" are deliberately absent: the
+    # local END intent owns them and runs before match_quick.
     ({"hello", "hi", "hey", "hi veronica", "hello veronica"}, {"namaste", "namaskar"},
      ["Hi Manik.", "Hello. What can I do for you?", "Hey there."], ["Namaste Manik.", "Haan, boliye."]),
-    ({"thanks", "thank you", "thanks veronica", "thank you veronica", "thanks a lot", "cheers", "thank you so much"},
+    ({"thanks", "thank you", "thanks a lot", "cheers", "thank you so much"},
      {"shukriya", "dhanyavaad", "dhanyavad"},
      ["You're welcome.", "Anytime.", "Happy to help."], ["Koi baat nahi.", "Hamesha."]),
-    ({"bye", "goodbye", "see you", "see you later"}, {"alvida", "phir milenge"},
+    ({"see you", "see you later"}, {"alvida", "phir milenge"},
      ["Bye, Manik.", "See you."], ["Alvida.", "Phir milenge."]),
     ({"how are you", "how are you doing", "hows it going", "how are you veronica"},
      {"kaise ho", "kaisi ho", "kya haal hai", "kya haal hain"},
@@ -300,6 +304,20 @@ def is_hinglish_phrase(text: str) -> bool:
     transcriber says "en"."""
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES  # filled by the Hinglish intents work
     return any(c in HINGLISH_PHRASES or c in HINGLISH_INTENT_PHRASES for c in _candidates_for(normalize(text)))
+
+
+def reply_lang(text: str, lang: str = "en") -> str:
+    """The language a quick reply to `text` is spoken in: "hi" when the
+    utterance is Devanagari, one of our Hinglish phrases, or Hindi-form
+    arithmetic ("... kitna hota hai") -- those always get Hindi copy, whatever
+    the mode -- otherwise `lang` (the utterance language)."""
+    if _DEVANAGARI_RE.search(text or ""):
+        return "hi"
+    if any(c in HINGLISH_PHRASES for c in _candidates_for(normalize(text))):
+        return "hi"
+    if _MATH_TRAIL_HI.search(_math_prep(text)):
+        return "hi"
+    return lang
 
 
 def match_quick(text: str, *, now: Callable[[], dt.datetime] = dt.datetime.now, lang: str = "en") -> QuickReply | None:

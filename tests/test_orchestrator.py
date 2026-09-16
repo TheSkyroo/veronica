@@ -3057,8 +3057,14 @@ def test_read_battery_parses_pmset():
 
 
 @pytest.mark.parametrize("heard,ok", [
-    ("haan", True), ("haanji", True), ("ji haan", True), ("theek hai", True), ("karo", True), ("ha", True),
+    ("haan", True), ("haanji", True), ("ji haan", True), ("theek hai", True), ("karo", True), ("ji", True),
+    # transcribed laughter must never approve a tool
+    ("ha", False), ("ha ha", False),
     ("nahi", False), ("nahin", False), ("mat karo", False), ("rehne do", False), ("haan nahi", False),
+    # Devanagari (pinned hi mode makes whisper emit the script)
+    ("हाँ", True), ("हां", True), ("जी", True), ("जी हाँ", True), ("ठीक है", True), ("करो", True),
+    ("हाँ, करो।", True),
+    ("नहीं", False), ("नही", False), ("मत करो", False), ("रहने दो", False), ("हाँ नहीं", False),
 ])
 def test_is_confirmation_hinglish(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok
@@ -3122,6 +3128,14 @@ async def test_hinglish_phrase_in_english_mode_stays_english():
     o, *_ = build_lang(["shukriya"], langs=["en"], mode="en")
     await o.one_turn()
     assert o._utterance_lang == "en"
+    # ...but the Hindi reply to a Hinglish phrase is still voiced in Hindi
+    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+
+
+async def test_english_quick_reply_in_english_mode_is_voiced_in_english():
+    o, *_ = build_lang(["thanks"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o.tts.langs[-1][1] == "en"
 
 
 async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):

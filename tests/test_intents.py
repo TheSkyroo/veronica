@@ -325,15 +325,26 @@ def test_match_proactive_intent(text, expected):
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("bas", "end"), ("bas karo", "end"), ("theek hai bas", "end"), ("chup", "end"), ("chup raho", "end"),
+    ("bas karo", "end"), ("theek hai bas", "end"), ("chup", "end"), ("chup raho", "end"),
     ("band karo", "end"), ("ruko", "end"), ("ruk jao", "end"),
     ("mute karo", "mute"), ("awaaz band karo", "mute"), ("unmute karo", "unmute"), ("awaaz chalu karo", "unmute"),
     ("chhoti ho jao", "hud_mini"), ("chota karo", "hud_mini"), ("badi ho jao", "hud_full"), ("bada karo", "hud_full"),
     ("quit karo", "quit"), ("band ho jao", "quit"),
     ("Veronica, bas karo please", "end"),
+    # bare "bas" is too common mid-sentence ("bas ek minute") to end the turn
+    ("bas", None), ("bas ek minute", None),
+    # Devanagari (pinned hi mode)
+    ("बस", "end"), ("बस करो", "end"), ("चुप", "end"), ("रुको", "end"), ("बंद करो", "end"), ("बस करो।", "end"),
+    ("म्यूट करो", "mute"), ("आवाज़ बंद करो", "mute"), ("अनम्यूट करो", "unmute"), ("आवाज़ चालू करो", "unmute"),
 ])
 def test_hinglish_local_intents(text, expected):
     assert match_intent(text) == expected
+
+
+def test_normalize_keeps_devanagari_and_strips_danda():
+    assert normalize("समय क्या है?") == "समय क्या है"
+    assert normalize("बस करो।") == "बस करो"
+    assert normalize("आवाज़ बंद करो") == "आवाज़ बंद करो"
 
 
 @pytest.mark.parametrize("text,expected", [

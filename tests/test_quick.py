@@ -37,6 +37,38 @@ def test_match_quick_tables(text, expected):
         assert got[1] == expected[1]
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("समय क्या है", ("time", "Abhi 3:42 pm hain.")),
+    ("कितने बजे हैं?", ("time", "Abhi 3:42 pm hain.")),
+    ("आज क्या तारीख है", ("date", "Aaj Wednesday, 16 September hai.")),
+    ("आज कौन सा दिन है।", ("day", "Aaj Wednesday hai.")),
+])
+def test_devanagari_phrases_answer_in_hindi(text, expected):
+    assert at(text) == expected
+    assert at(text, lang="hi") == expected
+
+
+def test_reply_lang():
+    assert q.reply_lang("shukriya") == "hi"
+    assert q.reply_lang("Veronica, shukriya") == "hi"
+    assert q.reply_lang("समय क्या है") == "hi"
+    assert q.reply_lang("12 guna 8 kitna hota hai") == "hi"
+    assert q.reply_lang("thanks") == "en"
+    assert q.reply_lang("thanks", lang="hi") == "hi"
+    assert q.reply_lang("what's 12 times 8") == "en"
+    assert q.reply_lang("battery kitni hai") == "hi"
+
+
+def test_social_does_not_shadow_end_phrases():
+    # match_intent runs before match_quick, so any social phrase END_PHRASES
+    # owns would be dead; keep the tables disjoint.
+    from veronica.brain.intents import END_PHRASES
+    for en_set, hi_set, _r1, _r2 in q._SOCIAL:
+        assert not (en_set | hi_set) & END_PHRASES
+    assert at("bye") is None and at("goodbye") is None
+    assert at("thanks veronica") is None and at("thank you veronica") is None
+
+
 def test_hi_lang_uses_hindi_copy():
     assert at("what time is it", lang="hi") == ("time", "Abhi 3:42 pm hain.")
     assert at("what day is it", lang="hi") == ("day", "Aaj Wednesday hai.")

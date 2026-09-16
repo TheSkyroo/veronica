@@ -10,7 +10,10 @@ _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
 
 def normalize(text: str) -> str:
-    return (text or "").lower().replace("’", "").translate(_PUNCT_TABLE).strip()
+    """Lowercase, drop ASCII punctuation and the Devanagari danda (।).
+    Devanagari letters survive (string.punctuation is ASCII-only), so the
+    Hindi-script phrases in the tables below match in pinned Hindi mode."""
+    return (text or "").lower().replace("’", "").replace("।", "").translate(_PUNCT_TABLE).strip()
 
 
 END_PHRASES = frozenset({
@@ -18,9 +21,11 @@ END_PHRASES = frozenset({
     "that is all", "stop", "goodbye", "never mind", "nevermind",
     "go idle", "turn yourself off", "go to sleep", "sleep", "go away",
     "bye", "dismiss",
-    # Hinglish
-    "bas", "bas karo", "theek hai bas", "chup", "chup raho",
+    # Hinglish (no bare "bas": too common mid-sentence, "bas ek minute")
+    "bas karo", "theek hai bas", "chup", "chup raho",
     "band karo", "ruko", "ruk jao",
+    # Devanagari
+    "बस", "बस करो", "चुप", "रुको", "बंद करो",
 })
 
 HUD_MINI_PHRASES = frozenset({
@@ -45,12 +50,16 @@ MUTE_PHRASES = frozenset({
     "mute", "mute yourself", "be quiet", "silence",
     # Hinglish
     "mute karo", "awaaz band karo",
+    # Devanagari
+    "म्यूट करो", "आवाज़ बंद करो",
 })
 
 UNMUTE_PHRASES = frozenset({
     "unmute", "unmute yourself", "you can talk", "speak again",
     # Hinglish
     "unmute karo", "awaaz chalu karo",
+    # Devanagari
+    "अनम्यूट करो", "आवाज़ चालू करो",
 })
 
 QUIT_PHRASES = frozenset({
@@ -107,7 +116,7 @@ def match_language_intent(text: str) -> LanguageMode | None:
 # own phrase tables so a whole-utterance Hinglish command is treated as
 # Hindi even when the transcriber labels it "en".
 HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
-    "bas", "bas karo", "theek hai bas", "chup", "chup raho",
+    "bas karo", "theek hai bas", "chup", "chup raho",
     "band karo", "ruko", "ruk jao",
     "mute karo", "awaaz band karo", "unmute karo", "awaaz chalu karo",
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",

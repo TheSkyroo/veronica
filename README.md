@@ -216,9 +216,10 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
   language: Hinglish in, Hinglish out (Latin letters); pure Hindi in, Devanagari out; English in, English out.
   Hindi replies are spoken with a Hindi voice; timers, briefings and other announcements keep the English voice
   unless they contain Devanagari.
-- **Hinglish commands** — the local intents understand romanized Hindi too: "bas" / "chup" ends the turn, "mute
-  karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "nahi" answer a "Run …?"
-  confirmation, plus the quick replies above.
+- **Hinglish commands** — the local intents understand romanized Hindi too: "bas karo" / "chup" ends the turn,
+  "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "ji" / "nahi" answer a
+  "Run …?" confirmation, plus the quick replies above. In pinned Hindi mode whisper writes Devanagari, so the
+  common ones are understood in script as well ("बस करो", "हाँ" / "नहीं", "समय क्या है").
 - **Hindi voices** — Alpha, Beta (female), Omega, Psi (male). "Use a hindi voice" / "use the omega voice" picks
   the voice Hindi replies use (the English voice is untouched, so both show a checkmark in the **Voice** menu),
   confirmed with "Theek hai, ab main aise bolungi." Prefetch the models without switching:

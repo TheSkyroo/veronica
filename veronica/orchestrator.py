@@ -50,20 +50,28 @@ _TRAILING_STOP_DICTATION_RE = re.compile(
 )
 
 class Orchestrator:
+    # No bare "ha": whisper writes laughter as "ha ha", which must never
+    # approve a tool. Devanagari forms are for pinned Hindi mode, where
+    # whisper emits the script rather than romanized Hindi.
     CONFIRM_WORDS = frozenset({
         "yes", "yeah", "yep", "do it", "go ahead", "confirm", "sure",
-        "haan", "ha", "haanji", "ji haan", "theek hai", "karo",
+        "haan", "ji", "haanji", "ji haan", "theek hai", "karo",
+        "हाँ", "हां", "जी", "जी हाँ", "ठीक है", "करो",
     })
     DENY_WORDS = frozenset({
         "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
         "nahi", "nahin", "mat", "rehne",
+        "नहीं", "नही", "मत", "रहने",
     })
     _SPOKEN_END_PHRASES = frozenset({"thanks veronica", "thank you veronica"})
+    # Word characters for is_confirmation: Latin letters plus the Devanagari
+    # block (U+0900-U+097F, which includes the vowel signs and chandrabindu).
+    _CONFIRM_NON_WORD_RE = re.compile(r"[^a-zऀ-ॿ ]")
 
     @staticmethod
     def is_confirmation(heard: str) -> bool:
         no_apostrophes = heard.lower().replace("'", "").replace("’", "")
-        words = re.sub(r"[^a-z ]", " ", no_apostrophes).split()
+        words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
         if any(w in Orchestrator.DENY_WORDS for w in words):
             return False
         for phrase in Orchestrator.CONFIRM_WORDS:
@@ -788,7 +796,9 @@ class Orchestrator:
         arithmetic) locally, without the brain. For battery/volume the match
         only carries the language; the value is read here."""
         kind, reply = hit
-        lang = reply if kind in ("battery", "volume") else self._utterance_lang
+        # A Hinglish/Devanagari phrase gets a Hindi reply even in English
+        # mode ("shukriya" -> "Koi baat nahi."), so voice it in Hindi too.
+        lang = reply if kind in ("battery", "volume") else quick.reply_lang(heard, self._utterance_lang)
         if kind == "battery":
             percent, state = await asyncio.to_thread(mac_tools.read_battery)
             reply = quick.reply_for("battery", lang, percent=percent, state=state)
