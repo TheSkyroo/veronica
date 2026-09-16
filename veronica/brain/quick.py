@@ -228,7 +228,7 @@ def _spoken(expr: str, hi: bool) -> str:
     s = f" {expr} "
     for phrase, _tok, en, hi_word in _OPS:
         s = s.replace(f" {phrase} ", f" {hi_word if hi else en} ")
-    return " ".join(s.split())
+    return " ".join(s.split()).replace("( ", "(").replace(" )", ")")
 
 
 def _math_prep(text: str) -> str:

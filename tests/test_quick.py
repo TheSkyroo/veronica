@@ -108,6 +108,7 @@ def test_social_choice_is_seeded():
     ("2^10", "2 to the power of 10 is 1024."),
     ("Veronica, what's 5 + 5, please?", "5 plus 5 is 10."),
     ("Okay, what's 6 times 7.", "6 times 7 is 42."),
+    ("what's (2 + 3) * 4", "(2 plus 3) times 4 is 20."),
 ])
 def test_math(text, reply):
     assert at(text) == ("math", reply)
