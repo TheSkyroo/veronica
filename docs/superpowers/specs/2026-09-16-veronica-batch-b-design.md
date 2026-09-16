@@ -40,7 +40,7 @@ Implemented on branch `batch-b`, merged to `master` as one unit.
   - `speed`: `faster` → `min(SPEED_MAX, speed + SPEED_STEP)`, `slower` → `max(SPEED_MIN, speed - SPEED_STEP)`, `normal` → 1.0; if already at the limit say `"That's as fast as I go."` / `"That's as slow as I go."`; else say `"Like this?"` at the new speed. Save pref.
   - Emits `hud` event caption like other local intents; state goes thinking→speaking→idle (no follow-up window needed; reuse whatever `_mute`-style local turns do).
 - Menu (menubar + orb popup, they share the item list): a `Voice` submenu listing the ten display names (checkmark on the current one) and `Faster` / `Slower` / `Normal speed`. Selecting calls the same `_voice_turn` on the orchestrator loop via `call_soon_threadsafe`.
-- Text mode (`--text`) supports the same phrases.
+- Text mode (`--text`) is unchanged: like every other local intent (music, notes), voice/speed phrases are voice-only.
 
 ### Tests
 - `tests/test_voices.py`: resolve table (name, descriptors, combos, default, unknown, case/whitespace), `display_name`.
@@ -70,7 +70,7 @@ Once enabled by voice, Veronica gives a morning briefing at a set time and warns
   - `"(remind me|warn me|nudge me|turn on nudges|tell me) before (my )?(meetings|events)"` optionally `"<n> minutes before"` → `("nudges_on", n or None)`.
   - `"(stop|turn off) (the )?(meeting )?(nudges|reminders before meetings)"` → `("nudges_off", None)`.
 - Orchestrator `_proactive_turn(action)`: updates `Schedule`, saves, replies: `"Okay, I'll brief you every day at 8:00."`, `"Okay, no more morning briefings."`, `"Okay, I'll warn you 5 minutes before each event."`, `"Okay, no more meeting nudges."`; `brief_now` speaks `build_briefing()` directly (this is a normal turn, so it passes through `say`, and then the follow-up window as usual).
-- Proactive announcements go through `announce()` — already idle-only and muted-aware. The `Proactive` instance is created in `__main__.build_orchestrator` and started when the orchestrator loop starts (`run_forever` calls `self.proactive.start()` if set); `--text` mode also runs it.
+- Proactive announcements go through `announce()` — already idle-only and muted-aware. The `Proactive` instance is created in `__main__.build_orchestrator` and started when the orchestrator loop starts (`run_forever` calls `self.proactive.start()` if set); `--text` mode does not run it.
 - HUD: announcements already show as speech; briefing additionally emits a `tool` card `"Morning briefing"`.
 
 ### Tests (`tests/test_proactive.py`)
