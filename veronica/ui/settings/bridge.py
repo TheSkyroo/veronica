@@ -109,6 +109,8 @@ class SettingsBridge:
         self._bundle_path = bundle_path
         self._repo = repo
         self._run_thread = run_thread
+        #: Public for the window: long commands it dispatches run here too.
+        self.run_thread = run_thread
         self._open_path = open_path
         self._marshal = marshal
         self.restart_required = False
