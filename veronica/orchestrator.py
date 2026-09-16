@@ -83,7 +83,10 @@ class Orchestrator:
     # "ok wait", "alright hold on") means the answer isn't a yes.
     QUESTION_WORDS = frozenset({
         "what", "which", "how", "why", "wait", "hold",
-        "kya", "kaun", "ruko", "रुको", "क्या",
+        # apostrophes are stripped before tokenising, so contractions arrive
+        # as "whats"/"hows"/"whys"/"wheres"
+        "whats", "hows", "whys", "wheres", "when", "where",
+        "kya", "kaun", "kaunsa", "kaunsi", "kyun", "kab", "ruko", "रुको", "क्या", "कौन", "क्यों", "कब",
     })
     # A confirm phrase directly after one of these is negated ("not okay",
     # "don't do it", "mat karo") rather than counted as a yes.

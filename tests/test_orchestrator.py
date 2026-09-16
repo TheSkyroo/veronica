@@ -3588,3 +3588,11 @@ async def test_update_intent_with_bundle_relaunches_silently():
     await o.one_turn()
     assert o.tts.said == ["Updating, back in a moment."]
     assert calls == ["relaunch"]
+
+
+@pytest.mark.parametrize("heard,ok", [
+    ("yes what's that", False), ("yes what's it going to delete", False), ("yes how's that work", False),
+    ("haan lekin kaunsi files", False), ("yes when", False), ("yes", True), ("yes do it", True),
+])
+def test_is_confirmation_contracted_question_words(heard, ok):
+    assert Orchestrator.is_confirmation(heard) is ok
