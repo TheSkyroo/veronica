@@ -5,7 +5,7 @@ import datetime as dt
 import pytest
 
 from veronica.brain import agent as agent_mod
-from veronica.brain.agent import Brain, summarize_tool
+from veronica.brain.agent import Brain, summarize_detail, summarize_tool
 from veronica.brain.prompts import system_prompt
 from veronica.config import Settings
 
@@ -15,6 +15,7 @@ def test_system_prompt_has_date_and_rules():
     assert "You are Veronica" in p
     assert "2026-09-15" in p
     assert "one to three spoken sentences" in p
+    assert "For information from the internet, use WebSearch or WebFetch rather than shell commands. Use shell commands only for actions on this Mac." in p
 
 
 def test_summarize_tool():
@@ -71,7 +72,7 @@ def brain(tmp_home, monkeypatch):
     monkeypatch.setattr(Brain, "_client_cls", FakeClient)
     FakeClient.instances.clear()
 
-    async def confirm(summary): return summary.startswith("Bash")
+    async def confirm(summary, detail=""): return summary.startswith("Bash")
 
     return Brain(Settings(), confirm=confirm)
 
@@ -193,6 +194,44 @@ async def test_stream_exception_closes_client(brain, monkeypatch):
     assert brain._client is None
 
 
+def test_summarize_tool_prefers_description():
+    inp = {"command": "curl -s https://wttr.in", "description": "Fetch weather from wttr.in"}
+    assert summarize_tool("Bash", inp) == "Fetch weather from wttr.in via curl"
+    assert summarize_detail("Bash", inp) == "Bash: curl -s https://wttr.in"
+
+
+def test_summarize_tool_bash_description_falls_back_without_head():
+    # unparsable command: no head to append "via <head>" for.
+    inp = {"command": "ls 'unterminated", "description": "List files"}
+    assert summarize_tool("Bash", inp) == "List files"
+
+
+def test_summarize_tool_write_edit_description_includes_basename():
+    inp = {"file_path": "/Users/mani/notes/todo.md", "description": "Jot down a reminder"}
+    assert summarize_tool("Write", inp) == "Jot down a reminder in todo.md"
+    assert summarize_tool("Edit", inp) == "Jot down a reminder in todo.md"
+
+
+def test_summarize_tool_description_stripped_truncated_no_trailing_period():
+    long_desc = "  " + ("a" * 90) + ".  "
+    inp = {"command": "ls", "description": long_desc}
+    result = summarize_tool("Bash", inp)
+    assert len(result) <= 80
+    assert not result.endswith(".")
+    assert result == "a" * 80
+
+
+def test_summarize_tool_ignores_blank_or_missing_description():
+    assert summarize_tool("Bash", {"command": "ls -la", "description": ""}) == "Bash: ls -la"
+    assert summarize_tool("Bash", {"command": "ls -la", "description": "   "}) == "Bash: ls -la"
+    assert summarize_tool("Bash", {"command": "ls -la"}) == "Bash: ls -la"
+
+
+def test_summarize_detail_always_raw():
+    assert summarize_detail("Write", {"file_path": "/x/notes.txt", "description": "Save notes"}) == "Write file /x/notes.txt"
+    assert summarize_detail("Foo", {"a": 1}) == "Foo"
+
+
 def test_summarize_mac_tools():
     assert summarize_tool("mcp__mac__open_app", {"name": "Safari"}) == "Open Safari"
     assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
@@ -204,7 +243,7 @@ def test_summarize_mac_tools():
 async def test_gate_auto_allows_safe_tools_without_confirm(brain):
     calls = []
 
-    async def confirm(summary):
+    async def confirm(summary, detail=""):
         calls.append(summary)
         return False
 

@@ -77,13 +77,14 @@ class Orchestrator:
             log.exception("on_event failed for %s", kind)
 
     # -- speaking -------------------------------------------------------------
-    async def _say_unlocked(self, text: str) -> None:
+    async def _say_unlocked(self, text: str, kind: str = "sentence") -> None:
         # Called only while _speech_lock is already held (by say()/confirm()).
         # Emit right before play so a listener never sees "sentence"/"voice"
-        # for audio that hasn't actually started playing yet.
+        # (or "prompt"/"voice") for audio that hasn't actually started playing
+        # yet.
         samples, sr = await self.tts.asynth(text)
         self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
-        self._emit("sentence", text)
+        self._emit(kind, text)
         await self.player.play(samples)
 
     async def say(self, text: str) -> None:
@@ -208,11 +209,10 @@ class Orchestrator:
         return spoken
 
     # -- confirmation gate ----------------------------------------------------
-    async def confirm(self, summary: str) -> bool:
+    async def confirm(self, summary: str, detail: str = "") -> bool:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
             return False
-        self._emit("tool", {"summary": summary, "decision": "ask", "timeout_ms": self.s.confirm_listen_s * 1000})
         prev = self.state
         self._set("confirming")
         result = False
@@ -239,11 +239,19 @@ class Orchestrator:
                     log.info("confirm aborted by barge")
                     return result
                 self.player.reset()
-                await self._say_unlocked(f"Run {summary}?")
+                await self._say_unlocked(f"Run {summary}?", kind="prompt")
                 if self._barged:
                     # barged while the prompt was being spoken.
                     log.info("confirm aborted by barge")
                     return result
+                # Emitted only now (after the question has actually been
+                # spoken, immediately before we start listening) so the
+                # listening window's countdown starts from when the user
+                # could first respond, not from confirm()'s entry.
+                self._emit("tool", {
+                    "summary": summary, "detail": detail, "decision": "ask",
+                    "timeout_ms": self.s.confirm_listen_s * 1000,
+                })
                 self._confirm_capturing = True
                 try:
                     pcm = await self.recorder.capture(max_s=max(1, self.s.confirm_listen_s))

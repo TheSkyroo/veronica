@@ -22,4 +22,4 @@ def test_envelope_shape_and_normalization():
 
 
 def test_event_kinds():
-    assert EVENT_KINDS == {"state", "heard", "sentence", "tool", "mic", "voice", "warm"}
+    assert EVENT_KINDS == {"state", "heard", "sentence", "tool", "prompt", "mic", "voice", "warm"}

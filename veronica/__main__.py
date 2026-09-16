@@ -17,8 +17,8 @@ from veronica.speech.tts import Synthesizer
 def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True) -> Orchestrator:
     holder: dict = {}
 
-    async def confirm(summary: str) -> bool:
-        return await holder["orch"].confirm(summary)
+    async def confirm(summary: str, detail: str = "") -> bool:
+        return await holder["orch"].confirm(summary, detail)
 
     on_level = (lambda v: on_event("mic", v)) if (on_event and audio) else None
     on_tool = (lambda su, d: on_event("tool", {"summary": su, "decision": d})) if on_event else None
@@ -47,8 +47,8 @@ def _ask_stdin(prompt: str) -> str:
 async def _text_mode(text: str) -> None:
     orch = build_orchestrator(settings, audio=False)
     # no mic in text mode: risky (confirm-class) tools ask y/N on stdin.
-    async def confirm(summary: str) -> bool:
-        answer = await asyncio.to_thread(_ask_stdin, f"Run {summary}? [y/N] ")
+    async def confirm(summary: str, detail: str = "") -> bool:
+        answer = await asyncio.to_thread(_ask_stdin, f"Run {summary}? [{detail}] [y/N] ")
         ok = answer.strip().lower() in ("y", "yes")
         print(f"[tool] {summary} -> {'allowed' if ok else 'declined'}")
         return ok
@@ -59,6 +59,7 @@ async def _text_mode(text: str) -> None:
             print(sent)
     finally:
         await orch.brain.close()
+        orch.player.close()
 
 
 def main(argv: list[str] | None = None) -> None:

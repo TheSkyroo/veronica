@@ -32,7 +32,7 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
 
     calls = []
 
-    async def fake_confirm(summary):
+    async def fake_confirm(summary, detail=""):
         calls.append(summary)
         return True
 
@@ -123,9 +123,18 @@ class _StubBrain:
         self.closed = True
 
 
+class _StubPlayer:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class _StubOrchestrator:
     def __init__(self, handle_text):
         self.brain = _StubBrain()
+        self.player = _StubPlayer()
         self._handle_text = handle_text
 
     async def handle_text(self, text):
@@ -143,6 +152,7 @@ def test_text_mode_closes_brain_on_error(monkeypatch, tmp_home, capsys):
         asyncio.run(main_mod._text_mode("x"))
 
     assert stub.brain.closed is True
+    assert stub.player.closed is True
     out = capsys.readouterr().out
     assert "[text mode] safe tools run automatically; risky tools ask y/N on this terminal" in out
 
@@ -160,6 +170,7 @@ def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
     asyncio.run(main_mod._text_mode("x"))
 
     assert stub.brain.closed is True
+    assert stub.player.closed is True
     out = capsys.readouterr().out
     assert "[text mode] safe tools run automatically; risky tools ask y/N on this terminal" in out
     assert "[tool] Bash: ls -> allowed" in out
@@ -178,14 +189,15 @@ def test_text_mode_prompts_for_confirm_class(monkeypatch, tmp_home, capsys):
 
     asyncio.run(main_mod._text_mode("x"))
 
-    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    ok = asyncio.run(stub.brain._confirm("Bash: rm x", "Bash: rm -rf x"))
     assert ok is True
-    assert prompts == ["Run Bash: rm x? [y/N] "]
+    assert prompts == ["Run Bash: rm x? [Bash: rm -rf x] [y/N] "]
 
     prompts.clear()
     monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: (prompts.append(prompt), "n")[1])
     ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
     assert ok is False
+    assert prompts == ["Run Bash: rm x? [] [y/N] "]
 
 
 def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):

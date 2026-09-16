@@ -1,6 +1,8 @@
 import asyncio
 import datetime as dt
 import logging
+import os
+import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -20,12 +22,29 @@ from veronica.tools.mac import mac_server
 
 log = logging.getLogger("veronica.brain")
 
-Confirm = Callable[[str], Awaitable[bool]]
+Confirm = Callable[[str, str], Awaitable[bool]]
 
 MAC_PREFIX = "mcp__mac__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
+    description = input.get("description")
+    if not (isinstance(description, str) and description.strip()):
+        return summarize_detail(tool_name, input)
+    desc = description.strip()
+    if tool_name == "Bash":
+        try:
+            argv = shlex.split(str(input.get("command", "")))
+        except ValueError:
+            argv = []
+        if argv:
+            desc = f"{desc} via {argv[0]}"
+    elif tool_name in ("Write", "Edit") and input.get("file_path"):
+        desc = f"{desc} in {os.path.basename(str(input['file_path']))}"
+    return desc[:80].rstrip(".")
+
+
+def summarize_detail(tool_name: str, input: dict) -> str:
     if tool_name.startswith(MAC_PREFIX):
         short = tool_name[len(MAC_PREFIX):]
         if short == "open_app":
@@ -84,7 +103,7 @@ class Brain:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
-        if await self._confirm(summary):
+        if await self._confirm(summary, summarize_detail(tool_name, input)):
             return PermissionResultAllow(updated_input=input)
         return PermissionResultDeny(message="user declined")
 

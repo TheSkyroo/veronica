@@ -48,9 +48,13 @@ class FakeRumps:
 class FakePlayer:
     def __init__(self):
         self.stopped = False
+        self.closed = False
 
     def stop(self):
         self.stopped = True
+
+    def close(self):
+        self.closed = True
 
 
 class FakeHud:
@@ -290,6 +294,7 @@ def test_quit_closes_hud(fake_env):
     app, orch = _make_app(menubar, orch_holder)
     app.quit(None)
     assert app._hud.closed
+    assert orch.player.closed
 
 
 def test_real_rumps_restored_after_fixture_teardown():
