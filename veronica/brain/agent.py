@@ -50,9 +50,15 @@ class Brain:
 
     _client_cls = ClaudeSDKClient  # swapped in tests
 
-    def __init__(self, settings: Settings, confirm: Confirm) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        confirm: Confirm,
+        on_tool: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.s = settings
         self._confirm = confirm
+        self._on_tool = on_tool
         self._client = None
         self._in_flight = False
 
@@ -74,6 +80,8 @@ class Brain:
         summary = summarize_tool(tool_name, input)
         if classify(tool_name, input) == "allow":
             log.info("auto-allow: %s", summary)
+            if self._on_tool:
+                self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
         if await self._confirm(summary):

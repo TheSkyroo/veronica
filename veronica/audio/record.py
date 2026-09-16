@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 from collections.abc import Callable, Iterator
 
@@ -7,6 +8,9 @@ import sounddevice as sd
 import webrtcvad
 
 from veronica.config import Settings
+from veronica.ui.events import rms
+
+log = logging.getLogger("veronica.audio")
 
 
 class Recorder:
@@ -14,12 +18,19 @@ class Recorder:
 
     _vad_cls = webrtcvad.Vad  # swapped in tests
 
-    def __init__(self, settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        frames: Callable[[], Iterator[bytes]] | None = None,
+        on_level: Callable[[float], None] | None = None,
+    ) -> None:
         self.s = settings
         self._frames = frames or self._mic_frames
         self._vad = self._vad_cls(settings.vad_aggressiveness)
         self._stop = threading.Event()
         self._capturing = False
+        self._on_level = on_level
+        self._level_error_logged = False
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
@@ -76,6 +87,13 @@ class Recorder:
                     self._stop.clear()
                     return None
                 is_speech = self._vad.is_speech(frame, self.s.sample_rate)
+                if self._on_level is not None:
+                    try:
+                        self._on_level(rms(np.frombuffer(frame, dtype=np.int16)))
+                    except Exception:
+                        if not self._level_error_logged:
+                            log.exception("on_level callback failed")
+                            self._level_error_logged = True
                 if not started:
                     waited += 1
                     if is_speech:

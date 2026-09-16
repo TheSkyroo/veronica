@@ -99,3 +99,12 @@ async def test_stop_when_not_capturing_is_noop(monkeypatch):
     r.stop()   # no capture in flight: must not affect the next capture
     pcm = await r.capture()
     assert pcm is not None
+
+
+async def test_on_level_called_per_frame(monkeypatch):
+    levels = []
+    r = make("..sss..", monkeypatch)
+    r._on_level = levels.append          # constructor kwarg is on_level=; set after make() for simplicity
+    await r.capture()
+    assert len(levels) >= 7 and all(0.0 <= v <= 1.0 for v in levels)
+    assert max(levels) > 0.0            # speech frames are non-zero

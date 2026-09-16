@@ -381,3 +381,17 @@ async def test_interrupt_call_itself_timing_out_closes_client(brain, monkeypatch
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+
+async def test_on_tool_auto_allow(brain):
+    seen = []
+    brain._on_tool = lambda s, d: seen.append((s, d))
+    await brain._can_use_tool("Read", {"file_path": "/x"}, None)
+    assert seen == [("Read: /x", "auto")]
+
+
+async def test_on_tool_not_called_on_confirm_path(brain):
+    seen = []
+    brain._on_tool = lambda s, d: seen.append((s, d))
+    await brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert seen == []
