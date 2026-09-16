@@ -44,7 +44,7 @@ _DEFAULT_WORDS = {"default", "normal", "usual", "original"}
 
 
 def is_hindi_voice(voice_id: str) -> bool:
-    return voice_id.startswith("h")
+    return voice_id in HINDI_VOICE_IDS
 
 
 def resolve_voice(request: str) -> str | None:

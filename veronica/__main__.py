@@ -13,7 +13,7 @@ from veronica.config import Settings, settings, setup_logging
 from veronica.memory.store import MemoryStore
 from veronica.orchestrator import Orchestrator
 from veronica.speech import voices
-from veronica.speech.stt import Transcriber
+from veronica.speech.stt import Transcriber, stt_spec
 from veronica.speech.tts import Synthesizer
 from veronica.tools import memory_tools, pim
 from veronica.tools.timers import TimerService
@@ -43,6 +43,25 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         saved_speed = voices.clamp_speed(saved.get("tts_speed", voices.DEFAULT_SPEED))
     except (TypeError, ValueError):
         saved_speed = voices.DEFAULT_SPEED
+    saved_hindi_voice = saved.get("tts_hindi_voice")
+    if saved_hindi_voice not in voices.HINDI_VOICE_IDS:
+        if saved_hindi_voice:
+            logging.getLogger("veronica").warning(
+                "unknown saved hindi voice %r; using %s", saved_hindi_voice, voices.DEFAULT_HINDI_VOICE
+            )
+        saved_hindi_voice = voices.DEFAULT_HINDI_VOICE
+    # Language mode ("speak hindi" / "switch to english" / "dono bhasha")
+    # persists the same way; it decides which whisper models load now, and
+    # make_stt is how the orchestrator swaps them on a later switch.
+    language = saved.get("language")
+    if language not in ("en", "hi", "auto"):
+        if language:
+            logging.getLogger("veronica").warning("unknown saved language %r; using %s", language, s.language)
+        language = s.language
+    main_model, stt_language, partial_model = stt_spec(s, language)
+
+    def make_stt(model: str, lang: str | None) -> Transcriber:
+        return Transcriber(model, language=lang)
 
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
@@ -86,16 +105,18 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         s,
         wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
-        stt=Transcriber(s.whisper_model) if audio else None,
-        partial_stt=Transcriber(s.partial_stt_model) if (audio and s.partial_stt) else None,
+        stt=make_stt(main_model, stt_language) if audio else None,
+        partial_stt=make_stt(partial_model, stt_language) if (audio and s.partial_stt) else None,
         brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
-        tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed),
+        tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed, hindi_voice=saved_hindi_voice),
         player=Player(),
         store=store,
         on_state=on_state,
         on_event=on_event,
         on_quit=on_quit,
         proactive=pro,
+        stt_factory=make_stt,
+        language=language,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

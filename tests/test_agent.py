@@ -719,3 +719,9 @@ async def test_options_register_browser_server(brain):
     [s async for s in brain.ask("x")]
     o = FakeClient.instances[0].options
     assert "browser" in o.mcp_servers
+
+
+def test_system_prompt_asks_for_same_language_replies():
+    p = system_prompt(dt.date(2026, 9, 15))
+    assert "Reply in the same language they used" in p
+    assert "Hinglish" in p and "Devanagari" in p

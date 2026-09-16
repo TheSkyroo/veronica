@@ -4,6 +4,18 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 
+def stt_spec(settings, mode: str) -> tuple[str, str | None, str]:
+    """Which whisper models (main, partial) and language hint a language
+    mode uses: "en" -> the English-only pair with language="en"; "hi" ->
+    the multilingual pair pinned to Hindi; "auto" -> the multilingual pair
+    with language=None so whisper detects per utterance. Shared by
+    __main__ (startup) and the orchestrator (a "speak hindi" switch)."""
+    if mode == "en":
+        return settings.whisper_model, "en", settings.partial_stt_model
+    language = "hi" if mode == "hi" else None
+    return settings.whisper_multilingual_model, language, settings.partial_stt_multilingual_model
+
+
 class Transcriber:
     """faster-whisper wrapper. Input: int16 mono 16 kHz."""
 

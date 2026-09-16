@@ -17,6 +17,7 @@ from veronica.brain.intents import (
     is_stop_dictation,
     match_dictation_intent,
     match_intent,
+    match_language_intent,
     match_memory_intent,
     match_music_intent,
     match_note_intent,
@@ -27,6 +28,8 @@ from veronica.brain.intents import (
 )
 from veronica.config import Settings
 from veronica.speech import voices
+from veronica.speech.stt import stt_spec
+from veronica.speech.tts import has_devanagari
 from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
@@ -76,7 +79,9 @@ class Orchestrator:
                  on_state: Callable[[str], None] | None = None,
                  on_event: Callable[[str, Any], None] | None = None,
                  on_quit: Callable[[], None] | None = None,
-                 proactive=None) -> None:
+                 proactive=None,
+                 stt_factory: Callable[[str, str | None], Any] | None = None,
+                 language: str = "en") -> None:
         self.s = settings
         # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
         # Started once by run_forever; its schedule is what the "brief me"
@@ -86,8 +91,17 @@ class Orchestrator:
         self.brain, self.tts, self.player = brain, tts, player
         self.partial_stt = partial_stt
         self.store = store
-        # Language of the current utterance ("en" or "hi"); set per utterance
-        # by the Hindi/Hinglish work, read by the quick replies.
+        # Language mode ("en" | "hi" | "auto"): which whisper models are
+        # loaded and how the transcriber is hinted. stt_factory(model_name,
+        # language) builds a fresh Transcriber when a "speak hindi"-style
+        # switch needs different models; None (tests, --text mode) means a
+        # switch only re-hints the transcribers already loaded.
+        self.language = language
+        self.stt_factory = stt_factory
+        # Language of the current utterance ("en" or "hi"): set from the
+        # transcriber's detection / the script / a known Hinglish phrase at
+        # the top of each turn; read by the quick replies and used to pick
+        # the voice the reply is spoken with.
         self._utterance_lang = "en"
         self._on_state = on_state or (lambda _: None)
         self._on_event = on_event
@@ -247,12 +261,13 @@ class Orchestrator:
         if text:
             self._emit("heard_partial", text)
 
-    async def _say_unlocked(self, text: str, kind: str = "sentence") -> None:
+    async def _say_unlocked(self, text: str, kind: str = "sentence", lang: str | None = None) -> None:
         # Called only while _speech_lock is already held (by say()/confirm()).
         # Emit right before play so a listener never sees "sentence"/"voice"
         # (or "prompt"/"voice") for audio that hasn't actually started playing
-        # yet.
-        samples, sr = await self.tts.asynth(text)
+        # yet. `lang` picks the voice ("hi" -> the Hindi voice); None lets
+        # the synthesizer decide from the script.
+        samples, sr = await self.tts.asynth(text, lang)
         self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
         self._emit(kind, text)
         self._now_speaking = text
@@ -261,11 +276,11 @@ class Orchestrator:
         finally:
             self._finished_speaking(text)
 
-    async def say(self, text: str) -> None:
+    async def say(self, text: str, *, lang: str | None = None) -> None:
         if self.muted:
             return
         async with self._speech_lock:
-            await self._say_unlocked(text)
+            await self._say_unlocked(text, lang=lang)
 
     async def chime(self, freq_hz: float, ms: int) -> None:
         if self.muted:
@@ -279,8 +294,9 @@ class Orchestrator:
                 # device hiccup abort listening or a reply.
                 log.warning("chime failed", exc_info=True)
 
-    async def handle_text(self, text: str, images: list[bytes] = ()) -> list[str]:
-        """Ask the brain and speak each sentence; synth N+1 overlaps playback of N."""
+    async def handle_text(self, text: str, images: list[bytes] = (), *, lang: str | None = None) -> list[str]:
+        """Ask the brain and speak each sentence; synth N+1 overlaps playback of N.
+        `lang` ("hi"/"en"/None) picks the voice the reply is spoken with."""
         self._set("thinking")
         self._barged = False   # fresh turn: any earlier barge no longer applies
         t0 = time.monotonic()
@@ -302,7 +318,7 @@ class Orchestrator:
                     # ahead synthesis can run, and (b) a concurrent confirm()
                     # joining the queue sees this sentence as pending *before*
                     # it's been spoken, closing the production ordering race.
-                    fut = asyncio.ensure_future(self.tts.asynth(sent))
+                    fut = asyncio.ensure_future(self.tts.asynth(sent, lang))
                     try:
                         await queue.put((sent, fut))
                     except BaseException:
@@ -408,9 +424,9 @@ class Orchestrator:
         result = await asyncio.to_thread(capture_screenshot, "screen")
         if isinstance(result, str):
             log.warning("screen capture failed: %s", result)
-            return await self.handle_text(text)
+            return await self.handle_text(text, lang=self._utterance_lang)
         data, _path, _mime = result
-        return await self.handle_text(text, images=[data])
+        return await self.handle_text(text, images=[data], lang=self._utterance_lang)
 
     # -- music -----------------------------------------------------------------
     _MUSIC_SUMMARIES = {
@@ -445,9 +461,19 @@ class Orchestrator:
             vid = voices.next_voice(self.tts.voice) if arg == "next" else voices.resolve_voice(arg)
             if vid is None:
                 names = [voices.display_name(v) for v in voices.VOICE_IDS]
+                hindi = [voices.display_name(v) for v in voices.HINDI_VOICE_IDS]
                 await self.say(
-                    "I don't have that voice. I have " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                    "I don't have that voice. I have " + ", ".join(names)
+                    + ", and in Hindi " + ", ".join(hindi[:-1]) + " and " + hindi[-1] + "."
                 )
+                return
+            if voices.is_hindi_voice(vid):
+                # A Hindi voice only ever speaks Hindi replies; the English
+                # voice stays as it was.
+                self.tts.hindi_voice = vid
+                prefs.save({"tts_hindi_voice": vid})
+                self._emit("tool", {"summary": f"Voice: {voices.display_name(vid)}", "decision": "auto"})
+                await self.say("Theek hai, ab main aise bolungi.", lang="hi")
                 return
             self.tts.voice = vid
             prefs.save({"tts_voice": vid})
@@ -475,6 +501,77 @@ class Orchestrator:
         prefs.save({"tts_speed": self.tts.speed})
         self._emit("tool", {"summary": f"Speed: {self.tts.speed:.2f}x", "decision": "auto"})
         await self.say("Like this?")
+
+    # -- language mode (C2) ---------------------------------------------------------
+    _LANG_LOADING = {
+        "hi": "Ek minute, Hindi load kar rahi hoon.",
+        "en": "One moment, switching to English.",
+        "auto": "Ek minute.",
+    }
+    _LANG_CONFIRM = {
+        "hi": "Ab Hindi mein baat karte hain.",
+        "en": "Okay, English it is.",
+        "auto": "Theek hai, dono chalega.",
+    }
+
+    def _stt_spec(self, mode: str) -> tuple[str, str | None, str]:
+        """(main_model, language_kwarg, partial_model) for a language mode."""
+        return stt_spec(self.s, mode)
+
+    async def _language_turn(self, mode: str) -> None:
+        """Local fast path for "speak hindi" / "switch to english" / "dono
+        bhasha": swap the transcribers for the mode's models (a first-time
+        Hindi switch downloads ~500 MB, so warn before it), persist the mode
+        to prefs.json and confirm in the new language. When the loaded
+        models already match, only the language hint changes — no reload,
+        no loading line."""
+        main_model, lang, partial_model = self._stt_spec(mode)
+        want_partial = self.partial_stt is not None or bool(self.s.partial_stt)
+        needs_load = self.stt_factory is not None and (
+            getattr(self.stt, "model_name", None) != main_model
+            or (want_partial and getattr(self.partial_stt, "model_name", None) != partial_model)
+        )
+        spoken_lang = "en" if mode == "en" else "hi"
+        if needs_load:
+            await self.say(self._LANG_LOADING[mode], lang=spoken_lang)
+            self._set("thinking")
+            self.stt = await asyncio.to_thread(self.stt_factory, main_model, lang)
+            if want_partial:
+                self.partial_stt = await asyncio.to_thread(self.stt_factory, partial_model, lang)
+                if self.recorder is not None:
+                    # first partial transcriber (none was loaded at startup):
+                    # hook the recorder's audio hops up as __init__ would have.
+                    self.recorder.on_audio = self._on_recorder_audio
+        else:
+            for stt in (self.stt, self.partial_stt):
+                set_language = getattr(stt, "set_language", None)
+                if set_language is not None:
+                    set_language(lang)
+        self.language = mode
+        prefs.save({"language": mode})
+        self._emit("tool", {"summary": f"Language: {mode}", "decision": "auto"})
+        await self.say(self._LANG_CONFIRM[mode], lang=spoken_lang)
+
+    async def _transcribe(self, pcm: np.ndarray) -> tuple[str, str]:
+        """(text, detected language) for an utterance. Transcribers without
+        the detailed API (older doubles) are treated as English."""
+        detailed = getattr(self.stt, "atranscribe_detailed", None)
+        if detailed is None:
+            return await self.stt.atranscribe(pcm), "en"
+        return await detailed(pcm)
+
+    def _lang_for(self, text: str, detected: str) -> str:
+        """The language an utterance is answered in: Devanagari script or a
+        "hi" detection means Hindi; in the Hindi/auto modes a known Hinglish
+        phrase counts as Hindi too (whisper labels romanized Hindi "en");
+        everything else is English."""
+        if not text:
+            return "en"
+        if has_devanagari(text) or detected == "hi":
+            return "hi"
+        if self.language in ("hi", "auto") and quick.is_hinglish_phrase(text):
+            return "hi"
+        return "en"
 
     # -- push-to-talk (A2) --------------------------------------------------------
     def ptt_start(self) -> None:
@@ -687,7 +784,7 @@ class Orchestrator:
                 percent = None
             reply = quick.reply_for("volume", lang, percent=percent)
         self._emit("tool", {"summary": "Quick reply", "decision": "auto"})
-        await self.say(reply)
+        await self.say(reply, lang=lang)
         if self.store is not None and self.s.memory_enabled:
             self.store.add_turn(heard, reply)
 
@@ -948,9 +1045,10 @@ class Orchestrator:
             return
         is_followup = False
         while True:
-            text = await self.stt.atranscribe(pcm)
+            text, detected = await self._transcribe(pcm)
+            self._utterance_lang = self._lang_for(text, detected)
             self._emit("heard", text)
-            log.info("heard=%r", text)
+            log.info("heard=%r lang=%s", text, self._utterance_lang)
             intent = match_intent(text)
             if intent == "end":
                 if normalize(text) in self._SPOKEN_END_PHRASES:
@@ -985,19 +1083,24 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None)
                 else match_voice_intent(text)
             )
-            proactive_action = (
+            lang_mode = (
                 None
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action)
+                else match_language_intent(text)
+            )
+            proactive_action = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None)
                 else match_proactive_intent(text)
             )
             quick_hit = (
                 None
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None)
                 else quick.match_quick(text, lang=self._utterance_lang)
             )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or proactive_action is not None or quick_hit is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or proactive_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -1041,6 +1144,9 @@ class Orchestrator:
             elif voice_action is not None:
                 self.player.reset()
                 await self._voice_turn(voice_action)
+            elif lang_mode is not None:
+                self.player.reset()
+                await self._language_turn(lang_mode)
             elif proactive_action is not None and proactive_action[0] == "brief_now" and self.proactive is not None:
                 self.player.reset()
                 barged = await self._run_with_barge(self._brief_now_turn())
@@ -1073,7 +1179,7 @@ class Orchestrator:
                         break
                     continue
             else:
-                barged = await self._run_with_barge(self.handle_text(text))
+                barged = await self._run_with_barge(self.handle_text(text, lang=self._utterance_lang))
                 if barged:
                     pcm = await self._relisten(barged)
                     is_followup = False

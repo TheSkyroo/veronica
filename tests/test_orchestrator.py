@@ -41,7 +41,7 @@ class Brain:
 
 class TTS:
     def __init__(self): self.said = []
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.said.append(text)
         return np.zeros(10, dtype=np.float32), 24000
 
@@ -223,7 +223,7 @@ async def test_run_forever_survives_reporting_failure():
             yield  # pragma: no cover - makes this an async generator function
 
     class RaisingTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             raise RuntimeError("tts boom")
 
     class WakeOnceThenCancel:
@@ -273,7 +273,7 @@ class TrackingTTS:
         self.max_in_progress = 0
         self._texts_by_index = []
 
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.in_progress += 1
         self.max_in_progress = max(self.max_in_progress, self.in_progress)
         self.said.append(text)
@@ -496,7 +496,7 @@ async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
     order = []
 
     class SlowTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             order.append(("synth", text))
             await asyncio.sleep(0.01)
             return np.zeros(10, dtype=np.float32), 24000
@@ -527,7 +527,7 @@ async def test_pipelined_tts_preserves_order_and_overlaps_synth_with_play():
 
 async def test_handle_text_cancel_with_full_queue_does_not_hang():
     class FastTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             return np.zeros(10, dtype=np.float32), 24000
 
     class SlowTTS:
@@ -538,7 +538,7 @@ async def test_handle_text_cancel_with_full_queue_does_not_hang():
         (exercising the orphaned-future fix), and other futures will still
         be genuinely in-flight (not just already-done) when drained."""
         def __init__(self): self.started = 0; self.finished = 0
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             self.started += 1
             try:
                 await asyncio.sleep(1)
@@ -594,7 +594,7 @@ async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
     texts_by_index: list[str] = []
 
     class DelayedTTS:
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             idx = len(texts_by_index)
             texts_by_index.append(text)
             await asyncio.sleep(0.05)
@@ -832,7 +832,7 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
         def __init__(self):
             self.said = []
 
-        async def asynth(self, text):
+        async def asynth(self, text, lang=None):
             self.said.append(text)
             if text.startswith("Run "):
                 await release_ev.wait()
@@ -2725,7 +2725,7 @@ class TTS2(TTS):
         self.speed = 1.0
         self.spoken_with = []   # (text, voice, speed) at synth time
 
-    async def asynth(self, text):
+    async def asynth(self, text, lang=None):
         self.spoken_with.append((text, self.voice, self.speed))
         return await super().asynth(text)
 
@@ -2759,7 +2759,7 @@ async def test_voice_intent_unknown_lists_voices(monkeypatch):
     assert o.tts.voice == "af_sarah"
     assert saved == []
     assert o.tts.said[-1].startswith("I don't have that voice. I have Sarah, Bella")
-    assert o.tts.said[-1].endswith("George and Lewis.")
+    assert o.tts.said[-1].endswith("George, Lewis, and in Hindi Alpha, Beta, Omega and Psi.")
 
 
 async def test_voice_intent_next_cycles(monkeypatch):
@@ -3014,9 +3014,11 @@ async def test_quick_volume_error_copy(monkeypatch):
 
 
 async def test_quick_uses_utterance_lang_for_english_phrase():
-    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what day is it"])
-    o._utterance_lang = "hi"
+    # whisper labelled the utterance Hindi (an English phrase said in a
+    # Hindi sentence's flow): the reply comes back in Hinglish.
+    o, *_ = build_lang(["what day is it"], langs=["hi"], mode="auto")
     await o.one_turn()
+    assert o._utterance_lang == "hi"
     import datetime as _dt
     assert o.tts.said == [f"Aaj {_dt.datetime.now().strftime('%A')} hai."]
 
@@ -3060,3 +3062,145 @@ def test_read_battery_parses_pmset():
 ])
 def test_is_confirmation_hinglish(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok
+
+
+# -- batch C: language mode -----------------------------------------------------
+
+class STT2(STT):
+    def __init__(self, texts, langs=None):
+        super().__init__(texts); self.langs = list(langs or []); self.language = "en"; self.model_name = "small.en"
+    async def atranscribe_detailed(self, pcm):
+        t = await self.atranscribe(pcm)
+        return t, (self.langs.pop(0) if self.langs else "en")
+    def set_language(self, lang): self.language = lang
+
+
+class TTS3(TTS):
+    def __init__(self):
+        super().__init__(); self.voice = "af_sarah"; self.speed = 1.0; self.hindi_voice = "hf_alpha"; self.langs = []
+    async def asynth(self, text, lang=None):
+        self.langs.append((text, lang)); return await super().asynth(text)
+
+
+def build_lang(stt_texts, langs=(), mode="en", monkeypatch=None):
+    saved = []
+    if monkeypatch:
+        monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    made = []
+    def factory(model, language):
+        s = STT2([], []); s.model_name = model; s.language = language; made.append((model, language)); return s
+    states, events = [], []
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(stt_texts, langs),
+        brain=Brain(), tts=TTS3(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)), stt_factory=factory, language=mode,
+    )
+    return o, saved, made, events
+
+
+async def test_utterance_lang_from_detection_and_script():
+    o, *_ = build_lang(["kal meeting hai"], langs=["hi"], mode="auto")
+    await o.one_turn()
+    assert o._utterance_lang == "hi"
+    assert o.tts.langs[-1][1] == "hi"                      # brain reply spoken with the Hindi voice
+    o, *_ = build_lang(["कल मीटिंग है"], langs=["en"], mode="en")   # Devanagari wins even if detector says en
+    await o.one_turn()
+    assert o._utterance_lang == "hi"
+    o, *_ = build_lang(["what time is it"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert o._utterance_lang == "en" and o.tts.langs[-1][1] == "en"
+
+
+async def test_hinglish_phrase_in_auto_mode_counts_as_hindi():
+    o, *_ = build_lang(["shukriya"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert o.tts.said[-1] in {"Koi baat nahi.", "Hamesha."} and o.tts.langs[-1][1] == "hi"
+
+
+async def test_hinglish_phrase_in_english_mode_stays_english():
+    o, *_ = build_lang(["shukriya"], langs=["en"], mode="en")
+    await o.one_turn()
+    assert o._utterance_lang == "en"
+
+
+async def test_language_switch_turn_swaps_models_and_saves(monkeypatch):
+    o, saved, made, ev = build_lang(["speak hindi"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.language == "hi"
+    assert made[-2:] == [("small", "hi"), ("tiny", "hi")]     # main + partial
+    assert o.stt.model_name == "small" and o.partial_stt.model_name == "tiny"
+    assert {"language": "hi"} in saved
+    assert o.tts.said[:2] == ["Ek minute, Hindi load kar rahi hoon.", "Ab Hindi mein baat karte hain."]
+    assert o.tts.langs[:2] == [("Ek minute, Hindi load kar rahi hoon.", "hi"), ("Ab Hindi mein baat karte hain.", "hi")]
+    assert ("tool", {"summary": "Language: hi", "decision": "auto"}) in ev
+    assert o.brain.asked == []
+
+    o.stt = STT2(["speak english"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.language == "en" and made[-2:] == [("small.en", "en"), ("tiny.en", "en")]
+    assert o.tts.said[-2:] == ["One moment, switching to English.", "Okay, English it is."]
+    assert o.tts.langs[-1] == ("Okay, English it is.", "en")
+
+    o.stt = STT2(["dono bhasha"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.language == "auto" and made[-2:] == [("small", None), ("tiny", None)]
+    assert o.tts.said[-1] == "Theek hai, dono chalega."
+
+
+async def test_language_switch_same_model_only_sets_language(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="auto", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"
+    await o.one_turn()
+    assert made == [] and o.stt.language == "hi" and o.partial_stt.language == "hi"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+    assert {"language": "hi"} in saved
+
+
+async def test_language_switch_already_active_just_confirms(monkeypatch):
+    o, saved, made, _ = build_lang(["speak hindi"], mode="hi", monkeypatch=monkeypatch)
+    o.stt.model_name = "small"; o.stt.language = "hi"
+    o.partial_stt = STT2([]); o.partial_stt.model_name = "tiny"; o.partial_stt.language = "hi"
+    await o.one_turn()
+    assert made == [] and o.language == "hi"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+
+
+async def test_language_switch_without_factory_only_sets_language(monkeypatch):
+    saved = []
+    monkeypatch.setattr(prefs_mod, "save", lambda d: saved.append(d))
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=Wake(), recorder=Rec([np.zeros(1, np.int16), None]), stt=STT2(["speak hindi"]),
+        brain=Brain(), tts=TTS3(), player=Player(),
+    )
+    await o.one_turn()
+    assert o.language == "hi" and o.stt.language == "hi" and o.stt.model_name == "small.en"
+    assert o.tts.said == ["Ab Hindi mein baat karte hain."]
+
+
+async def test_stt_without_detailed_api_defaults_to_english():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+    await o.one_turn()
+    assert o._utterance_lang == "en"
+    assert o.brain.asked == ["tell me a joke"]
+
+
+async def test_announcements_speak_without_forced_lang():
+    o, *_ = build_lang([], mode="hi")
+    await o._deliver_announcement(("Timer done.", None))
+    assert o.tts.langs[-1] == ("Timer done.", None)
+
+
+async def test_hindi_voice_request_sets_hindi_voice(monkeypatch):
+    o, saved, _, ev = build_lang(["use a hindi voice"], mode="en", monkeypatch=monkeypatch)
+    await o.one_turn()
+    assert o.tts.voice == "af_sarah" and o.tts.hindi_voice == "hf_alpha"
+    assert {"tts_hindi_voice": "hf_alpha"} in saved
+    assert o.tts.langs[-1] == ("Theek hai, ab main aise bolungi.", "hi")
+
+    o.stt = STT2(["use the omega voice"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert o.tts.hindi_voice == "hm_omega" and o.tts.voice == "af_sarah"
+    assert {"tts_hindi_voice": "hm_omega"} in saved
+    assert ("tool", {"summary": "Voice: Omega", "decision": "auto"}) in ev
