@@ -3353,6 +3353,38 @@ async def test_version_intent_speaks_describe(monkeypatch):
     assert o.brain.asked == []
 
 
+async def test_version_intent_uses_injected_describe_off_loop(monkeypatch):
+    import threading
+
+    calls = []
+
+    def boom(info=None):
+        raise AssertionError("module describe must not be used when one is injected")
+
+    monkeypatch.setattr(version_mod, "describe", boom)
+    o, _, _ = build_d(["version"], version_describe=lambda: calls.append(threading.current_thread()) or "Veronica 1.2.3 (cafe123, 2 Feb)")
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 1.2.3 (cafe123, 2 Feb)"]
+    assert len(calls) == 1
+
+
+async def test_version_intent_default_describe_runs_in_thread(monkeypatch):
+    import threading
+
+    main = threading.current_thread()
+    seen = []
+
+    def describe(info=None):
+        seen.append(threading.current_thread())
+        return "Veronica 9.9.9 (abc1234, 1 Jan)"
+
+    monkeypatch.setattr(version_mod, "describe", describe)
+    o, _, _ = build_d(["what version are you"])
+    await o.one_turn()
+    assert o.tts.said == ["Veronica 9.9.9 (abc1234, 1 Jan)"]
+    assert seen and seen[0] is not main   # git runs off the event loop
+
+
 async def test_update_intent_unavailable_in_text_mode():
     o, _, _ = build_d(["update yourself"])
     await o.one_turn()
@@ -3472,3 +3504,28 @@ async def test_update_intent_relaunch_not_scheduled_speaks_restart_hint():
                       relaunch=lambda: False)
     await o.one_turn()
     assert o.tts.said == ["Updating, back in a moment.", "Update installed. Restart me from the terminal."]
+
+
+async def test_update_intent_without_bundle_speaks_before_quitting():
+    """Dev run (no .app to reopen): the hint is spoken BEFORE relaunch()
+    quits the process, so the speech isn't torn down mid-sentence."""
+    order = []
+
+    def relaunch():
+        order.append(("relaunch", list(o.tts.said)))
+        return False
+
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=relaunch, can_relaunch=lambda: False)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment.", "Update installed. Restart me from the terminal."]
+    assert order == [("relaunch", ["Updating, back in a moment.", "Update installed. Restart me from the terminal."])]
+
+
+async def test_update_intent_with_bundle_relaunches_silently():
+    calls = []
+    o, _, _ = build_d(["update yourself"], updater_check=lambda: _status("local"), updater_update=lambda s: "log",
+                      relaunch=lambda: calls.append("relaunch") or True, can_relaunch=lambda: True)
+    await o.one_turn()
+    assert o.tts.said == ["Updating, back in a moment."]
+    assert calls == ["relaunch"]

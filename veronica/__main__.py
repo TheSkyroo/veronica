@@ -20,10 +20,13 @@ from veronica.tools.timers import TimerService
 
 
 def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool = True, on_quit=None,
-                       updater_check=None, updater_update=None, relaunch=None) -> Orchestrator:
-    """`updater_check`/`updater_update`/`relaunch` are the menu bar app's
-    self-update hooks (see Orchestrator); None (text mode) disables the
-    "update yourself" turn."""
+                       updater_check=None, updater_update=None, relaunch=None, can_relaunch=None,
+                       version_describe=None) -> Orchestrator:
+    """`updater_check`/`updater_update`/`relaunch`/`can_relaunch` are the
+    menu bar app's self-update hooks (see Orchestrator); None (text mode)
+    disables the "update yourself" turn. `version_describe` is a cached
+    "Veronica x.y.z (sha, date)" for the version turn (default: git, on a
+    thread)."""
     holder: dict = {}
 
     async def confirm(summary: str, detail: str = "") -> bool:
@@ -146,6 +149,8 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         updater_check=updater_check,
         updater_update=updater_update,
         relaunch=relaunch,
+        can_relaunch=can_relaunch,
+        version_describe=version_describe,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

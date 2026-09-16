@@ -237,6 +237,8 @@ class VeronicaApp(rumps.App):
                 updater_check=lambda: updater.check(self._repo, info=self._build_info),
                 updater_update=self._voice_update,
                 relaunch=self._relaunch,
+                can_relaunch=lambda: self._bundle_path is not None,
+                version_describe=lambda: version.describe(self._build_info),
             )
             self._loop.run_until_complete(self._orch.warmup())
             self._loop.run_until_complete(self._orch.run_forever())

@@ -274,6 +274,55 @@ def test_set_language_runs_language_turn(h):
     assert len(h.states) == 1
 
 
+def _deferred_harness(**kw):
+    """A harness whose run_on_loop only *schedules* (collects coroutines),
+    like the real menubar `_schedule` from the AppKit thread, and whose
+    run_thread only collects thunks."""
+    pending: list = []
+    threads: list = []
+    h = Harness(**kw)
+    h.bridge._run_on_loop = pending.append
+    h.bridge._run_thread = threads.append
+    return h, pending, threads
+
+
+def test_set_language_pushes_state_only_after_the_turn_ran():
+    h, pending, _ = _deferred_harness()
+    res = h.bridge.set("general", "language", "hi")
+    assert res["ok"]
+    # nothing pushed yet: orch.language is still the old value
+    assert h.states == [] and len(pending) == 1
+    h.orch.language = "hi"      # what the real _language_turn does
+    asyncio.run(pending[0])
+    assert [c for c in h.orch.calls] == [("language", "hi")]
+    assert len(h.states) == 1 and h.states[0]["general"]["language"] == "hi"
+
+
+def test_set_voice_pushes_state_only_after_the_turn_ran():
+    h, pending, _ = _deferred_harness()
+    assert h.bridge.set("voice", "voice", "George")["ok"]
+    assert h.states == [] and len(pending) == 1
+    h.orch.tts.voice = "bm_george"
+    asyncio.run(pending[0])
+    assert h.orch.calls == [("voice", ("voice", "george"))]
+    assert len(h.states) == 1 and h.states[0]["voice"]["voice"] == "bm_george"
+
+
+def test_set_hindi_voice_pushes_after_turn():
+    h, pending, _ = _deferred_harness()
+    assert h.bridge.set("voice", "hindi_voice", "Omega")["ok"]
+    assert h.states == []
+    asyncio.run(pending[0])
+    assert len(h.states) == 1
+
+
+def test_set_language_same_mode_pushes_immediately():
+    h, pending, _ = _deferred_harness()
+    h.orch.language = "hi"
+    assert h.bridge.set("general", "language", "hi")["ok"]
+    assert pending == [] and len(h.states) == 1
+
+
 def test_set_language_rejects_unknown_mode(h):
     res = h.bridge.set("general", "language", "fr")
     assert res["ok"] is False and "language" in res["message"].lower()
@@ -545,6 +594,27 @@ def test_restart_without_bundle_says_so():
     h = Harness(bundle=None)
     res = h.bridge.restart()
     assert res["ok"] is True and res["message"] == "Restart me from the terminal."
+    assert h.relaunches == 1
+
+
+def test_restart_replies_before_relaunch_is_scheduled():
+    # The reply must reach the window before the relaunch quits the app:
+    # relaunch runs off the reply path (run_thread), not inline.
+    h, _, threads = _deferred_harness()
+    res = h.bridge.restart()
+    assert res == {"ok": True, "message": ""}
+    assert h.relaunches == 0 and len(threads) == 1
+    threads[0]()
+    assert h.relaunches == 1
+
+
+def test_restart_without_bundle_replies_before_quit():
+    h, _, threads = _deferred_harness(bundle=None)
+    res = h.bridge.restart()
+    assert res["message"] == "Restart me from the terminal."
+    assert h.relaunches == 0
+    threads[0]()
+    assert h.relaunches == 1
 
 
 def test_open_logs_and_login_items(h):

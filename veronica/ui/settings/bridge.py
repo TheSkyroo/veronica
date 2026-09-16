@@ -46,6 +46,7 @@ VOICE_TEST = {"en": "This is how I sound now.", "hi": "Main aise bolti hoon."}
 LANGUAGE_MODES = ("en", "hi", "auto")
 HUD_MODES = ("full", "mini")
 LOGIN_ITEMS_URL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+_PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before the window sees it
 
 # Which Settings fields each section exposes. Anything in EDITABLE_SETTINGS
 # not listed here is unreachable from the window (deliberately).
@@ -289,22 +290,31 @@ class SettingsBridge:
         except (ValueError, TypeError) as e:
             result = _fail(str(e))
         result.setdefault("restart_required", self.restart_required)
-        if result["ok"]:
+        # Language/voice changes are orchestrator turns that only run later
+        # on the asyncio loop: pushing now would show the *old* value. Those
+        # handlers mark the reply and push themselves once the turn is done.
+        deferred = result.pop(_PUSH_AFTER_TURN, False)
+        if result["ok"] and not deferred:
             self._push()
         return result
 
     def _orch_or_none(self):
         return self._get_orch()
 
-    @staticmethod
-    async def _with_player_reset(orch, coro) -> None:
+    async def _with_player_reset(self, orch, coro, *, push_after: bool = False) -> None:
         """The orchestrator's own dispatch resets the player before a turn
         (the turns don't do it themselves); mirror that, as the menubar's
-        `_voice_action` does, so in-flight speech is cut before the reply."""
+        `_voice_action` does, so in-flight speech is cut before the reply.
+        With `push_after`, push fresh state to the window once the turn has
+        run (i.e. once orch.language / tts.voice actually changed)."""
         reset = getattr(getattr(orch, "player", None), "reset", None)
         if reset is not None:
             reset()
-        await coro
+        try:
+            await coro
+        finally:
+            if push_after:
+                self._push()
 
     def _set_language(self, value) -> dict:
         mode = str(value or "").strip().lower()
@@ -315,8 +325,8 @@ class SettingsBridge:
             return _fail(STARTING_UP)
         if getattr(orch, "language", None) == mode:
             return _ok()   # already there: don't reload or re-announce
-        self._run_on_loop(self._with_player_reset(orch, orch._language_turn(mode)))
-        return _ok()
+        self._run_on_loop(self._with_player_reset(orch, orch._language_turn(mode), push_after=True))
+        return _ok(**{_PUSH_AFTER_TURN: True})
 
     def _set_start_at_login(self, value) -> dict:
         want = _to_bool(value)
@@ -354,8 +364,8 @@ class SettingsBridge:
         orch = self._orch_or_none()
         if orch is None:
             return _fail(STARTING_UP)
-        self._run_on_loop(self._with_player_reset(orch, orch._voice_turn(("voice", name))))
-        return _ok()
+        self._run_on_loop(self._with_player_reset(orch, orch._voice_turn(("voice", name)), push_after=True))
+        return _ok(**{_PUSH_AFTER_TURN: True})
 
     def _set_speed(self, value) -> dict:
         speed = round(voices.clamp_speed(float(value)), 2)
@@ -508,8 +518,16 @@ class SettingsBridge:
 
     # -- restart / logs --------------------------------------------------------------------
     def restart(self) -> dict:
-        relaunched = self._relaunch()
-        return _ok() if relaunched else {"ok": True, "message": RESTART_FROM_TERMINAL}
+        # Reply first, relaunch after: relaunch() schedules the quit, and the
+        # window must get its answer before the app goes away.
+        can = self._bundle_path is not None
+
+        def go() -> None:
+            if not self._relaunch() and can:
+                log.warning("restart: relaunch could not be scheduled")
+
+        self._run_thread(go)
+        return _ok() if can else {"ok": True, "message": RESTART_FROM_TERMINAL}
 
     def open_logs(self) -> dict:
         self._open_path(self._settings.log_file)

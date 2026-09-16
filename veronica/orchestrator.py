@@ -119,15 +119,24 @@ class Orchestrator:
                  language: str = "en",
                  updater_check: Callable[[], Any] | None = None,
                  updater_update: Callable[[Any], str] | None = None,
-                 relaunch: Callable[[], bool] | None = None) -> None:
+                 relaunch: Callable[[], bool] | None = None,
+                 can_relaunch: Callable[[], bool] | None = None,
+                 version_describe: Callable[[], str] | None = None) -> None:
         self.s = settings
         # Self-update (D3): `updater_check()` -> UpdateStatus, `updater_update(
         # status)` -> log text, `relaunch()` restarts the app (and quits this
         # process). All three are injected by the menu bar app; None (tests,
         # --text mode) means "update yourself" just says it can't here.
+        # `can_relaunch()` says up front whether relaunch() will reopen a
+        # bundle (vs. just quit a dev run) so the "restart me" hint can be
+        # spoken BEFORE the quit is scheduled; None = unknown.
         self.updater_check = updater_check
         self.updater_update = updater_update
         self.relaunch = relaunch
+        self.can_relaunch = can_relaunch
+        # "What version are you": the menu bar passes a cached describe();
+        # the default asks git, so it runs on a thread, off the loop.
+        self.version_describe = version_describe
         # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
         # Started once by run_forever; its schedule is what the "brief me"
         # / "turn on nudges" intents edit. None in --text mode.
@@ -869,6 +878,11 @@ class Orchestrator:
         else:
             await self.say("Here you go.")
 
+    async def _describe_version(self) -> str:
+        if self.version_describe is not None:
+            return self.version_describe()
+        return await asyncio.to_thread(version.describe)
+
     async def _update_turn(self) -> None:
         """Local fast path for "update yourself" / "check for updates":
         check on a thread, and if something newer exists, pull/build (also
@@ -910,10 +924,20 @@ class Orchestrator:
             log.exception("update failed")
             await self.say("The update failed, check the log.")
             return
-        if self.relaunch is None or not self.relaunch():
+        hint = "Update installed. Restart me from the terminal."
+        if self.relaunch is None:
+            await self.say(hint)
+            return
+        if self.can_relaunch is not None and not self.can_relaunch():
+            # Dev run: relaunch() will only quit — say so first, so the
+            # speech isn't torn down by the quit it schedules.
+            await self.say(hint)
+            self.relaunch()
+            return
+        if not self.relaunch():
             # relaunch() quits when it could schedule the reopen (or has no
             # bundle to reopen); still here means neither happened.
-            await self.say("Update installed. Restart me from the terminal.")
+            await self.say(hint)
 
     # -- notes & dictation (A4) --------------------------------------------------
     async def _note_turn(self, body: str) -> None:
@@ -1295,7 +1319,7 @@ class Orchestrator:
                 await self._settings_turn(settings_tab, text)
             elif version_intent:
                 self.player.reset()
-                await self.say(version.describe())
+                await self.say(await self._describe_version())
             elif update_intent:
                 # Deliberately NOT under _run_with_barge: a barge would
                 # cancel the turn and orphan a half-done pull/build.

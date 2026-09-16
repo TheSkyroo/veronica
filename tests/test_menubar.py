@@ -1164,7 +1164,9 @@ def test_build_orchestrator_receives_updater_hooks(fake_env, monkeypatch):
     app, orch = _make_app(menubar, orch_holder)
     try:
         kw = orch.build_kwargs
-        assert set(kw) == {"updater_check", "updater_update", "relaunch"}
+        assert set(kw) == {"updater_check", "updater_update", "relaunch", "can_relaunch", "version_describe"}
+        assert kw["can_relaunch"]() == (app._bundle_path is not None)
+        assert kw["version_describe"]() == menubar.version.describe(app._build_info)
         seen = []
         monkeypatch.setattr(menubar.updater, "check", lambda repo, run=None, info=None: seen.append(("check", repo, info)) or _status("none"))
         monkeypatch.setattr(menubar.updater, "update", lambda repo, st, **k: seen.append(("update", repo, st)) or "log")
