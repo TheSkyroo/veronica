@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
 import datetime as dt
+import difflib
 import logging
 import re
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -242,6 +244,8 @@ class Orchestrator:
         # tests to fake time.
         self._last_spoken = ""
         self._last_spoken_until = 0.0
+        # last few sentences she spoke, for echo rejection on follow-ups
+        self._recent_spoken: deque[str] = deque(maxlen=6)
         self._clock = time.monotonic
         self._announce_queue: asyncio.Queue = asyncio.Queue()
 
@@ -304,6 +308,33 @@ class Orchestrator:
         self._last_spoken = text
         self._last_spoken_until = self._clock() + self.s.wake_window_s + self.s.wake_hop_s
         self._now_speaking = ""
+        self._recent_spoken.append(text)
+
+    _OWN_SPEECH_MIN_WORDS = 3
+    _OWN_SPEECH_RATIO = 0.72
+
+    def _is_own_speech(self, heard: str) -> bool:
+        """True if a follow-up transcript is (mostly) Veronica's own last few
+        sentences leaking back in through the mic — speakers + laptop mic,
+        or a Bluetooth input whose audio arrives hundreds of ms late, after
+        followup_skip_ms has already elapsed. Compared against the recent
+        sentences with a fuzzy ratio so partial echoes still match."""
+        norm = normalize(heard)
+        words = norm.split()
+        if len(words) < self._OWN_SPEECH_MIN_WORDS or not self._recent_spoken:
+            return False
+        recent = [normalize(t) for t in self._recent_spoken if t]
+        joined = " ".join(recent)
+        if norm in joined:
+            return True
+        for sent in recent:
+            if difflib.SequenceMatcher(None, norm, sent).ratio() >= self._OWN_SPEECH_RATIO:
+                return True
+        # most of the heard words appear in what she just said (echo with a
+        # few mis-heard tokens)
+        pool = set(joined.split())
+        hits = sum(1 for w in words if w in pool)
+        return hits / len(words) >= 0.8
 
     def _suppress_text(self) -> str:
         if self._clock() < self._last_spoken_until:
@@ -1237,6 +1268,9 @@ class Orchestrator:
         while True:
             text, detected = await self._transcribe(pcm)
             self._utterance_lang = self._lang_for(text, detected)
+            if is_followup and text and self._is_own_speech(text):
+                log.info("ignoring own speech echo on follow-up: %r", text)
+                text = ""
             self._emit("heard", text)
             log.info("heard=%r lang=%s", text, self._utterance_lang)
             intent = match_intent(text)

@@ -32,6 +32,7 @@ class Recorder:
         self._stop = threading.Event()
         self._finish = threading.Event()
         self._capturing = False
+        self.input_latency_s = 0.0
         self._hold = False
         self._armed = False
         self._on_level = on_level
@@ -54,6 +55,13 @@ class Recorder:
         with devices.refresh_lock:
             stream = sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=n)
             stream.__enter__()
+            # Remembered so a follow-up capture's echo skip can grow with
+            # the device's own latency (Bluetooth mics deliver audio
+            # hundreds of ms late, past the default followup_skip_ms).
+            try:
+                self.input_latency_s = float(stream.latency or 0.0)
+            except Exception:
+                self.input_latency_s = 0.0
         try:
             while True:
                 data, _ = stream.read(n)
@@ -213,6 +221,10 @@ class Recorder:
         hold_cap_frames = (wait_frames if wait_frames is not None else max_frames) if hold else None
         extra_frames = int(self.s.capture_extra_s * 1000 // fm)
         hop_frames = max(1, int(self.s.partial_hop_s * 1000 / fm))
+        if skip_ms > 0:
+            # never skip less than one input-latency worth (+ a little) of
+            # live frames: that's how late her own tail can still arrive
+            skip_ms = max(skip_ms, int(self.input_latency_s * 1000) + 100)
         skip_frames = skip_ms // fm
 
         n = self._frame_bytes()

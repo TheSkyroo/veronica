@@ -572,3 +572,32 @@ def test_recorder_registers_capture_in_flight_as_device_busy():
     assert devices.busy() is True
     r.disarm()
     assert devices.busy() is False
+
+
+async def test_followup_skip_grows_with_input_latency(monkeypatch):
+    """A Bluetooth mic reports ~300 ms latency: skip_ms=300 must become
+    latency+100 so her own tail (arriving that late) is dropped."""
+    r = make("sssss", monkeypatch, vad_silence_ms=90, min_speech_ms=60)
+    r.input_latency_s = 0.3
+    seen = {"n": 0}
+    orig = r._frames
+    def counting():
+        for f in orig():
+            seen["n"] += 1
+            yield f
+    r._frames = counting
+    await r.capture(max_s=1, skip_ms=300)
+    # 400 ms / 30 ms frames = 13 frames skipped before the VAD sees anything,
+    # plus whatever the capture itself consumed
+    assert seen["n"] >= 13 + 5
+    r2 = make("sssss", monkeypatch, vad_silence_ms=90, min_speech_ms=60)
+    r2.input_latency_s = 0.0
+    seen2 = {"n": 0}
+    orig2 = r2._frames
+    def counting2():
+        for f in orig2():
+            seen2["n"] += 1
+            yield f
+    r2._frames = counting2
+    await r2.capture(max_s=1, skip_ms=300)
+    assert seen2["n"] < seen["n"]

@@ -3596,3 +3596,27 @@ async def test_update_intent_with_bundle_relaunches_silently():
 ])
 def test_is_confirmation_contracted_question_words(heard, ok):
     assert Orchestrator.is_confirmation(heard) is ok
+
+
+# -- echo rejection: her own voice coming back through the mic ----------------
+
+def test_is_own_speech_matches_recent_sentences():
+    o, _ = build()
+    o._finished_speaking("It's 3:42 pm.")
+    o._finished_speaking("Anything else I can do for you today?")
+    assert o._is_own_speech("anything else I can do for you today")
+    assert o._is_own_speech("else I can do for you")            # partial echo
+    assert o._is_own_speech("anything else can do for you to day")  # mis-heard tokens
+    assert not o._is_own_speech("what's the weather like today")
+    assert not o._is_own_speech("yes")                            # too short to judge
+    o2, _ = build()
+    assert not o2._is_own_speech("anything else I can do for you today")  # nothing spoken yet
+
+
+async def test_followup_echo_of_own_reply_is_ignored():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+                      stt_texts=["tell me a joke", "sure done done"])
+    # Brain replies "Sure." and "Done."; the follow-up capture hears them back.
+    await o.one_turn()
+    assert o.brain.asked == ["tell me a joke"]
+    assert states[-1] == "idle"
