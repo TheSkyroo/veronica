@@ -273,3 +273,30 @@ async def test_live_screenshot_under_2mb():
     import base64
     data = base64.b64decode(res["content"][0]["data"])
     assert len(data) < 2 * 1024 * 1024
+
+
+async def test_screenshot_jpeg_still_big_retries_at_lower_quality(fake_screens_dir, monkeypatch):
+    """If the q80 JPEG is still over MAX_PNG_BYTES, re-encode at q60 so the
+    base64 stays under the Agent SDK's 1 MiB JSON line limit."""
+    big = b"\x89PNG" + b"\0" * (screen.MAX_PNG_BYTES + 1)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(big)
+        if argv[0] == "sips" and "--out" in argv:
+            q = argv[argv.index("formatOptions") + 1]
+            payload = b"\xff\xd8" + (b"\0" * (screen.MAX_PNG_BYTES + 5) if q == "80" else b"small")
+            with open(argv[argv.index("--out") + 1], "wb") as f:
+                f.write(payload)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert res["content"][0]["mimeType"] == "image/jpeg"
+    import base64
+    assert base64.b64decode(res["content"][0]["data"]) == b"\xff\xd8small"
+    qualities = [c[c.index("formatOptions") + 1] for c in calls if c[0] == "sips" and "--out" in c]
+    assert qualities == ["80", "60"]

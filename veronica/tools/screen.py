@@ -22,10 +22,14 @@ from veronica.config import settings
 TIMEOUT_S = 15
 SELECTION_TIMEOUT_S = 60   # the user has to drag out a region first
 DOWNSCALE_MAX_PX = 1568
-# PNGs bigger than this (busy 4K/5K screens) get re-encoded as JPEG q80
-# so the image block stays well inside the API's per-image limit.
-MAX_PNG_BYTES = 3 * 1024 * 1024
+# PNGs bigger than this get re-encoded as JPEG q80 (then q60 if still too
+# big). The Agent SDK's stream-json reader caps one JSON line at 1 MiB and
+# the base64 image travels inside it (~37% inflation plus the rest of the
+# message), so the raw image must stay well under that: a 407 KB PNG
+# already tripped "JSON message exceeded maximum buffer size of 1048576".
+MAX_PNG_BYTES = 300 * 1024
 JPEG_QUALITY = 80
+JPEG_QUALITY_LOW = 60
 REGIONS = ("screen", "window", "selection")
 LATEST_NAME = "latest.png"
 
@@ -133,14 +137,14 @@ def _capture_argv(region: str, out_path: Path) -> list[str] | None:
     return argv
 
 
-def _reencode_jpeg(png_path: Path) -> bytes | None:
+def _reencode_jpeg(png_path: Path, quality: int = JPEG_QUALITY) -> bytes | None:
     """Re-encode `png_path` as JPEG q80 via sips into a sibling temp file,
     return its bytes and delete it. None if anything fails (caller keeps
     the PNG)."""
     jpg_path = png_path.with_suffix(".jpg")
     try:
         done = subprocess.run(
-            ["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(JPEG_QUALITY),
+            ["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(quality),
              str(png_path), "--out", str(jpg_path)],
             capture_output=True, text=True, timeout=TIMEOUT_S,
         )
@@ -196,6 +200,8 @@ def capture_screenshot(region: str = "screen") -> tuple[bytes, Path, str] | str:
     mime = "image/png"
     if len(data) > MAX_PNG_BYTES:
         jpeg = _reencode_jpeg(out_path)
+        if jpeg is not None and len(jpeg) > MAX_PNG_BYTES:
+            jpeg = _reencode_jpeg(out_path, quality=JPEG_QUALITY_LOW) or jpeg
         if jpeg is not None:
             data, mime = jpeg, "image/jpeg"
     return data, out_path, mime
