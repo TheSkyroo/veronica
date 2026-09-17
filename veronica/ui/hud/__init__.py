@@ -408,6 +408,15 @@ class HudWindow:
             self._js("window.hud.setVisible(true)")
             self._panel.orderFrontRegardless()
             self._fade(1.0)
+            # One line per show so a "HUD disappeared" report can be
+            # matched against where the panel actually was and whether the
+            # page had loaded.
+            try:
+                f = self._panel.frame()
+                log.info("hud show mode=%s frame=(%.0f,%.0f %.0fx%.0f) loaded=%s",
+                         self._mode, f.origin.x, f.origin.y, f.size.width, f.size.height, self._loaded)
+            except Exception:
+                log.info("hud show mode=%s loaded=%s", self._mode, self._loaded)
         self._main(_do)
 
     def hide(self) -> None:
@@ -422,6 +431,7 @@ class HudWindow:
             if not self._closed:
                 self._js("window.hud.setVisible(false)")
             self._save_position()
+            log.info("hud hide mode=%s", self._mode)
             self._fade(0.0, then=_on_faded)
         self._main(_do)
 

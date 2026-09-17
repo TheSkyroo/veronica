@@ -21,6 +21,15 @@ def _fake_run() -> FakeRun:
     return FakeRun(GIT_SCRIPT)
 
 
+def _fake_compiler(source: str, out, defines: dict) -> None:
+    """Stand-in for clang: writes the C source plus the -D defines as text so
+    tests can assert what got baked into the launcher."""
+    out.write_text(source + "\n" + "\n".join(f"#define {k} \"{v}\"" for k, v in defines.items()) + "\n")
+
+
+FAKE_LIBPYTHON = Path("/fake/python/lib/libpython3.12.dylib")
+
+
 def _load_build_app():
     spec = importlib.util.spec_from_file_location("build_app", REPO / "scripts" / "build_app.py")
     mod = importlib.util.module_from_spec(spec)
@@ -36,6 +45,8 @@ def test_build_app_structure_and_plist(tmp_path):
         venv_python=Path("/fake/.venv/bin/python"),
         codesign_enabled=False,
         claude_bin=FAKE_CLAUDE,
+        compiler=_fake_compiler,
+        libpython=FAKE_LIBPYTHON,
         run=_fake_run(),
     )
 
@@ -53,16 +64,16 @@ def test_build_app_structure_and_plist(tmp_path):
     mode = launcher.stat().st_mode
     assert mode & stat.S_IXUSR
     text = launcher.read_text()
-    assert str(REPO) in text
-    assert "/fake/.venv/bin/python" in text
-    assert "-m veronica" in text
+    assert f'#define REPO_DIR "{REPO}"' in text
+    assert '#define VENV_PYTHON "/fake/.venv/bin/python"' in text
+    assert '#define LIBPYTHON "/fake/python/lib/libpython3.12.dylib"' in text
+    assert 'args[n++] = "-m";' in text and 'args[n++] = "veronica";' in text
 
-    # PATH is exported with the resolved claude dir before exec
-    assert 'export PATH="/fake/claude/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"' in text
-    assert 'export LANG="${LANG:-en_US.UTF-8}"' in text
-    path_idx = text.index("export PATH=")
-    exec_idx = text.index("exec ")
-    assert path_idx < exec_idx
+    # PATH is baked in with the resolved claude dir first, and set before Python starts
+    assert '#define PATH_PREFIX "/fake/claude/bin:' in text
+    assert "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" in text
+    assert 'setenv("PATH", PATH_PREFIX, 1);' in text
+    assert text.index('setenv("PATH"') < text.index("py_main(n, args)")
 
     with open(plist_path, "rb") as f:
         plist = plistlib.load(f)
@@ -85,16 +96,16 @@ def test_build_app_copies_icon_when_present(tmp_path):
     icns_src = REPO / "assets" / "Veronica.icns"
     if not icns_src.exists():
         pytest.skip("assets/Veronica.icns not built")
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, run=_fake_run())
+    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
     assert (app / "Contents" / "Resources" / "Veronica.icns").is_file()
 
 
 def test_build_app_is_idempotent(tmp_path):
     build_app = _load_build_app()
-    app1 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, run=_fake_run())
+    app1 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
     marker = app1 / "stray_file"
     marker.write_text("leftover")
-    app2 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, run=_fake_run())
+    app2 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
     assert app1 == app2
     assert not marker.exists()
 
@@ -104,7 +115,7 @@ def test_build_app_skips_codesign_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(build_app.shutil, "which", lambda name: None)
     # should not raise even though codesign_enabled=True (claude_bin passed
     # explicitly so the claude-resolution check isn't what's being tested here)
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=True, claude_bin=FAKE_CLAUDE, run=_fake_run())
+    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=True, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
     assert app.is_dir()
 
 
@@ -118,7 +129,7 @@ def test_build_app_fails_clearly_when_claude_not_found(tmp_path, monkeypatch):
 def test_build_app_resolves_claude_via_which(tmp_path, monkeypatch):
     build_app = _load_build_app()
     monkeypatch.setattr(build_app.shutil, "which", lambda name: "/opt/homebrew/bin/claude" if name == "claude" else None)
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, run=_fake_run())
+    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, run=_fake_run(), compiler=_fake_compiler, libpython=FAKE_LIBPYTHON)
     launcher = app / "Contents" / "MacOS" / "Veronica"
     assert "/opt/homebrew/bin" in launcher.read_text()
 
@@ -128,7 +139,7 @@ def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
 
     build_app = _load_build_app()
     run = _fake_run()
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, run=run)
+    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=run)
 
     build_json = app / "Contents" / "Resources" / "build.json"
     assert build_json.is_file()
@@ -141,9 +152,33 @@ def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
     assert all(kw.get("cwd") == REPO for kw in run.kwargs)
 
     text = (app / "Contents" / "MacOS" / "Veronica").read_text()
-    assert f'export VERONICA_BUNDLE_BUILD="{build_json}"' in text
-    assert text.index("export VERONICA_BUNDLE_BUILD=") < text.index("exec ")
+    assert f'#define BUILD_JSON "{build_json}"' in text
+    assert 'setenv("VERONICA_BUNDLE_BUILD", BUILD_JSON, 1);' in text
     # the launcher runs `python -m veronica` (argv0 = __main__.py), so it must
     # tell the process where the .app is for relaunch / Start at Login
-    assert f'export VERONICA_APP_BUNDLE="{app}"' in text
-    assert text.index("export VERONICA_APP_BUNDLE=") < text.index("exec ")
+    assert f'#define APP_BUNDLE "{app}"' in text
+    assert 'setenv("VERONICA_APP_BUNDLE", APP_BUNDLE, 1);' in text
+
+
+def test_build_app_fails_clearly_without_clang(tmp_path, monkeypatch):
+    build_app = _load_build_app()
+    monkeypatch.setattr(build_app.shutil, "which", lambda name: None if name == "clang" else "/fake/claude/bin/claude")
+    with pytest.raises(RuntimeError, match="clang not found"):
+        build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE,
+                            libpython=FAKE_LIBPYTHON, run=_fake_run())
+
+
+def test_libpython_for_resolves_symlinked_venv_python(tmp_path):
+    build_app = _load_build_app()
+    root = tmp_path / "cpython"
+    (root / "bin").mkdir(parents=True)
+    (root / "lib").mkdir()
+    (root / "bin" / "python3.12").write_text("")
+    (root / "lib" / "libpython3.12.dylib").write_text("")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(root / "bin" / "python3.12")
+    assert build_app._libpython_for(venv_bin / "python") == root / "lib" / "libpython3.12.dylib"
+    (root / "lib" / "libpython3.12.dylib").unlink()
+    with pytest.raises(RuntimeError, match="libpython"):
+        build_app._libpython_for(venv_bin / "python")

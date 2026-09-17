@@ -294,6 +294,13 @@ pull plus rebuild of the local checkout.
 
 ## Permissions
 
+> The bundle's executable is a small native launcher that embeds Python, so every macOS permission
+> prompt and Privacy & Security entry says **Veronica** (not "python3.12"). Building it needs `clang`
+> from the Xcode Command Line Tools (`xcode-select --install`). After upgrading from an older build,
+> re-grant Microphone, Screen Recording, Input Monitoring and Automation to Veronica — the old grants
+> belonged to the Python interpreter.
+
+
 Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
 **System Settings → Privacy & Security**:
 
