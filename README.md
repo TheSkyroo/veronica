@@ -165,13 +165,18 @@ granted, every action reports the missing permission instead of acting.
 and key presses ask for confirmation — but only once per app: after you say yes, further actions in the **same app**
 run without asking for the next **90 seconds** (the HUD shows them with the normal "auto" pill). Switching to a
 different app asks again, the window expires on its own, and it's cleared when you barge in, say "that's all", or
-answer no. Change the length (or set it to 0 to be asked every time) in **Settings → Brain → Screen-control trust
-window**.
+answer no. Change the length (or set it to 0 to be asked every time — that also closes a window that's already
+open) in **Settings → Brain → Screen-control trust window**. Two things the window never covers: **pressing Enter**
+(a "type … and press enter" or "press return" is confirmed every time — it submits whatever is in front), and
+**terminals** (Terminal, iTerm2, Warp, kitty, WezTerm, Alacritty, Ghostty — no window opens there and none applies,
+so every screen action in a terminal is confirmed on its own).
 
-**Safety rules.** She never types into a password field; she never clicks Allow/OK or presses Enter on a system
-permission dialog (those need a fresh confirmation regardless of the trust window, and "click Allow" is refused
-outright); she refuses combos that quit apps, force-quit, log out, lock or restart the Mac (cmd+q, cmd+opt+esc,
-cmd+ctrl+q and friends); and she stays off the Privacy & Security pane of System Settings.
+**Safety rules.** She never types into a password field; she refuses combos that quit apps, force-quit, log out,
+lock or restart the Mac (cmd+q, cmd+opt+esc, cmd+ctrl+q and friends). System permission dialogs and **System
+Settings** (any pane) are handled as a last line: every action there needs its own confirmation regardless of
+the trust window, and even once confirmed the tools themselves refuse blind clicks, drags, typing and Enter/Space
+while such a window is frontmost — the only buttons she will click there are Don't Allow / Deny / Cancel / Not
+Now / Close and the like, so she can never press Allow or OK (nor an OCR misread of them) on a permission prompt.
 
 ## Push-to-talk
 
@@ -362,7 +367,10 @@ for **Screen Recording** — approve all of these (System Settings → Privacy &
 push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
 Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is
 ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier (`io.manik.veronica`)
-doesn't change.
+doesn't change. **Accessibility** is the exception to watch: macOS ties that grant to the launcher's code hash
+(cdhash), which is stable as long as the launcher binary itself doesn't change — rebuilding the app around the
+same launcher keeps the grant, but a rebuilt or updated launcher needs Accessibility re-granted (remove and re-add
+Veronica in System Settings → Privacy & Security → Accessibility).
 
 The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
 `.venv` (and `.env`, models, `claude auth login`) you set up for `uv run` — there's no separate install step.

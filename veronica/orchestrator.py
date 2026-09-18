@@ -1093,6 +1093,19 @@ class Orchestrator:
         self._set("idle")
 
     # -- confirmation gate ----------------------------------------------------
+    # Summaries that already read as an action (the computer tools' "Click
+    # 'Save'", "Press cmd+s") are asked as themselves; anything else gets
+    # the generic "Run X?".
+    ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
+
+    @classmethod
+    def confirm_prompt(cls, summary: str) -> str:
+        """The spoken question for a tool `summary`: "Click 'Save'?" for a
+        screen action, "Run Bash: ls?" for everything else."""
+        if summary.startswith(cls.ACTION_SUMMARY_PREFIXES):
+            return f"{summary}?"
+        return f"Run {summary}?"
+
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
@@ -1123,7 +1136,7 @@ class Orchestrator:
                     log.info("confirm aborted by barge")
                     return result
                 self.player.reset()
-                prompt = question if question is not None else f"Run {summary}?"
+                prompt = question if question is not None else self.confirm_prompt(summary)
                 await self._say_unlocked(prompt, kind="prompt")
                 if self._barged:
                     # barged while the prompt was being spoken.

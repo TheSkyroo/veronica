@@ -179,7 +179,7 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "computer_trust_s": EditableField(
         "int", "Screen-control trust window (seconds)",
         "After you approve one click/type, further screen actions in the same app are allowed "
-        "for this long. 0 = ask every time.",
+        "for this long. 0 = ask every time. Never covers pressing Enter, terminals or system dialogs.",
         min=0, max=600, restart=False,
     ),
 }

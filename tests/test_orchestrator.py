@@ -121,6 +121,28 @@ async def test_confirm_yes_and_no():
     assert o.tts.said[0] == "Run Bash: ls?"
 
 
+@pytest.mark.parametrize("summary,prompt", [
+    ("Click 'Save'", "Click 'Save'?"),
+    ("Double-click (10, 20)", "Double-click (10, 20)?"),
+    ("Right-click (10, 20)", "Right-click (10, 20)?"),
+    ("Type 'hi' + Enter", "Type 'hi' + Enter?"),
+    ("Press cmd+s", "Press cmd+s?"),
+    ("Drag (1, 1) \u2192 (2, 2)", "Drag (1, 1) \u2192 (2, 2)?"),
+    ("Scroll down at (1, 1)", "Scroll down at (1, 1)?"),
+    ("Bash: ls", "Run Bash: ls?"),
+    ("Open Safari", "Run Open Safari?"),
+    ("Clicker", "Run Clicker?"),
+])
+def test_confirm_prompt_wording(summary, prompt):
+    assert Orchestrator.confirm_prompt(summary) == prompt
+
+
+async def test_confirm_screen_action_is_asked_as_the_action_itself():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    assert await o.confirm("Click 'Save'", "Click 'Save'") is True
+    assert o.tts.said[0] == "Click 'Save'?"
+
+
 async def test_confirm_question_override_replaces_default_prompt():
     o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
     assert await o.confirm("Quit Veronica", question="Quit Veronica?") is True

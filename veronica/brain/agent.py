@@ -22,7 +22,7 @@ from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.browser import browser_server
 from veronica.tools.computer import computer_server
-from veronica.tools.computer_events import Front, frontmost, is_system_dialog
+from veronica.tools.computer_events import Front, frontmost, is_system_dialog, normalize_combo
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -46,6 +46,35 @@ SCREEN_PREFIX = "mcp__screen__"
 MUSIC_PREFIX = "mcp__music__"
 BROWSER_PREFIX = "mcp__browser__"
 COMPUTER_PREFIX = "mcp__computer__"
+
+# Apps where the trust window never opens and never applies: a click or
+# keystroke in a terminal runs whatever is on the prompt line, so every
+# screen action there is confirmed on its own.
+TRUST_EXCLUDED_BUNDLES = frozenset({
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.Warp-Stable",
+    "net.kovidgoyal.kitty",
+    "com.github.wez.wezterm",
+    "io.alacritty",
+    "com.mitchellh.ghostty",
+})
+_ENTER_KEYS = frozenset({"enter", "return"})
+
+
+def _always_confirms(tool_name: str, input: dict) -> bool:
+    """Screen actions the trust window never covers: anything that presses
+    Enter (`computer_type` with submit, `computer_key` enter/return) —
+    it submits whatever is in front, so it always gets its own confirm."""
+    short = tool_name[len(COMPUTER_PREFIX):]
+    if short == "computer_type":
+        return bool(input.get("submit"))
+    if short == "computer_key":
+        try:
+            return normalize_combo(str(input.get("combo") or "")) in _ENTER_KEYS
+        except ValueError:
+            return False
+    return False
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -288,30 +317,41 @@ class Brain:
         self._trust_until = 0.0
         self._trust_app = None
 
+    @staticmethod
+    def _trustable(front: Front) -> bool:
+        """Can a trust window belong to `front` at all? Never for a system
+        dialog or a terminal, and never without a bundle id."""
+        return bool(front.bundle_id) and not is_system_dialog(front) and front.bundle_id not in TRUST_EXCLUDED_BUNDLES
+
     def _trusted(self, front: Front, now: float) -> bool:
         return (
-            self._trust_app is not None
+            self.s.computer_trust_s > 0          # setting it to 0 closes an open window
+            and self._trust_app is not None
             and now < self._trust_until
             and front.bundle_id == self._trust_app
-            and not is_system_dialog(front)
+            and self._trustable(front)
         )
 
     async def _gate_computer(self, tool_name: str, input: dict, summary: str):
         """Confirm gate for confirm-class `mcp__computer__*` tools. The
         frontmost app is looked up at gate time; a system permission dialog
         (`is_system_dialog`, keyed on bundle id — those windows have empty
-        titles) never gets the trust exemption."""
-        front = self._frontmost()
-        now = self._clock()
-        if self._trusted(front, now):
+        titles) or a terminal never gets the trust exemption, and neither
+        does anything that presses Enter (`_always_confirms`). After a
+        "yes" the frontmost app and clock are read again: the user may have
+        switched apps while being asked, and the window belongs to what is
+        in front now, from now."""
+        if not _always_confirms(tool_name, input) and self._trusted(self._frontmost(), self._clock()):
             log.info("trusted: %s", summary)
             if self._on_tool:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
         if await self._confirm(summary, summarize_detail(tool_name, input)):
+            front = self._frontmost()
+            now = self._clock()
             window = self.s.computer_trust_s
-            if window > 0 and front.bundle_id and not is_system_dialog(front):
+            if window > 0 and self._trustable(front):
                 self._trust_until = now + window
                 self._trust_app = front.bundle_id
                 log.info("trust window opened for %s (%ss)", front.bundle_id, window)
