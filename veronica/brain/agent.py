@@ -189,8 +189,32 @@ class Brain:
             self.s.session_file.unlink()
 
     # -- permission gate ------------------------------------------------------
+    # Shell commands that only "work" under a different TCC identity than the
+    # app (screencapture run by the Claude CLI child process needs its own
+    # Screen Recording grant) — redirect the brain to the in-process tool.
+    _REDIRECT_BASH = {
+        "screencapture": "Use the screenshot tool instead of screencapture — it runs inside Veronica, which has the Screen Recording permission.",
+    }
+
+    def _bash_redirect(self, tool_name: str, input: dict) -> str | None:
+        if tool_name != "Bash":
+            return None
+        try:
+            argv = shlex.split(str(input.get("command", "")))
+        except ValueError:
+            return None
+        for tok in argv:
+            base = os.path.basename(tok)
+            if base in self._REDIRECT_BASH:
+                return self._REDIRECT_BASH[base]
+        return None
+
     async def _can_use_tool(self, tool_name: str, input: dict, context):
         summary = summarize_tool(tool_name, input)
+        redirect = self._bash_redirect(tool_name, input)
+        if redirect is not None:
+            log.info("tool redirected: %s -> %s", summary, redirect)
+            return PermissionResultDeny(message=redirect)
         if classify(tool_name, input) == "allow":
             log.info("auto-allow: %s", summary)
             if self._on_tool:

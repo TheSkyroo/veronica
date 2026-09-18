@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from veronica.brain import agent as agent_mod
+from claude_agent_sdk.types import PermissionResultDeny
+
 from veronica.brain.agent import Brain, summarize_detail, summarize_tool
 from veronica.brain.prompts import FACTS_CAP_BYTES, RECENT_CAP_BYTES, system_prompt
 from veronica.config import Settings
@@ -725,3 +727,19 @@ def test_system_prompt_asks_for_same_language_replies():
     p = system_prompt(dt.date(2026, 9, 15))
     assert "reply in Hindi written in Devanagari script" in p
     assert "Hinglish" in p and "Devanagari" in p
+
+
+async def test_bash_screencapture_is_redirected_to_screenshot_tool():
+    confirms = []
+
+    async def confirm(summary, detail=""):
+        confirms.append(summary)
+        return True
+
+    b = Brain(Settings(), confirm=confirm)
+    res = await b._can_use_tool("Bash", {"command": "screencapture -x /tmp/shot.png"}, None)
+    assert isinstance(res, PermissionResultDeny)
+    assert "screenshot tool" in res.message
+    assert confirms == []                      # never even asked the user
+    res2 = await b._can_use_tool("Bash", {"command": "/usr/sbin/screencapture -x a.png"}, None)
+    assert isinstance(res2, PermissionResultDeny)

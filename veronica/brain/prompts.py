@@ -73,7 +73,7 @@ def system_prompt(
         "user explicitly names. "
         "You can read the user's calendar, unread mail and reminders and set timers "
         "with your tools; prefer them over shell commands for these. "
-        "You can see the user's screen with the screenshot tool when they refer to "
+        "You can see the user's screen with the screenshot tool (never the screencapture shell command) when they refer to "
         "what they're looking at."
         " When the user refers to this page, this tab, the current article or site, or asks you "
         "to do something inside the browser, use the browser tools; summarise browser_read output "
