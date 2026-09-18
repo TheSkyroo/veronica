@@ -426,13 +426,19 @@ def test_frontmost_survives_window_list_failure(monkeypatch):
     ("com.apple.systempreferences", "Privacy & Security", True),
     ("com.apple.systempreferences", "Accessibility — privacy", True),
     ("com.apple.systempreferences", "Login Security", True),
-    ("com.apple.systempreferences", "Displays", False),
-    ("com.apple.systempreferences", "", False),
+    ("com.apple.systempreferences", "Displays", True),      # any pane: unconditionally sensitive
+    ("com.apple.systempreferences", "", True),
+    ("com.apple.accessibility.universalAccessAuthWarn", "", True),
     ("com.apple.TextEdit", "Privacy & Security", False),
     ("", "", False),
 ])
 def test_is_system_dialog(bundle, title, expected):
     assert ce.is_system_dialog(Front(app="x", bundle_id=bundle, window_title=title, pid=1)) is expected
+
+
+def test_system_dialog_bundles_table():
+    assert {"com.apple.SecurityAgent", "com.apple.UserNotificationCenter", "com.apple.coreservices.uiagent",
+            "com.apple.accessibility.universalAccessAuthWarn"} <= ce.SYSTEM_DIALOG_BUNDLES
 
 
 def test_disallowed_dialog_targets_table():

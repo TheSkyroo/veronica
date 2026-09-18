@@ -222,7 +222,11 @@ async def test_bad_coordinates_are_an_error(fakes):
     calls, _ = fakes
     res = await c.computer_click.handler({"x": "left", "y": 3})
     assert res.get("is_error")
+    # a ValueError is spoken bare — no "ValueError:" prefix for the user to hear
+    assert text(res) == "x must be a number, not 'left'"
     assert calls == []
+    res = await c.computer_click.handler({"x": 5000, "y": 3})
+    assert text(res) == c._outside(5000, 3)
 
 
 # --- click / drag / scroll ---------------------------------------------------
@@ -411,6 +415,63 @@ async def test_click_text_allows_other_buttons_in_dialog_and_allow_elsewhere(fak
     assert not res.get("is_error") and len(calls) == 2
 
 
+async def test_drag_refused_on_system_dialog(fakes):
+    """A zero-length drag is a click, so drags are refused like clicks."""
+    calls, state = fakes
+    state["front"] = DIALOG
+    res = await c.computer_drag.handler({"x1": 10, "y1": 10, "x2": 10, "y2": 10})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+    res = await c.computer_drag.handler({"x1": 10, "y1": 10, "x2": 200, "y2": 200})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+
+
+@pytest.mark.parametrize("label", ["Don't Allow", "Dont Allow", "DENY", "Cancel", "Not Now", "Quit",
+                                   "Close", "Later", "No", "Don’t Allow", "Cancei"])
+async def test_click_text_dialog_allowlist_clicks_safe_labels(fakes, label):
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word(label, 0, 0, 10, 10, 0.9), Word("Allow", 50, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": label})
+    assert not res.get("is_error"), (label, text(res))
+    assert calls == [("click", 102.5, 52.5, "left", False)]
+
+
+@pytest.mark.parametrize("label", ["AIlow", "0K", "Allow", "Always Allow", "Open System Settings",
+                                   "Continue", "Install", "Trust", "Save", "Next", "Yes", "Unlock",
+                                   "Don't Allow Allow", "Can", ""])
+async def test_click_text_dialog_refuses_everything_off_the_allowlist(fakes, label):
+    """On a system dialog only the allowlist is clickable: an OCR misread of
+    Allow/OK ("AIlow", "0K") or any other label is refused."""
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word(label or "x", 0, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": label or "x"})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT, label
+    assert calls == []
+
+
+async def test_click_text_dialog_query_safe_but_match_unsafe_is_refused(fakes):
+    """The allowlist applies to the label actually clicked, not the query."""
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word("Cancel Allow", 0, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": "Cancel"})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+
+
+def test_dialog_safe_label():
+    assert c._dialog_safe("Don't Allow") and c._dialog_safe("  DENY ") and c._dialog_safe("Cancel")
+    assert c._dialog_safe("Cancei")        # OCR near-miss of a safe label still passes
+    assert not c._dialog_safe("AIlow") and not c._dialog_safe("0K") and not c._dialog_safe("Allow")
+    assert not c._dialog_safe("") and not c._dialog_safe("Save")
+    assert c.DIALOG_SAFE_LABELS == frozenset({
+        "don't allow", "dont allow", "deny", "cancel", "not now", "quit", "close", "later", "no",
+    })
+
+
 # --- type / key --------------------------------------------------------------
 
 async def test_type_text_and_submit(fakes):
@@ -454,13 +515,17 @@ async def test_key_enter_allowed_outside_dialogs(fakes):
     assert not res.get("is_error") and calls == [("key", "enter")]
 
 
-async def test_type_submit_refused_on_system_dialog(fakes):
+@pytest.mark.parametrize("args", [{"text": "hi", "submit": True}, {"text": "hi"}, {"submit": True}])
+async def test_type_refused_entirely_on_system_dialog(fakes, args):
+    """There is no legitimate text for a permission prompt: typing (not
+    just submit) is refused while one is frontmost."""
     calls, state = fakes
     state["front"] = DIALOG
-    res = await c.computer_type.handler({"text": "hi", "submit": True})
+    res = await c.computer_type.handler(args)
     assert res.get("is_error") and text(res) == c.DIALOG_HINT
     assert calls == []
-    res = await c.computer_type.handler({"text": "hi"})     # plain typing is still fine
+    state["front"] = FRONT
+    res = await c.computer_type.handler({"text": "hi"})     # fine elsewhere
     assert not res.get("is_error") and calls == [("type_text", "hi")]
 
 

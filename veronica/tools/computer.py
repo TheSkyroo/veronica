@@ -11,9 +11,13 @@ need no geometry.
 
 Safety, in the tool (in addition to the confirm gate in the brain):
 Accessibility must be granted (the first call asks macOS to prompt),
-password fields are never typed into, "Allow"-style buttons are never
-clicked while a system permission dialog is up, and app-quit/lock
-combos are refused by `computer_events.key`.
+password fields are never typed into, and app-quit/lock combos are
+refused by `computer_events.key`. While a system permission dialog is
+frontmost (`computer_events.is_system_dialog`) this is the last line:
+blind clicks, drags, typing and the accept keys are refused outright,
+and `computer_click_text` may only press a label on `DIALOG_SAFE_LABELS`
+(Don't Allow / Cancel / Deny / ...) — never Allow, OK or an OCR misread
+of them.
 
 Every action ends with a short settle, then reports the frontmost app so
 the brain can tell whether focus moved (it should still screenshot to
@@ -21,6 +25,7 @@ verify). Primitives are called through the `computer_events` module
 attribute so tests can swap in recording fakes.
 """
 import asyncio
+import difflib
 import logging
 import math
 
@@ -40,6 +45,13 @@ log = logging.getLogger("veronica.tools.computer")
 STALE_HINT = "Take a screenshot first — I need a fresh view of the screen to know where things are."
 SECURE_HINT = "That's a password field — I won't type into it."
 DIALOG_HINT = "I won't click through a system permission dialog — please do that one yourself."
+# The only button labels computer_click_text will press while a system
+# dialog is frontmost (fuzzy-matched so an OCR near-miss of "Cancel" still
+# works, but "AIlow"/"0K" never do).
+DIALOG_SAFE_LABELS = frozenset({
+    "don't allow", "dont allow", "deny", "cancel", "not now", "quit", "close", "later", "no",
+})
+DIALOG_SAFE_RATIO = 0.8
 DANGEROUS_HINT = "I won't press that — it would quit or lock the Mac."
 FIND_MAX = 10
 SETTLE_S = 0.15          # let the app react before reporting the frontmost window
@@ -71,6 +83,9 @@ def _guard(fn):
     async def wrapper(args: dict) -> dict:
         try:
             return await fn(args)
+        except ValueError as exc:
+            # argument problems are already worded for the user
+            return _err(str(exc))
         except Exception as exc:
             log.exception("computer tool failed")
             return _err(f"{type(exc).__name__}: {exc}")
@@ -95,12 +110,29 @@ def _on_system_dialog() -> bool:
     return events.is_system_dialog(events.frontmost())
 
 
+def _norm_label(label: str) -> str:
+    return " ".join(label.replace("\u2019", "'").lower().split())
+
+
 def _dialog_target(label: str) -> bool:
     """True for button labels that grant a permission dialog: the denylist
     exactly, or anything starting with "always allow" — while "Don't
-    Allow" stays clickable."""
-    norm = " ".join(label.lower().split())
+    Allow" stays clickable. Used as the early, query-level refusal."""
+    norm = _norm_label(label)
     return norm in DISALLOWED_DIALOG_TARGETS or norm.startswith("always allow")
+
+
+def _dialog_safe(label: str) -> bool:
+    """True when `label` fuzzy-matches (difflib ratio >= 0.8, normalised)
+    one of `DIALOG_SAFE_LABELS` — the only buttons clickable on a system
+    dialog. Everything else, including OCR misreads of Allow/OK, is not."""
+    norm = _norm_label(label)
+    if not norm:
+        return False
+    return any(
+        norm == safe or difflib.SequenceMatcher(None, norm, safe).ratio() >= DIALOG_SAFE_RATIO
+        for safe in DIALOG_SAFE_LABELS
+    )
 
 
 def _outside(x: float, y: float) -> str:
@@ -305,8 +337,9 @@ async def computer_click_text(args: dict) -> dict:
         return _err(f"index {index} is out of range: {n} match{'es' if n != 1 else ''} for '{query}'")
     match = matches[index]
     # OCR matching is contains/fuzzy: "Allo" or "always" would resolve to
-    # the Allow button, so the label actually being clicked is checked too.
-    if on_dialog and _dialog_target(match.text):
+    # the Allow button, and Vision can misread Allow as "AIlow" — so on a
+    # dialog the label actually being clicked must be on the allowlist.
+    if on_dialog and not _dialog_safe(match.text):
         return _err(DIALOG_HINT)
     cx, cy = match.center
     x, y = geometry.to_screen(cx, cy)
@@ -316,9 +349,10 @@ async def computer_click_text(args: dict) -> dict:
 
 @tool(
     "computer_drag",
-    "Left-drag from (x1, y1) to (x2, y2). Coordinates are pixels of the last "
-    "screenshot by default; space='screen' means screen points. Needs a "
-    "screenshot from the last two minutes.",
+    "Left-drag from (x1, y1) to (x2, y2). Refused while a system permission "
+    "dialog is frontmost. Coordinates are pixels of the last screenshot by "
+    "default; space='screen' means screen points. Needs a screenshot from "
+    "the last two minutes.",
     {"x1": float, "y1": float, "x2": float, "y2": float, "space": str},
 )
 @_guard
@@ -330,6 +364,9 @@ async def computer_drag(args: dict) -> dict:
         return _err(geometry)
     x1, y1 = _coords(args, geometry, "x1", "y1")
     x2, y2 = _coords(args, geometry, "x2", "y2")
+    if _on_system_dialog():
+        # a zero-length drag is a click
+        return _err(DIALOG_HINT)
     await _run(events.drag, x1, y1, x2, y2)
     return await _done()
 
@@ -337,7 +374,8 @@ async def computer_drag(args: dict) -> dict:
 @tool(
     "computer_type",
     "Type text into whatever has keyboard focus (click a field first); "
-    "submit=true presses Enter afterwards. Refuses password fields.",
+    "submit=true presses Enter afterwards. Refuses password fields and "
+    "system permission dialogs.",
     {"text": str, "submit": bool},
 )
 @_guard
@@ -350,7 +388,8 @@ async def computer_type(args: dict) -> dict:
         return _err(PERMISSION_HINT)
     if events.focused_is_secure():
         return _err(SECURE_HINT)
-    if submit and _on_system_dialog():
+    if _on_system_dialog():
+        # there is no legitimate text for a permission prompt
         return _err(DIALOG_HINT)
     if text:
         await _run(events.type_text, text)

@@ -26,14 +26,16 @@ TYPE_CHUNK_GAP_S = 0.01
 CLICK_GAP_S = 0.02
 
 # Bundle ids whose windows are OS permission/security dialogs. System
-# Settings only counts when its window is a Privacy/Security pane.
+# Settings counts unconditionally: its window title is unreliable (often
+# empty, or the sidebar section rather than the pane), and any pane is
+# one click from Privacy & Security.
 SYSTEM_DIALOG_BUNDLES = frozenset({
     "com.apple.SecurityAgent",
     "com.apple.UserNotificationCenter",
     "com.apple.coreservices.uiagent",
+    "com.apple.accessibility.universalAccessAuthWarn",
+    "com.apple.systempreferences",
 })
-SYSTEM_SETTINGS_BUNDLE = "com.apple.systempreferences"
-SYSTEM_SETTINGS_SENSITIVE_TITLES = ("privacy", "security")
 
 # Button labels Veronica must never click while a system dialog is up.
 DISALLOWED_DIALOG_TARGETS = frozenset({
@@ -410,9 +412,4 @@ def frontmost() -> Front:
 def is_system_dialog(front: Front) -> bool:
     """True when `front` is an OS permission/security dialog — where
     "Allow"-style clicks are refused and every action needs a confirm."""
-    if front.bundle_id in SYSTEM_DIALOG_BUNDLES:
-        return True
-    if front.bundle_id == SYSTEM_SETTINGS_BUNDLE:
-        title = front.window_title.lower()
-        return any(word in title for word in SYSTEM_SETTINGS_SENSITIVE_TITLES)
-    return False
+    return front.bundle_id in SYSTEM_DIALOG_BUNDLES
