@@ -20,6 +20,7 @@ from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.browser import browser_server
+from veronica.tools.computer import computer_server
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -42,6 +43,7 @@ MEMORY_PREFIX = "mcp__memory__"
 SCREEN_PREFIX = "mcp__screen__"
 MUSIC_PREFIX = "mcp__music__"
 BROWSER_PREFIX = "mcp__browser__"
+COMPUTER_PREFIX = "mcp__computer__"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -59,6 +61,46 @@ def summarize_tool(tool_name: str, input: dict) -> str:
     elif tool_name in ("Write", "Edit") and input.get("file_path"):
         desc = f"{desc} in {os.path.basename(str(input['file_path']))}"
     return desc[:80].rstrip(".")
+
+
+def _pt(input: dict, xk: str = "x", yk: str = "y") -> str:
+    def n(v):
+        try:
+            return str(round(float(v)))
+        except (TypeError, ValueError):
+            return str(v)
+    return f"({n(input.get(xk, ''))}, {n(input.get(yk, ''))})"
+
+
+def _summarize_computer(short: str, input: dict) -> str:
+    if short == "computer_click":
+        verb = "Double-click" if input.get("double") else ("Right-click" if input.get("button") == "right" else "Click")
+        return f"{verb} {_pt(input)}"
+    if short == "computer_click_text":
+        verb = "Double-click" if input.get("double") else "Click"
+        return f"{verb} '{input.get('text', '')}'"
+    if short == "computer_drag":
+        return f"Drag {_pt(input, 'x1', 'y1')} \u2192 {_pt(input, 'x2', 'y2')}"
+    if short == "computer_type":
+        desc = f"Type '{str(input.get('text', ''))[:40]}'"
+        return desc + " + Enter" if input.get("submit") else desc
+    if short == "computer_key":
+        return f"Press {input.get('combo', '')}"
+    if short == "computer_scroll":
+        try:
+            dx, dy = float(input.get("dx") or 0), float(input.get("dy") or 0)
+        except (TypeError, ValueError):
+            dx, dy = 0.0, 1.0
+        if dy:
+            direction = "down" if dy > 0 else "up"
+        else:
+            direction = "right" if dx > 0 else "left"
+        return f"Scroll {direction} at {_pt(input)}"
+    if short == "computer_move":
+        return f"Move to {_pt(input)}"
+    if short == "computer_find":
+        return f"Find '{input.get('text', '')}' on screen"
+    return short
 
 
 def summarize_detail(tool_name: str, input: dict) -> str:
@@ -148,6 +190,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "browser_back":
             return "Go back"
         return short
+    if tool_name.startswith(COMPUTER_PREFIX):
+        return _summarize_computer(tool_name[len(COMPUTER_PREFIX):], input)
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
     for key in ("command", "query", "url", "pattern", "file_path"):
@@ -250,7 +294,7 @@ class Brain:
             mcp_servers={
                 "mac": mac_server, "pim": pim_server, "memory": memory_server,
                 "screen": screen_server, "music": music_server,
-                "browser": browser_server,
+                "browser": browser_server, "computer": computer_server,
             },
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool

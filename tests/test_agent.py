@@ -743,3 +743,44 @@ async def test_bash_screencapture_is_redirected_to_screenshot_tool():
     assert confirms == []                      # never even asked the user
     res2 = await b._can_use_tool("Bash", {"command": "/usr/sbin/screencapture -x a.png"}, None)
     assert isinstance(res2, PermissionResultDeny)
+
+
+@pytest.mark.parametrize("short,inp,expected", [
+    ("computer_click", {"x": 812, "y": 431}, "Click (812, 431)"),
+    ("computer_click", {"x": 812.4, "y": 431.6, "double": True}, "Double-click (812, 432)"),
+    ("computer_click", {"x": 1, "y": 2, "button": "right"}, "Right-click (1, 2)"),
+    ("computer_click_text", {"text": "Save"}, "Click 'Save'"),
+    ("computer_click_text", {"text": "Save", "double": True}, "Double-click 'Save'"),
+    ("computer_drag", {"x1": 10, "y1": 10, "x2": 300, "y2": 300}, "Drag (10, 10) → (300, 300)"),
+    ("computer_type", {"text": "hello"}, "Type 'hello'"),
+    ("computer_type", {"text": "hello", "submit": True}, "Type 'hello' + Enter"),
+    ("computer_type", {"text": "x" * 50}, "Type '" + "x" * 40 + "'"),
+    ("computer_key", {"combo": "cmd+s"}, "Press cmd+s"),
+    ("computer_scroll", {"x": 500, "y": 400, "dy": 300}, "Scroll down at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dy": -300}, "Scroll up at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dx": 20}, "Scroll right at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dx": -20}, "Scroll left at (500, 400)"),
+    ("computer_move", {"x": 5, "y": 6}, "Move to (5, 6)"),
+    ("computer_find", {"text": "Save"}, "Find 'Save' on screen"),
+    ("computer_other", {}, "computer_other"),
+])
+def test_summarize_computer_tools(short, inp, expected):
+    assert summarize_detail(f"mcp__computer__{short}", inp) == expected
+
+
+async def test_options_register_computer_server(brain):
+    [s async for s in brain.ask("x")]
+    o = FakeClient.instances[0].options
+    assert "computer" in o.mcp_servers
+
+
+def test_system_prompt_has_computer_use_rules():
+    p = system_prompt(dt.date(2026, 9, 15))
+    assert (
+        "You can also act on the screen with the computer tools: take a screenshot, use "
+        "computer_find to locate text, then computer_click_text/computer_click/computer_type/"
+        "computer_key; coordinates are pixels of the last screenshot. After any action take a "
+        "fresh screenshot before claiming it worked. Never type passwords or secrets, never click "
+        "Allow/OK in system permission dialogs, and don't change settings under System Settings > "
+        "Privacy & Security unless the user asked for exactly that."
+    ) in p

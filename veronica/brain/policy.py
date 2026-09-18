@@ -89,6 +89,20 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "browser_click": "confirm",
         "browser_type": "confirm",
     },
+    "computer": {
+        # Pointer moves, scrolling and OCR change nothing on their own.
+        "computer_move": "allow",
+        "computer_scroll": "allow",
+        "computer_find": "allow",
+        # Anything that presses a button or key acts in the frontmost app:
+        # confirm (the trust window in Brain._can_use_tool may auto-allow a
+        # follow-up in the same app for a short while).
+        "computer_click": "confirm",
+        "computer_click_text": "confirm",
+        "computer_drag": "confirm",
+        "computer_type": "confirm",
+        "computer_key": "confirm",
+    },
 }
 
 MCP_PREFIX_FMT = "mcp__{server}__"

@@ -156,3 +156,12 @@ def test_classify(tool, inp, expected):
 ])
 def test_browser_tool_risk(short, expected):
     assert classify(f"mcp__browser__{short}", {}) == expected
+
+
+@pytest.mark.parametrize("short,expected", [
+    ("computer_move", "allow"), ("computer_scroll", "allow"), ("computer_find", "allow"),
+    ("computer_click", "confirm"), ("computer_click_text", "confirm"), ("computer_drag", "confirm"),
+    ("computer_type", "confirm"), ("computer_key", "confirm"), ("computer_unknown", "confirm"),
+])
+def test_computer_tool_risk(short, expected):
+    assert classify(f"mcp__computer__{short}", {}) == expected
