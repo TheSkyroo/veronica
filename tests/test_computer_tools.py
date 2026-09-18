@@ -54,6 +54,7 @@ def fakes(monkeypatch):
     monkeypatch.setattr(screen, "load_geometry", lambda path=None: state["geometry"])
     monkeypatch.setattr(ocr, "recognize_text", lambda p, **kw: state["words"])
     monkeypatch.setattr(c, "_sleep", sleep)
+    c.reset_prompt()
     return calls, state
 
 
@@ -78,6 +79,19 @@ async def test_permission_hint_when_not_trusted(fakes, tool, args):
     assert res.get("is_error") and text(res) == ev.PERMISSION_HINT
     assert state["prompted"] == [True]     # macOS prompt requested once
     assert calls == []
+
+
+async def test_permission_prompt_only_once_per_process(fakes):
+    _, state = fakes
+    state["trusted"] = False
+    for _ in range(3):
+        res = await c.computer_key.handler({"combo": "enter"})
+        assert text(res) == ev.PERMISSION_HINT
+    assert state["prompted"] == [True, False, False]
+    state["trusted"] = True                  # granted later: no prompt needed, works
+    res = await c.computer_key.handler({"combo": "enter"})
+    assert not res.get("is_error")
+    assert state["prompted"][-1] is False
 
 
 @pytest.mark.parametrize("tool,args", ACTION_TOOLS)
@@ -114,8 +128,33 @@ def test_coords_image_default_converts_via_geometry():
 
 
 def test_coords_screen_space_passthrough():
-    assert c._coords({"x": 200, "y": 100, "space": "screen"}, _geometry()) == (200.0, 100.0 + 0)
-    assert c._coords({"x": 7, "y": 9, "space": "screen"}, _geometry()) == (7.0, 9.0)
+    assert c._coords({"x": 200, "y": 100, "space": "screen"}, _geometry()) == (200.0, 100.0)
+    assert c._coords({"x": 107, "y": 59, "space": "screen"}, _geometry()) == (107.0, 59.0)
+
+
+@pytest.mark.parametrize("x,y", [(-1, 10), (10, -0.5), (1569, 10), (10, 1020), (99999, 99999)])
+def test_coords_image_out_of_bounds(x, y):
+    with pytest.raises(ValueError, match="outside the last screenshot"):
+        c._coords({"x": x, "y": y}, _geometry())
+
+
+def test_coords_image_edges_are_inside():
+    assert c._coords({"x": 0, "y": 0}, _geometry()) == (100.0, 50.0)
+    assert c._coords({"x": 1568, "y": 1019}, _geometry()) == (884.0, 559.5)
+
+
+@pytest.mark.parametrize("x,y", [(99, 60), (110, 49), (885, 60), (110, 560), (7, 9)])
+def test_coords_screen_space_outside_captured_area(x, y):
+    with pytest.raises(ValueError, match="outside the last screenshot"):
+        c._coords({"x": x, "y": y, "space": "screen"}, _geometry())
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", float("nan"), float("inf"), "NaN"])
+def test_coords_reject_non_finite(bad):
+    with pytest.raises(ValueError, match="finite"):
+        c._coords({"x": bad, "y": 1}, _geometry())
+    with pytest.raises(ValueError, match="finite"):
+        c._coords({"x": 1, "y": bad, "space": "screen"}, _geometry())
 
 
 def test_coords_custom_keys_and_bad_values():
@@ -137,8 +176,46 @@ async def test_move_screen_space(fakes):
     calls, _ = fakes
     await c.computer_move.handler({"x": 200, "y": 100, "space": "screen"})
     assert calls == [("move", 200.0, 100.0)]
-    await c.computer_move.handler({"x": 7, "y": 9, "space": "screen"})
-    assert calls[-1] == ("move", 7.0, 9.0)
+    await c.computer_move.handler({"x": 107, "y": 59, "space": "screen"})
+    assert calls[-1] == ("move", 107.0, 59.0)
+
+
+OUTSIDE = "(-5, 10) is outside the last screenshot — take a new one or pick a point on it."
+
+
+@pytest.mark.parametrize("tool,args", [
+    (c.computer_move, {"x": -5, "y": 10}),
+    (c.computer_scroll, {"x": -5, "y": 10, "dy": 5}),
+    (c.computer_click, {"x": -5, "y": 10}),
+    (c.computer_drag, {"x1": -5, "y1": 10, "x2": 2, "y2": 2}),
+    (c.computer_drag, {"x1": 2, "y1": 2, "x2": -5, "y2": 10}),
+])
+async def test_positional_tools_reject_points_off_the_screenshot(fakes, tool, args):
+    calls, _ = fakes
+    res = await tool.handler(args)
+    assert res.get("is_error") and text(res).endswith(OUTSIDE)
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", 1e400])
+async def test_positional_tools_reject_non_finite(fakes, bad):
+    calls, _ = fakes
+    res = await c.computer_click.handler({"x": bad, "y": 10})
+    assert res.get("is_error") and "finite" in text(res)
+    assert calls == []
+
+
+async def test_screen_space_click_outside_window_capture(fakes):
+    calls, state = fakes
+    state["geometry"] = Geometry(
+        region="window", image_w=800, image_h=600, origin_x=300, origin_y=200,
+        width_pt=400, height_pt=300, scale=2.0, captured_at=995.0,
+        window={"id": 1, "app": "Notes", "title": "n", "x": 300, "y": 200, "w": 400, "h": 300},
+    )
+    res = await c.computer_click.handler({"x": 50, "y": 50, "space": "screen"})
+    assert res.get("is_error") and "outside the last screenshot" in text(res)
+    res = await c.computer_click.handler({"x": 350, "y": 250, "space": "screen"})
+    assert not res.get("is_error") and calls == [("click", 350.0, 250.0, "left", False)]
 
 
 async def test_bad_coordinates_are_an_error(fakes):
@@ -274,6 +351,55 @@ async def test_click_text_refuses_system_dialog_buttons(fakes, target):
     assert calls == []
 
 
+@pytest.mark.parametrize("query", ["Allo", "Alow", "always", "llow", "ALLOW ", "ok"])
+async def test_click_text_refuses_when_the_matched_label_is_allow(fakes, query):
+    """OCR matching is contains/fuzzy: a near-miss query must not slip
+    through to the Allow button — the label actually clicked is checked."""
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word("Allow", 0, 0, 10, 10, 0.9), Word("Always Allow", 50, 0, 10, 10, 0.9),
+                      Word("OK", 100, 0, 10, 10, 0.9), Word("Don't Allow", 150, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": query})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT, query
+    assert calls == []
+
+
+async def test_click_text_near_miss_resolving_to_dont_allow_still_clicks(fakes):
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word("Don't Allow", 0, 0, 10, 10, 0.9), Word("Allow", 50, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": "Allo"})     # first match is Don't Allow
+    assert not res.get("is_error") and calls == [("click", 102.5, 52.5, "left", False)]
+
+
+async def test_click_text_index_into_allow_is_refused(fakes):
+    calls, state = fakes
+    state["front"] = DIALOG
+    state["words"] = [Word("Don't Allow", 0, 0, 10, 10, 0.9), Word("Always Allow", 50, 0, 10, 10, 0.9)]
+    res = await c.computer_click_text.handler({"text": "allow", "index": 1})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+
+
+def test_dialog_target_labels():
+    assert c._dialog_target("Allow") and c._dialog_target("  always   ALLOW ") and c._dialog_target("Always Allow on this Mac")
+    assert c._dialog_target("OK") and c._dialog_target("Open System Settings")
+    assert not c._dialog_target("Don't Allow") and not c._dialog_target("Cancel") and not c._dialog_target("Allow once?")
+
+
+async def test_click_refused_on_system_dialog(fakes):
+    calls, state = fakes
+    state["front"] = DIALOG
+    res = await c.computer_click.handler({"x": 10, "y": 10})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+    state["front"] = Front(app="System Settings", bundle_id="com.apple.systempreferences",
+                           window_title="Privacy & Security", pid=3)
+    res = await c.computer_click.handler({"x": 10, "y": 10})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+
+
 async def test_click_text_allows_other_buttons_in_dialog_and_allow_elsewhere(fakes):
     calls, state = fakes
     state["front"] = DIALOG
@@ -302,6 +428,40 @@ async def test_type_refuses_secure_field(fakes):
     res = await c.computer_type.handler({"text": "hunter2"})
     assert res.get("is_error") and text(res) == c.SECURE_HINT
     assert calls == []
+
+
+@pytest.mark.parametrize("combo", ["enter", "Return", "space", "spacebar", "ENTER"])
+async def test_key_refuses_accept_keys_on_system_dialog(fakes, combo):
+    calls, state = fakes
+    state["front"] = DIALOG
+    res = await c.computer_key.handler({"combo": combo})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+
+
+@pytest.mark.parametrize("combo", ["esc", "tab", "cmd+enter", "shift+space"])
+async def test_key_other_keys_still_allowed_on_system_dialog(fakes, combo):
+    calls, state = fakes
+    state["front"] = DIALOG
+    res = await c.computer_key.handler({"combo": combo})
+    assert not res.get("is_error")
+    assert calls == [("key", combo)]
+
+
+async def test_key_enter_allowed_outside_dialogs(fakes):
+    calls, _ = fakes
+    res = await c.computer_key.handler({"combo": "enter"})
+    assert not res.get("is_error") and calls == [("key", "enter")]
+
+
+async def test_type_submit_refused_on_system_dialog(fakes):
+    calls, state = fakes
+    state["front"] = DIALOG
+    res = await c.computer_type.handler({"text": "hi", "submit": True})
+    assert res.get("is_error") and text(res) == c.DIALOG_HINT
+    assert calls == []
+    res = await c.computer_type.handler({"text": "hi"})     # plain typing is still fine
+    assert not res.get("is_error") and calls == [("type_text", "hi")]
 
 
 async def test_type_requires_text(fakes):

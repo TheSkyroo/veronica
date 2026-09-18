@@ -22,6 +22,7 @@ attribute so tests can swap in recording fakes.
 """
 import asyncio
 import logging
+import math
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -43,7 +44,17 @@ DANGEROUS_HINT = "I won't press that — it would quit or lock the Mac."
 FIND_MAX = 10
 SETTLE_S = 0.15          # let the app react before reporting the frontmost window
 SPACES = ("image", "screen")
+# Key names that accept a dialog's default button — Enter is "Allow" on a
+# permission prompt, so they're refused while a system dialog is frontmost.
+ACCEPT_KEYS = frozenset({"enter", "return", "space", "spacebar"})
 _sleep = asyncio.sleep   # module attr so tests can stub the settle
+_prompted = False        # Accessibility prompt shown once per process
+
+
+def reset_prompt() -> None:
+    """Allow the Accessibility prompt again (tests)."""
+    global _prompted
+    _prompted = False
 
 
 def _ok(text: str = "ok") -> dict:
@@ -70,9 +81,30 @@ def _guard(fn):
 # --- gates -------------------------------------------------------------------
 
 def _trusted() -> bool:
-    """Accessibility granted? `prompt=True` makes macOS show the grant
-    prompt the first time it isn't."""
-    return events.accessibility_trusted(prompt=True)
+    """Accessibility granted? The first refusal per process asks macOS to
+    show the grant prompt; later ones just return the hint (the prompt
+    would otherwise pop up on every attempt)."""
+    global _prompted
+    ok = events.accessibility_trusted(prompt=not _prompted)
+    if not ok:
+        _prompted = True
+    return ok
+
+
+def _on_system_dialog() -> bool:
+    return events.is_system_dialog(events.frontmost())
+
+
+def _dialog_target(label: str) -> bool:
+    """True for button labels that grant a permission dialog: the denylist
+    exactly, or anything starting with "always allow" — while "Don't
+    Allow" stays clickable."""
+    norm = " ".join(label.lower().split())
+    return norm in DISALLOWED_DIALOG_TARGETS or norm.startswith("always allow")
+
+
+def _outside(x: float, y: float) -> str:
+    return f"({x:g}, {y:g}) is outside the last screenshot — take a new one or pick a point on it."
 
 
 def _fresh_geometry() -> Geometry | str:
@@ -88,20 +120,30 @@ def _num(args: dict, key: str) -> float:
     if key not in args or args[key] is None:
         raise ValueError(f"{key} is required")
     try:
-        return float(args[key])
+        value = float(args[key])
     except (TypeError, ValueError):
         raise ValueError(f"{key} must be a number, not {args[key]!r}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{key} must be a finite number, not {args[key]!r}")
+    return value
 
 
 def _coords(args: dict, geometry: Geometry, xk: str = "x", yk: str = "y") -> tuple[float, float]:
     """(x_pt, y_pt) for the `xk`/`yk` args: image pixels mapped through
-    `geometry` by default, or passed through when `space="screen"`."""
+    `geometry` by default, or passed through when `space="screen"`. Either
+    way the point must lie on the captured area — nothing outside the last
+    screenshot ever reaches CGEvent."""
     x, y = _num(args, xk), _num(args, yk)
     space = str(args.get("space") or "image").lower()
     if space not in SPACES:
         raise ValueError(f"space must be one of {', '.join(SPACES)}")
     if space == "screen":
+        if not (geometry.origin_x <= x <= geometry.origin_x + geometry.width_pt
+                and geometry.origin_y <= y <= geometry.origin_y + geometry.height_pt):
+            raise ValueError(_outside(x, y))
         return (x, y)
+    if not (0 <= x <= geometry.image_w and 0 <= y <= geometry.image_h):
+        raise ValueError(_outside(x, y))
     return geometry.to_screen(x, y)
 
 
@@ -208,7 +250,8 @@ async def computer_find(args: dict) -> dict:
 @tool(
     "computer_click",
     "Click at (x, y): button 'left' (default), 'right' or 'middle'; "
-    "double=true for a double-click. Coordinates are pixels of the last "
+    "double=true for a double-click. Refused while a system permission "
+    "dialog is frontmost. Coordinates are pixels of the last "
     "screenshot by default; space='screen' means screen points. Needs a "
     "screenshot from the last two minutes; take another one afterwards to verify.",
     {"x": float, "y": float, "button": str, "double": bool, "space": str},
@@ -224,6 +267,10 @@ async def computer_click(args: dict) -> dict:
     if button not in events._BUTTONS:
         return _err(f"button must be one of {', '.join(events._BUTTONS)}")
     x, y = _coords(args, geometry)
+    if _on_system_dialog():
+        # A blind click could land on Allow; only click_text can prove
+        # what it's pressing there.
+        return _err(DIALOG_HINT)
     await _run(events.click, x, y, button, bool(args.get("double", False)))
     return await _done()
 
@@ -243,7 +290,8 @@ async def computer_click_text(args: dict) -> dict:
         return _err("text is required")
     if not _trusted():
         return _err(PERMISSION_HINT)
-    if query.lower() in DISALLOWED_DIALOG_TARGETS and events.is_system_dialog(events.frontmost()):
+    on_dialog = _on_system_dialog()
+    if on_dialog and _dialog_target(query):
         return _err(DIALOG_HINT)
     geometry = _fresh_geometry()
     if isinstance(geometry, str):
@@ -255,7 +303,12 @@ async def computer_click_text(args: dict) -> dict:
     if not 0 <= index < len(matches):
         n = len(matches)
         return _err(f"index {index} is out of range: {n} match{'es' if n != 1 else ''} for '{query}'")
-    cx, cy = matches[index].center
+    match = matches[index]
+    # OCR matching is contains/fuzzy: "Allo" or "always" would resolve to
+    # the Allow button, so the label actually being clicked is checked too.
+    if on_dialog and _dialog_target(match.text):
+        return _err(DIALOG_HINT)
+    cx, cy = match.center
     x, y = geometry.to_screen(cx, cy)
     await _run(events.click, x, y, "left", bool(args.get("double", False)))
     return await _done()
@@ -297,11 +350,22 @@ async def computer_type(args: dict) -> dict:
         return _err(PERMISSION_HINT)
     if events.focused_is_secure():
         return _err(SECURE_HINT)
+    if submit and _on_system_dialog():
+        return _err(DIALOG_HINT)
     if text:
         await _run(events.type_text, text)
     if submit:
         await _run(events.key, "enter")
     return await _done()
+
+
+def _accepts_dialog(combo: str) -> bool:
+    """Would `combo` press a permission dialog's default button?"""
+    try:
+        norm = events.normalize_combo(combo)
+    except ValueError:
+        return False
+    return norm in ACCEPT_KEYS
 
 
 @tool(
@@ -317,6 +381,8 @@ async def computer_key(args: dict) -> dict:
         return _err("combo is required")
     if not _trusted():
         return _err(PERMISSION_HINT)
+    if _accepts_dialog(combo) and _on_system_dialog():
+        return _err(DIALOG_HINT)
     try:
         await _run(events.key, combo)
     except DangerousCombo:
