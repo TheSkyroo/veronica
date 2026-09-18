@@ -22,6 +22,15 @@ def fake_run(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _no_real_quartz(monkeypatch):
+    """Hermetic: no test reaches the real CoreGraphics; tests that need
+    display/window bounds patch `screen._quartz` with a fake."""
+    def boom():
+        raise ImportError("Quartz disabled in tests")
+    monkeypatch.setattr(screen, "_quartz", boom)
+
+
 @pytest.fixture
 def fake_screens_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(screen, "_screens_dir", lambda: tmp_path)
@@ -354,3 +363,227 @@ async def test_screenshot_jpeg_still_big_retries_at_lower_quality(fake_screens_d
     assert base64.b64decode(res["content"][0]["data"]) == b"\xff\xd8small"
     qualities = [c[c.index("formatOptions") + 1] for c in calls if c[0] == "sips" and "--out" in c]
     assert qualities == ["80", "60"]
+
+
+# ---- E1: geometry sidecar -------------------------------------------------
+
+SIPS_G_OUT = "/x/latest.png\n  pixelWidth: 1568\n  pixelHeight: 1019\n"
+
+
+class _Pt:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class _Sz:
+    def __init__(self, w, h):
+        self.width, self.height = w, h
+
+
+class _Rect:
+    def __init__(self, x, y, w, h):
+        self.origin, self.size = _Pt(x, y), _Sz(w, h)
+
+
+class FakeQuartz:
+    kCGWindowListOptionIncludingWindow = 1 << 3
+
+    def __init__(self, bounds=(0, 0, 1470, 956), windows=None):
+        self._bounds, self._windows = bounds, windows or []
+        self.calls = []
+
+    def CGMainDisplayID(self):
+        return 1
+
+    def CGDisplayBounds(self, did):
+        self.calls.append(("bounds", did))
+        return _Rect(*self._bounds)
+
+    def CGWindowListCopyWindowInfo(self, options, wid):
+        self.calls.append(("winfo", options, wid))
+        return [w for w in self._windows if w["kCGWindowNumber"] == wid]
+
+
+def _geometry_run(monkeypatch, tmp_path, png=b"\x89PNG-fake"):
+    """Fake `run` that drops the PNG and answers `sips -g` with a real-looking size dump."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(png)
+        if argv[0] == "sips" and "-g" in argv:
+            return Done(out=SIPS_G_OUT)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    return calls
+
+
+def test_display_bounds_from_quartz():
+    assert screen._display_bounds(FakeQuartz((0, 0, 1470, 956))) == (0.0, 0.0, 1470.0, 956.0)
+
+
+def test_window_bounds_from_quartz():
+    q = FakeQuartz(windows=[{
+        "kCGWindowNumber": 42, "kCGWindowOwnerName": "Safari", "kCGWindowName": "Apple",
+        "kCGWindowBounds": {"X": 100, "Y": 50, "Width": 800, "Height": 600},
+    }])
+    assert screen._window_bounds(42, q) == {
+        "id": 42, "app": "Safari", "title": "Apple", "x": 100.0, "y": 50.0, "w": 800.0, "h": 600.0,
+    }
+    assert ("winfo", FakeQuartz.kCGWindowListOptionIncludingWindow, 42) in q.calls
+    assert screen._window_bounds(7, q) is None
+
+
+def test_capture_writes_geometry_sidecar_for_screen(fake_screens_dir, monkeypatch):
+    calls = _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    monkeypatch.setattr(screen, "_now", lambda: 1000.0)
+    _data, path, _mime = screen.capture_screenshot("screen")
+    import json
+    import os
+    import stat
+    side = fake_screens_dir / "latest.json"
+    assert side.exists()
+    assert stat.S_IMODE(os.stat(side).st_mode) == 0o600
+    raw = json.loads(side.read_text())
+    assert raw["region"] == "screen"
+    assert (raw["image_w"], raw["image_h"]) == (1568, 1019)
+    assert (raw["origin_x"], raw["origin_y"], raw["width_pt"], raw["height_pt"]) == (0.0, 0.0, 1470.0, 956.0)
+    assert raw["scale"] == pytest.approx(1568 / 1470)
+    assert raw["captured_at"] == 1000.0
+    assert raw["window"] is None
+    # sips -g was asked for the final (downscaled) file
+    g = [a for a in calls if a[0] == "sips" and "-g" in a]
+    assert g and g[0][-1] == str(path) and "pixelWidth" in g[0] and "pixelHeight" in g[0]
+    assert sorted(p.name for p in fake_screens_dir.iterdir()) == ["latest.json", "latest.png"]
+
+
+def test_load_geometry_roundtrip_to_screen_and_age(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    monkeypatch.setattr(screen, "_now", lambda: 1000.0)
+    screen.capture_screenshot("screen")
+    g = screen.load_geometry()
+    assert isinstance(g, screen.Geometry)
+    assert g.scale == pytest.approx(1568 / 1470, rel=1e-4)
+    x, y = g.to_screen(784, 509)
+    assert x == pytest.approx(735, abs=0.5)
+    assert y == pytest.approx(477, abs=0.5)
+    assert g.to_screen(0, 0) == (0.0, 0.0)
+    monkeypatch.setattr(screen, "_now", lambda: 1030.0)
+    assert g.age_s == pytest.approx(30.0)
+    assert screen.GEOMETRY_MAX_AGE_S == 120
+
+
+def test_to_screen_uses_origin_offset():
+    g = screen.Geometry(region="window", image_w=1600, image_h=1200, origin_x=100, origin_y=50,
+                        width_pt=800, height_pt=600, scale=2.0, captured_at=0.0, window=None)
+    assert g.to_screen(200, 100) == (200.0, 100.0)
+
+
+def test_load_geometry_missing_or_corrupt_is_none(fake_screens_dir):
+    assert screen.load_geometry() is None
+    (fake_screens_dir / "latest.json").write_text("{not json")
+    assert screen.load_geometry() is None
+    (fake_screens_dir / "latest.json").write_text('{"region": "screen"}')
+    assert screen.load_geometry() is None
+
+
+def test_capture_removes_stale_sidecar_on_failure(fake_screens_dir, monkeypatch):
+    (fake_screens_dir / "latest.json").write_text("{}")
+    monkeypatch.setattr(screen.subprocess, "run", lambda *a, **k: Done(rc=1, err="denied"))
+    assert isinstance(screen.capture_screenshot("screen"), str)
+    assert not (fake_screens_dir / "latest.json").exists()
+
+
+def test_capture_without_quartz_still_returns_image_without_sidecar(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+
+    def boom():
+        raise ImportError("no Quartz")
+
+    monkeypatch.setattr(screen, "_quartz", boom)
+    data, _path, _mime = screen.capture_screenshot("screen")
+    assert data == b"\x89PNG-fake"
+    assert screen.load_geometry() is None
+
+
+def test_capture_window_region_geometry_uses_window_bounds(fake_screens_dir, monkeypatch):
+    calls = _geometry_run(monkeypatch, fake_screens_dir)
+    q = FakeQuartz((0, 0, 1470, 956), windows=[{
+        "kCGWindowNumber": 4242, "kCGWindowOwnerName": "Notes", "kCGWindowName": "Groceries",
+        "kCGWindowBounds": {"X": 200, "Y": 100, "Width": 784, "Height": 509.5},
+    }])
+    monkeypatch.setattr(screen, "_quartz", lambda: q)
+    monkeypatch.setattr(screen, "front_window_id", lambda: 4242)
+    screen.capture_screenshot("window")
+    g = screen.load_geometry()
+    assert g.region == "window"
+    assert (g.origin_x, g.origin_y, g.width_pt, g.height_pt) == (200.0, 100.0, 784.0, 509.5)
+    assert g.scale == pytest.approx(2.0)
+    assert g.window == {"id": 4242, "app": "Notes", "title": "Groceries", "x": 200.0, "y": 100.0, "w": 784.0, "h": 509.5}
+    assert g.to_screen(1568, 1019) == (984.0, 609.5)
+    argv = calls[0]
+    assert "-o" in argv   # no drop shadow: image edges == window bounds
+
+
+async def test_screenshot_result_text_mentions_geometry(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert text(res) == (
+        "Screenshot of the screen: 1568×1019 px (screen 1470×956 pt). "
+        "Coordinates you pass to computer_* tools are in these image pixels."
+    )
+
+
+async def test_screenshot_result_text_without_geometry_is_plain(fake_screens_dir, monkeypatch):
+    _write_png_after_capture(monkeypatch, fake_screens_dir)
+
+    def boom():
+        raise ImportError("no Quartz")
+
+    monkeypatch.setattr(screen, "_quartz", boom)
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert text(res) == "Screenshot of the screen."
+
+
+def test_png_size_from_ihdr_when_sips_g_unavailable(fake_screens_dir, monkeypatch):
+    import struct
+    png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 640, 480) + b"\x08\x06\x00\x00\x00"
+    _write_png_after_capture(monkeypatch, fake_screens_dir, data=png)   # sips answers ""
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 320, 240)))
+    screen.capture_screenshot("screen")
+    g = screen.load_geometry()
+    assert (g.image_w, g.image_h) == (640, 480) and g.scale == pytest.approx(2.0)
+
+
+def test_display_retry_falls_back_to_screen_geometry(fake_screens_dir, monkeypatch):
+    """A window capture that had to retry with -D 1 produced a *display*
+    image; the sidecar must describe the display, not the window."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture" and "-D" not in argv:
+            return Done(rc=1, err="screencapture: could not create image from display")
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(b"\x89PNG-fake")
+        if argv[0] == "sips" and "-g" in argv:
+            return Done(out=SIPS_G_OUT)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    q = FakeQuartz((0, 0, 1470, 956), windows=[{
+        "kCGWindowNumber": 1, "kCGWindowOwnerName": "A", "kCGWindowName": "B",
+        "kCGWindowBounds": {"X": 10, "Y": 10, "Width": 100, "Height": 100},
+    }])
+    monkeypatch.setattr(screen, "_quartz", lambda: q)
+    monkeypatch.setattr(screen, "front_window_id", lambda: 1)
+    screen.capture_screenshot("window")
+    g = screen.load_geometry()
+    assert g.region == "screen" and g.window is None and g.width_pt == 1470.0

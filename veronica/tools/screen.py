@@ -7,12 +7,23 @@ file ~/.veronica/screens/latest.png (directory 0700, file 0600), which is
 kept only so the brain's text-only fallback (if sending the image block
 fails) can point Claude's Read tool at it; a transient JPEG re-encode of
 an oversized capture is deleted as soon as its bytes are read.
+
+Geometry: next to latest.png lives latest.json (0600), describing the
+captured area in screen points and the final PNG size, so the computer_*
+tools can turn a pixel Claude points at in the image back into a screen
+coordinate — see `Geometry`, `load_geometry`.
 """
 import asyncio
 import base64
 import contextlib
+import json
+import logging
 import os
+import re
+import struct
 import subprocess
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -32,18 +43,33 @@ JPEG_QUALITY = 80
 JPEG_QUALITY_LOW = 60
 REGIONS = ("screen", "window", "selection")
 LATEST_NAME = "latest.png"
+GEOMETRY_NAME = "latest.json"
+GEOMETRY_PATH: Path = settings.home / "screens" / GEOMETRY_NAME
+# A screenshot older than this is not a safe basis for clicking.
+GEOMETRY_MAX_AGE_S = 120
+
+log = logging.getLogger(__name__)
+_now = time.time   # swapped in tests
 
 
 def _err(text: str) -> dict:
     return {"content": [{"type": "text", "text": f"error: {text}"}], "is_error": True}
 
 
-def _image_result(image_bytes: bytes, mime: str, region: str) -> dict:
+def _image_result(image_bytes: bytes, mime: str, region: str, geometry: "Geometry | None" = None) -> dict:
     b64 = base64.b64encode(image_bytes).decode("ascii")
+    if geometry is None:
+        text = f"Screenshot of the {region}."
+    else:
+        text = (
+            f"Screenshot of the {region}: {geometry.image_w}\u00d7{geometry.image_h} px "
+            f"(screen {geometry.width_pt:.0f}\u00d7{geometry.height_pt:.0f} pt). "
+            "Coordinates you pass to computer_* tools are in these image pixels."
+        )
     return {
         "content": [
             {"type": "image", "data": b64, "mimeType": mime},
-            {"type": "text", "text": f"Screenshot of the {region}."},
+            {"type": "text", "text": text},
         ]
     }
 
@@ -70,6 +96,148 @@ def _screens_dir() -> Path:
 def latest_screenshot_path() -> Path:
     """Where the most recent capture lives (overwritten every time)."""
     return settings.home / "screens" / LATEST_NAME
+
+
+# ---- geometry sidecar -----------------------------------------------------
+
+@dataclass
+class Geometry:
+    """What latest.png shows, in screen points, plus its pixel size.
+
+    `origin_*`/`width_pt`/`height_pt` are the captured area on screen (the
+    whole main display, or the front window's bounds for a window capture);
+    `image_w/h` the final — downscaled — PNG; `scale = image_w / width_pt`
+    (pixels per point). `window` is the captured window's
+    {id, app, title, x, y, w, h} or None."""
+    region: str
+    image_w: int
+    image_h: int
+    origin_x: float
+    origin_y: float
+    width_pt: float
+    height_pt: float
+    scale: float
+    captured_at: float
+    window: dict | None
+
+    def to_screen(self, x_img: float, y_img: float) -> tuple[float, float]:
+        """Image pixel (top-left origin) → global screen point."""
+        return (self.origin_x + x_img / self.scale, self.origin_y + y_img / self.scale)
+
+    @property
+    def age_s(self) -> float:
+        return _now() - self.captured_at
+
+
+def _quartz():
+    import Quartz
+    return Quartz
+
+
+def _display_bounds(quartz=None) -> tuple[float, float, float, float]:
+    """Main display bounds in points: (x, y, w, h)."""
+    q = quartz if quartz is not None else _quartz()
+    r = q.CGDisplayBounds(q.CGMainDisplayID())
+    return (float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height))
+
+
+def _window_bounds(window_id: int, quartz=None) -> dict | None:
+    """{"id","app","title","x","y","w","h"} for `window_id` (points), or
+    None if the window is gone."""
+    q = quartz if quartz is not None else _quartz()
+    info = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionIncludingWindow, window_id) or []
+    for w in info:
+        if w.get("kCGWindowNumber") != window_id:
+            continue
+        b = w.get("kCGWindowBounds") or {}
+        return {
+            "id": int(window_id),
+            "app": str(w.get("kCGWindowOwnerName") or ""),
+            "title": str(w.get("kCGWindowName") or ""),
+            "x": float(b.get("X", 0) or 0), "y": float(b.get("Y", 0) or 0),
+            "w": float(b.get("Width", 0) or 0), "h": float(b.get("Height", 0) or 0),
+        }
+    return None
+
+
+_SIPS_DIM = re.compile(r"pixel(Width|Height):\s*(\d+)")
+
+
+def _png_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) of `path`: `sips -g` first, then the PNG IHDR
+    header as a fallback. None if neither works."""
+    try:
+        done = subprocess.run(
+            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            capture_output=True, text=True, timeout=TIMEOUT_S,
+        )
+        dims = dict(_SIPS_DIM.findall(done.stdout or ""))
+        if "Width" in dims and "Height" in dims:
+            return int(dims["Width"]), int(dims["Height"])
+    except Exception:
+        pass
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n" and head[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", head[16:24])
+            return int(w), int(h)
+    except Exception:
+        pass
+    return None
+
+
+def _geometry_path() -> Path:
+    return _screens_dir() / GEOMETRY_NAME
+
+
+def write_geometry(geometry: Geometry, path: Path | None = None) -> None:
+    path = path or _geometry_path()
+    path.write_text(json.dumps(asdict(geometry)))
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+
+
+def load_geometry(path: Path | None = None) -> Geometry | None:
+    """The sidecar for the latest capture, or None if missing/corrupt."""
+    path = path or _geometry_path()
+    try:
+        raw = json.loads(path.read_text())
+        return Geometry(
+            region=str(raw["region"]), image_w=int(raw["image_w"]), image_h=int(raw["image_h"]),
+            origin_x=float(raw["origin_x"]), origin_y=float(raw["origin_y"]),
+            width_pt=float(raw["width_pt"]), height_pt=float(raw["height_pt"]),
+            scale=float(raw["scale"]), captured_at=float(raw["captured_at"]),
+            window=dict(raw["window"]) if raw.get("window") else None,
+        )
+    except Exception:
+        return None
+
+
+def _build_geometry(region: str, png_path: Path, window_id: int | None) -> Geometry | None:
+    """Compute the sidecar for the capture that just landed at `png_path`.
+    None (no sidecar) if the image size or the display bounds can't be
+    determined — the screenshot itself is still fine to show."""
+    size = _png_size(png_path)
+    if size is None:
+        return None
+    try:
+        window = _window_bounds(window_id) if region == "window" and window_id is not None else None
+        if window is not None and window["w"] > 0 and window["h"] > 0:
+            ox, oy, w_pt, h_pt = window["x"], window["y"], window["w"], window["h"]
+        else:
+            ox, oy, w_pt, h_pt = _display_bounds()
+            region, window = "screen", None
+    except Exception as exc:
+        log.warning("screenshot geometry unavailable: %s", exc)
+        return None
+    if w_pt <= 0:
+        return None
+    return Geometry(
+        region=region, image_w=size[0], image_h=size[1],
+        origin_x=ox, origin_y=oy, width_pt=w_pt, height_pt=h_pt,
+        scale=size[0] / w_pt, captured_at=_now(), window=window,
+    )
 
 
 def _window_list() -> list[dict]:
@@ -122,15 +290,17 @@ def front_window_id() -> int | None:
     return None
 
 
-def _capture_argv(region: str, out_path: Path) -> list[str] | None:
+def _capture_argv(region: str, out_path: Path, window_id: int | None = None) -> list[str] | None:
     """Build the `screencapture` argv for `region`, or None if a window
     capture was requested but no front window id could be found."""
     argv = ["screencapture", "-x", "-t", "png"]
     if region == "window":
-        wid = front_window_id()
+        wid = window_id if window_id is not None else front_window_id()
         if wid is None:
             return None
-        argv += ["-l", str(wid)]
+        # -o: no drop shadow, so the image edges are the window bounds
+        # and the geometry sidecar's scale is exact.
+        argv += ["-l", str(wid), "-o"]
     elif region == "selection":
         argv += ["-i"]
     argv.append(str(out_path))
@@ -182,9 +352,13 @@ def capture_screenshot(region: str = "screen") -> tuple[bytes, Path, str] | str:
     out_path = _screens_dir() / LATEST_NAME
     with contextlib.suppress(OSError):
         out_path.unlink()   # never serve a stale capture if this one fails
-    argv = _capture_argv(region, out_path)
+    with contextlib.suppress(OSError):
+        _geometry_path().unlink()
+    window_id = front_window_id() if region == "window" else None
+    argv = _capture_argv(region, out_path, window_id)
     if argv is None:
         return "could not determine the front window"
+    captured_region = region
     timeout = SELECTION_TIMEOUT_S if region == "selection" else TIMEOUT_S
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
@@ -196,6 +370,7 @@ def capture_screenshot(region: str = "screen") -> tuple[bytes, Path, str] | str:
             done = subprocess.run(_main_display_argv(out_path), capture_output=True, text=True, timeout=timeout)
             if done.returncode != 0:
                 return DISPLAY_CHANGE_ERROR
+            captured_region = "screen"   # the retry grabbed the whole display
     except subprocess.TimeoutExpired:
         return f"timed out after {timeout}s"
     except Exception as exc:
@@ -211,6 +386,12 @@ def capture_screenshot(region: str = "screen") -> tuple[bytes, Path, str] | str:
         )
     except Exception:
         pass  # downscaling is best-effort; fall back to the original file
+    try:
+        geometry = _build_geometry(captured_region, out_path, window_id)
+        if geometry is not None:
+            write_geometry(geometry)
+    except Exception as exc:
+        log.warning("screenshot geometry sidecar not written: %s", exc)
     # After sips: it rewrites the file (fresh inode, default umask mode), so
     # a chmod before it would be undone.
     with contextlib.suppress(OSError):
@@ -243,7 +424,7 @@ async def screenshot(args: dict) -> dict:
     if isinstance(result, str):
         return _err(result)
     data, _path, mime = result
-    return _image_result(data, mime, region if region in REGIONS else "screen")
+    return _image_result(data, mime, region if region in REGIONS else "screen", load_geometry())
 
 
 TOOLS = [screenshot]
