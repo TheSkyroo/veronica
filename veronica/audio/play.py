@@ -50,6 +50,14 @@ class Player:
         self.blocksize = blocksize
         self._stopped = False
         self._stream = None
+        # Streams we've stopped/closed (or that died on their own) are kept
+        # alive here for a while instead of being dropped immediately: their
+        # cffi callback closures must outlive PortAudio/CoreAudio's last
+        # start/stop notification, which on CoreAudio can arrive *after*
+        # Pa_CloseStream returns — freeing the closure first segfaults the
+        # CoreAudio IO thread inside ffi_closure_SYSV (seen when AirPods
+        # took over the output mid-sentence).
+        self._dead: deque = deque(maxlen=8)
         self._queue: deque[np.ndarray] = deque()
         self._lock = threading.Lock()
         self._drained = threading.Event()
@@ -129,15 +137,19 @@ class Player:
         # so unblock any play() waiting on it and mark the stream dead so
         # the next play() opens a fresh one.
         with self._lock:
-            self._stream = None
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                self._dead.append(stream)
         self._drained.set()
 
-    @staticmethod
-    def _close_stream_obj(stream) -> None:
+    def _close_stream_obj(self, stream) -> None:
         with contextlib.suppress(Exception):
             stream.stop()
         with contextlib.suppress(Exception):
             stream.close()
+        with self._lock:
+            if stream not in self._dead:
+                self._dead.append(stream)
 
     def close_stream(self) -> None:
         """Close the persistent output stream without stopping playback for

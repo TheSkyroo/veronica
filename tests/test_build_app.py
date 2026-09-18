@@ -141,7 +141,7 @@ def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
     run = _fake_run()
     app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=run)
 
-    build_json = app / "Contents" / "Resources" / "build.json"
+    build_json = tmp_path / "veronica-build.json"   # outside the bundle: keeps the cdhash (and TCC grants) stable
     assert build_json.is_file()
     data = json.loads(build_json.read_text())
     assert data["sha"] == "a517483"
@@ -182,3 +182,26 @@ def test_libpython_for_resolves_symlinked_venv_python(tmp_path):
     (root / "lib" / "libpython3.12.dylib").unlink()
     with pytest.raises(RuntimeError, match="libpython"):
         build_app._libpython_for(venv_bin / "python")
+
+
+def test_bundle_bytes_are_identical_across_rebuilds(tmp_path):
+    """Nothing inside the .app may change between two builds of the same
+    source (the build stamp lives outside), or TCC forgets every grant."""
+    import hashlib
+
+    build_app = _load_build_app()
+
+    def digest(app):
+        h = hashlib.sha256()
+        for f in sorted(p for p in app.rglob("*") if p.is_file()):
+            h.update(str(f.relative_to(app)).encode())
+            h.update(f.read_bytes())
+        return h.hexdigest()
+
+    kw = dict(repo=REPO, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler,
+              libpython=FAKE_LIBPYTHON, venv_python=Path("/fake/.venv/bin/python"))
+    a = build_app.build_app(dist_dir=tmp_path, run=_fake_run(), **kw)
+    first = digest(a)
+    later = FakeRun({**GIT_SCRIPT, "git log -1 --format=%cI": (0, "2027-01-01T00:00:00+00:00\n", "")})
+    b = build_app.build_app(dist_dir=tmp_path, run=later, **kw)   # same dist dir, new build stamp
+    assert digest(b) == first

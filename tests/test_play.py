@@ -1,3 +1,4 @@
+import contextlib
 import asyncio
 
 import numpy as np
@@ -418,3 +419,37 @@ async def test_refreshed_flag_cleared_by_successful_open(fake_sd, caplog):
         fake_sd.streams[-1].finished_callback()
         await task
     assert [r.levelno for r in caplog.records if r.name == "veronica.audio.play"] == [logging.WARNING]
+
+
+async def test_dead_and_closed_streams_are_kept_alive_briefly(monkeypatch):
+    """A stream that ended (finished_callback) or was closed must not be
+    dropped from Python while CoreAudio may still deliver a late start/stop
+    notification into its cffi closure — keep a bounded graveyard."""
+    class SD:
+        PortAudioError = play_mod._PortAudioError
+
+        def __init__(self):
+            self.streams = []
+
+        def OutputStream(self, **kwargs):
+            s = FakeStream(**kwargs)
+            self.streams.append(s)
+            return s
+
+    fsd = SD()
+    monkeypatch.setattr(play_mod, "sd", fsd)
+    p = play_mod.Player(sample_rate=24000, blocksize=1024)
+    task = asyncio.ensure_future(p.play(np.ones(500, dtype=np.float32)))
+    await asyncio.sleep(0.01)
+    first = fsd.streams[-1]
+    first.finished_callback()          # device died mid-play
+    await task
+    assert first in p._dead and p._stream is None
+
+    task = asyncio.ensure_future(p.play(np.ones(500, dtype=np.float32)))
+    await asyncio.sleep(0.01)
+    second = fsd.streams[-1]
+    p.close_stream()
+    with contextlib.suppress(BaseException):
+        await task
+    assert second in p._dead and p._dead.maxlen == 8

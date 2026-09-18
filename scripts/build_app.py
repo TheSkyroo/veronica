@@ -14,7 +14,8 @@ Phase 6):
                                  VERONICA_BUNDLE_BUILD / VERONICA_APP_BUNDLE before starting Python.
         Info.plist              CFBundleIdentifier io.manik.veronica, LSUIElement, mic/automation usage strings
         Resources/Veronica.icns copied from assets/Veronica.icns (built by scripts/make_icon.py)
-        Resources/build.json    {sha, built_at, dirty, source} from git at build time; the launcher
+        ../veronica-build.json  (next to the .app, NOT inside it — see build_app() for why)
+                                 {sha, built_at, dirty, source} from git at build time; the launcher
                                  sets VERONICA_BUNDLE_BUILD pointing here so veronica.version reports
                                  the built commit rather than whatever the repo has moved on to;
                                  it also sets VERONICA_APP_BUNDLE (the .app path) so relaunch /
@@ -204,8 +205,14 @@ def build_app(
     macos_dir.mkdir(parents=True)
     resources_dir.mkdir(parents=True)
 
-    # build.json: which commit this bundle was built from
-    build_json = resources_dir / "build.json"
+    # build.json: which commit this bundle was built from. Kept OUTSIDE the
+    # bundle (next to it in dist/) on purpose: the ad-hoc code signature's
+    # cdhash seals every file inside the .app, and macOS TCC keys the
+    # Microphone/Screen Recording/Automation grants on that cdhash — so if
+    # build.json lived inside, every rebuild would silently revoke every
+    # permission. With it outside, the bundle's bytes (launcher, plist,
+    # icon) are identical build to build and the grants survive.
+    build_json = dist_dir / "veronica-build.json"
     build_json.write_text(json.dumps(version_mod.build_info(run=run, env={}, repo=repo), indent=2) + "\n")
 
     # launcher: a native stub that embeds CPython (see STUB_SOURCE)
