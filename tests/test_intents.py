@@ -61,6 +61,16 @@ from veronica.brain.intents import (
         ("show details", "hud_full"),
         ("go big", "hud_full"),
         ("expand please", "hud_full"),
+        # hud_reset
+        ("where are you", "hud_reset"),
+        ("Where are you?", "hud_reset"),
+        ("show yourself", "hud_reset"),
+        ("come back", "hud_reset"),
+        ("reset the hud", "hud_reset"),
+        ("reset hud", "hud_reset"),
+        ("hud reset", "hud_reset"),
+        ("Veronica, where are you?", "hud_reset"),
+        ("hey veronica come back please", "hud_reset"),
         # hud_hide
         ("hide", "hud_hide"),
         ("hide yourself", "hud_hide"),
@@ -333,12 +343,14 @@ def test_match_proactive_intent(text, expected):
     ("mute karo", "mute"), ("awaaz band karo", "mute"), ("unmute karo", "unmute"), ("awaaz chalu karo", "unmute"),
     ("chhoti ho jao", "hud_mini"), ("chota karo", "hud_mini"), ("badi ho jao", "hud_full"), ("bada karo", "hud_full"),
     ("quit karo", "quit"), ("band ho jao", "quit"),
+    ("kahan ho", "hud_reset"), ("wapas aao", "hud_reset"),
     ("Veronica, bas karo please", "end"),
     # bare "bas" is too common mid-sentence ("bas ek minute") to end the turn
     ("bas", None), ("bas ek minute", None),
     # Devanagari (pinned hi mode)
     ("बस", "end"), ("बस करो", "end"), ("चुप", "end"), ("रुको", "end"), ("बंद करो", "end"), ("बस करो।", "end"),
     ("म्यूट करो", "mute"), ("आवाज़ बंद करो", "mute"), ("अनम्यूट करो", "unmute"), ("आवाज़ चालू करो", "unmute"),
+    ("कहाँ हो", "hud_reset"), ("वापस आओ", "hud_reset"), ("कहाँ हो?", "hud_reset"),
 ])
 def test_hinglish_local_intents(text, expected):
     assert match_intent(text) == expected
@@ -411,3 +423,8 @@ def test_hinglish_settings_phrases_count_as_hinglish():
     for phrase in ("settings kholo", "setting kholo", "history dikhao", "kaunsa version hai",
                    "apna update karo", "update karo"):
         assert phrase in HINGLISH_INTENT_PHRASES
+
+
+def test_hud_reset_hinglish_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"kahan ho", "wapas aao"} <= HINGLISH_INTENT_PHRASES

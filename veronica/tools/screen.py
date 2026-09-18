@@ -137,6 +137,20 @@ def _capture_argv(region: str, out_path: Path) -> list[str] | None:
     return argv
 
 
+# screencapture's stderr when its notion of the displays is stale (a
+# monitor was just plugged/unplugged) — or when Screen Recording is denied.
+DISPLAY_CHANGE_MARKER = "could not create image"
+DISPLAY_CHANGE_ERROR = (
+    "Couldn't capture the screen — the display setup just changed (or Screen Recording "
+    "isn't granted to Veronica). Try again in a moment."
+)
+
+
+def _main_display_argv(out_path: Path) -> list[str]:
+    """Retry argv: the whole main display, explicitly (-D 1)."""
+    return ["screencapture", "-x", "-t", "png", "-D", "1", str(out_path)]
+
+
 def _reencode_jpeg(png_path: Path, quality: int = JPEG_QUALITY) -> bytes | None:
     """Re-encode `png_path` as JPEG q80 via sips into a sibling temp file,
     return its bytes and delete it. None if anything fails (caller keeps
@@ -174,6 +188,14 @@ def capture_screenshot(region: str = "screen") -> tuple[bytes, Path, str] | str:
     timeout = SELECTION_TIMEOUT_S if region == "selection" else TIMEOUT_S
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        if done.returncode != 0 and DISPLAY_CHANGE_MARKER in (done.stderr or "").lower():
+            # Right after a monitor is (un)plugged, the display list
+            # screencapture consults can be stale and it fails with "could
+            # not create image from display"; one retry pinned to the
+            # main display (-D 1) usually succeeds.
+            done = subprocess.run(_main_display_argv(out_path), capture_output=True, text=True, timeout=timeout)
+            if done.returncode != 0:
+                return DISPLAY_CHANGE_ERROR
     except subprocess.TimeoutExpired:
         return f"timed out after {timeout}s"
     except Exception as exc:

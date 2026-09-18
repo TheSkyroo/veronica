@@ -1358,6 +1358,15 @@ class Orchestrator:
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
                 await self.say("Okay.")
+            elif intent == "hud_reset":
+                # "Where are you?": the menu bar forgets the saved HUD
+                # position and shows the panel at its default spot.
+                self._emit("hud", {"mode": "reset"})
+                self.player.reset()
+                if self._utterance_lang == "hi":
+                    await self.say("मैं यहाँ हूँ।", lang="hi")
+                else:
+                    await self.say("Here I am.")
             elif intent == "quit":
                 self.player.reset()
                 if await self.confirm("Quit Veronica", question="Quit Veronica?"):

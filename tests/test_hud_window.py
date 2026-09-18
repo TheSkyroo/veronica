@@ -45,13 +45,21 @@ def _noop_prefs_save(_prefs):
     pass
 
 
-def make(t=[0.0], mark_loaded=True, **settings_over):
+# A single 1440x900 display (visibleFrame origin at 0,0) stands in for
+# NSScreen.screens() so geometry tests never touch AppKit.
+MAIN_SCREEN = FakeRect(0, 0, 1440, 900)
+
+
+def make(t=[0.0], mark_loaded=True, screens=None, prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+         subscribe_screen_changes=None, **settings_over):
     web, panel = FakeWeb(), FakePanel()
+    frames = [MAIN_SCREEN] if screens is None else list(screens)
     h = HudWindow(
         Settings(hud_hide_after_s=3.0, **settings_over),
         webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         clock=lambda: t[0], main=lambda fn: fn(),
-        prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+        prefs_load=prefs_load, prefs_save=prefs_save,
+        screens=lambda: frames, subscribe_screen_changes=subscribe_screen_changes,
     )
     if mark_loaded:
         # Simulate the page having already finished loading, and clear the
@@ -260,6 +268,7 @@ def test_set_mode_persists_pref():
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=_noop_prefs_load,
         prefs_save=lambda p: saved.update(p),
+        screens=lambda: [MAIN_SCREEN],
     )
     h.set_mode("mini")
     assert saved == {"hud_mode": "mini"}
@@ -270,6 +279,7 @@ def test_construction_applies_saved_mini_mode():
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "mini"}, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     assert h._mode == "mini"
     assert panel.setFrame_calls[-1][2:] == (400, 72)
@@ -281,6 +291,7 @@ def test_construction_falls_back_to_settings_hud_mode_when_no_saved_pref():
         Settings(hud_hide_after_s=3.0, hud_mode="mini"), webview_factory=lambda s: web,
         panel_factory=lambda s, w: panel, main=lambda fn: fn(),
         prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     assert h._mode == "mini"
 
@@ -290,6 +301,7 @@ def test_construction_ignores_invalid_saved_mode():
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "gigantic"}, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     assert h._mode == "full"
 
@@ -299,6 +311,7 @@ def test_construction_applies_saved_position():
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=lambda: {"hud_pos_full": [12.0, 34.0]}, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     assert h._pos["full"] == (12.0, 34.0)
     assert panel.setFrame_calls[-1][:2] == (12.0, 34.0)
@@ -311,6 +324,7 @@ def test_hide_persists_panel_position():
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=_noop_prefs_load,
         prefs_save=lambda p: saved.update(p),
+        screens=lambda: [MAIN_SCREEN],
     )
     h.hide()
     assert saved == {"hud_pos_full": [100.0, 200.0]}
@@ -324,6 +338,7 @@ def test_hide_persists_panel_position_separately_per_mode():
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=_noop_prefs_load,
         prefs_save=lambda p: saved.update(p),
+        screens=lambda: [MAIN_SCREEN],
     )
     h.set_mode("mini")
     # Simulate the user dragging the (now mini) panel to a new spot.
@@ -335,23 +350,12 @@ def test_hide_persists_panel_position_separately_per_mode():
     assert h._pos["full"] is None
 
 
-def test_set_mode_mini_defaults_to_top_center_below_menubar(monkeypatch):
+def test_set_mode_mini_defaults_to_top_center_below_menubar():
     """With no saved position for mini mode, switching to mini should place
     the compact bar centered horizontally under the menu bar (a
     notch/Dynamic-Island style default), not the full card's top-right
     corner."""
-    import types as _types
-
-    frame = _types.SimpleNamespace(
-        origin=_types.SimpleNamespace(x=0, y=0),
-        size=_types.SimpleNamespace(width=1440, height=900),
-    )
-    fake_appkit = _types.SimpleNamespace(
-        NSScreen=_types.SimpleNamespace(mainScreen=lambda: _types.SimpleNamespace(visibleFrame=lambda: frame)),
-    )
-    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
-
-    h, web, panel, _ = make()
+    h, web, panel, _ = make()   # make()'s fake main screen is 1440x900
     h.set_mode("mini")
 
     x, y, w, hgt = panel.setFrame_calls[-1]
@@ -367,6 +371,7 @@ def test_prefs_load_failure_is_soft(caplog):
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=boom, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     assert h._mode == "full"   # falls back to settings default
     assert h.available
@@ -450,6 +455,7 @@ def test_mark_loaded_replays_mode_first_then_flushes_queued_pushes_in_order():
     h = HudWindow(
         Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
         main=lambda fn: fn(), prefs_load=lambda: {"hud_mode": "mini"}, prefs_save=_noop_prefs_save,
+        screens=lambda: [MAIN_SCREEN],
     )
     # Constructing with a persisted mini mode already queued a setMode call
     # (via _apply_geometry) before the page has loaded.
@@ -635,3 +641,177 @@ def test_close_before_load_discards_pending_queue():
     h.mark_loaded()
 
     assert web.js == []
+
+
+# -- display changes / off-screen recovery -----------------------------------
+
+def test_saved_position_on_a_vanished_screen_falls_back_to_default_and_clears_pref():
+    """The bug: frame=(870,-39 540x300) after a monitor went away. A saved
+    origin that no longer lands (>= 25%) on any current screen must be
+    discarded — top-right default on the main screen, pref cleared."""
+    saved = {}
+    h, _, panel, _ = make(
+        prefs_load=lambda: {"hud_pos_full": [2000.0, 300.0]},   # was on a second display
+        prefs_save=lambda p: saved.update(p),
+    )
+    x, y, w, hgt = panel.setFrame_calls[-1]
+    assert (x, y) == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
+    assert h._pos["full"] is None
+    assert saved == {"hud_pos_full": None}
+
+
+def test_half_off_screen_saved_frame_is_clamped_inside_best_screen():
+    saved = {}
+    h, _, panel, _ = make(
+        prefs_load=lambda: {"hud_pos_full": [870.0, -39.0]},
+        prefs_save=lambda p: saved.update(p),
+    )
+    x, y, w, hgt = panel.setFrame_calls[-1]
+    assert (x, y, w, hgt) == (870.0, 0.0, 540, 300)
+    assert h._pos["full"] == (870.0, -39.0)   # still the user's spot; only the frame is clamped
+    assert saved == {}
+
+
+def test_position_on_secondary_screen_stays_on_secondary():
+    secondary = FakeRect(1440, 100, 1920, 1080)
+    h, _, panel, _ = make(
+        screens=[MAIN_SCREEN, secondary],
+        prefs_load=lambda: {"hud_pos_full": [2500.0, 500.0]},
+    )
+    assert panel.setFrame_calls[-1][:2] == (2500.0, 500.0)
+    # Partly past the secondary's right edge: clamped against the secondary,
+    # not dragged back to the main display.
+    h._pos["full"] = (3200.0, 500.0)
+    h._apply_geometry()
+    assert panel.setFrame_calls[-1][:2] == (1440 + 1920 - 540, 500.0)
+
+
+def test_screen_change_callback_repositions_hud(caplog):
+    handlers = []
+    frames = [FakeRect(0, 0, 2560, 1440)]
+    web, panel = FakeWeb(), FakePanel()
+    h = HudWindow(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=lambda: {"hud_pos_full": [2000.0, 1100.0]}, prefs_save=_noop_prefs_save,
+        screens=lambda: frames, subscribe_screen_changes=handlers.append,
+    )
+    assert len(handlers) == 1
+    assert panel.setFrame_calls[-1][:2] == (2000.0, 1100.0)
+    # The big display goes away; only the laptop panel is left.
+    frames[:] = [MAIN_SCREEN]
+    with caplog.at_level("INFO", logger="veronica.ui.hud"):
+        handlers[0]()
+    assert panel.setFrame_calls[-1][:2] == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
+    assert "display change: repositioning HUD" in caplog.text
+
+
+def test_screen_change_subscription_unsubscribes_on_close():
+    unsubscribed = []
+
+    def subscribe(handler):
+        return lambda: unsubscribed.append(handler)
+
+    h, _, _, _ = make(subscribe_screen_changes=subscribe)
+    h.close()
+    assert len(unsubscribed) == 1
+    # After close the handler is inert (no reposition of a closed panel).
+    calls_before = len(h._panel.setFrame_calls)
+    unsubscribed[0]()
+    h._on_screens_changed()
+    assert len(h._panel.setFrame_calls) == calls_before
+
+
+def test_screen_change_subscription_failure_is_soft():
+    def bad(handler):
+        raise RuntimeError("no notification center")
+
+    h, _, _, _ = make(subscribe_screen_changes=bad)
+    assert h.available
+
+
+def test_save_position_clamps_before_persisting():
+    saved = {}
+    h, _, panel, _ = make(prefs_save=lambda p: saved.update(p))
+    panel._rect = FakeRect(870.0, -39.0, 540, 300)
+    h.hide()
+    assert saved == {"hud_pos_full": [870.0, 0.0]}
+    assert h._pos["full"] == (870.0, 0.0)
+
+
+def test_reset_position_clears_prefs_repositions_and_shows():
+    saved = {}
+    h, web, panel, _ = make(
+        prefs_load=lambda: {"hud_pos_full": [12.0, 34.0], "hud_pos_mini": [56.0, 78.0]},
+        prefs_save=lambda p: saved.update(p),
+    )
+    h.reset_position()
+    assert h._pos == {"full": None, "mini": None}
+    assert saved == {"hud_pos_full": None, "hud_pos_mini": None}
+    assert panel.setFrame_calls[-1][:2] == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
+    assert panel.visible and panel.alpha == 1.0
+    assert "window.hud.setVisible(true)" in web.js
+
+
+def test_no_screen_info_keeps_saved_position_untouched():
+    """Without any screen list (AppKit missing / query failed) there's
+    nothing to validate against: don't second-guess the saved spot."""
+    h, _, panel, _ = make(screens=[], prefs_load=lambda: {"hud_pos_full": [12.0, 34.0]})
+    assert panel.setFrame_calls[-1][:2] == (12.0, 34.0)
+    assert h._pos["full"] == (12.0, 34.0)
+
+
+def test_real_screen_change_subscription_uses_notification_center(monkeypatch):
+    """The default subscription path: an NSObject observer registered with
+    NSNotificationCenter for NSApplicationDidChangeScreenParametersNotification,
+    removed again on close."""
+    import types as _types
+
+    registrations, removals = [], []
+
+    class FakeCenter:
+        def addObserver_selector_name_object_(self, observer, selector, name, obj):
+            registrations.append((observer, selector, name, obj))
+
+        def removeObserver_(self, observer):
+            removals.append(observer)
+
+    center = FakeCenter()
+
+    class FakeObserver:
+        def __init__(self, callback):
+            self.callback = callback
+
+    class FakeObserverCls:
+        @staticmethod
+        def alloc():
+            return _types.SimpleNamespace(initWithCallback_=lambda cb: FakeObserver(cb))
+
+    from veronica.ui import hud as hud_module
+    monkeypatch.setattr(hud_module, "_screen_observer_class", lambda: FakeObserverCls)
+    monkeypatch.setitem(sys.modules, "Foundation", _types.SimpleNamespace(
+        NSNotificationCenter=_types.SimpleNamespace(defaultCenter=lambda: center), NSMakeRect=FakeRect))
+    monkeypatch.setitem(sys.modules, "AppKit", _types.SimpleNamespace(
+        NSApplicationDidChangeScreenParametersNotification="NSApplicationDidChangeScreenParametersNotification"))
+
+    class RealSubscriptionHud(HudWindow):
+        # Test fakes pass a webview_factory, which (like the nav delegate)
+        # turns the real subscription off; opt back in explicitly.
+        def __init__(self, *a, **k):
+            super().__init__(*a, subscribe_screen_changes=self._subscribe_screen_changes_real, **k)
+
+    frames = [MAIN_SCREEN]
+    web, panel = FakeWeb(), FakePanel()
+    h = RealSubscriptionHud(
+        Settings(hud_hide_after_s=3.0), webview_factory=lambda s: web, panel_factory=lambda s, w: panel,
+        main=lambda fn: fn(), prefs_load=_noop_prefs_load, prefs_save=_noop_prefs_save,
+        screens=lambda: frames,
+    )
+    assert len(registrations) == 1
+    observer, selector, name, obj = registrations[0]
+    assert isinstance(observer, FakeObserver)
+    assert (selector, name, obj) == ("onScreens:", "NSApplicationDidChangeScreenParametersNotification", None)
+    assert h._screen_observer is observer   # strong ref kept on the window
+    observer.callback()
+    assert panel.setFrame_calls[-1][:2] == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
+    h.close()
+    assert removals == [observer]

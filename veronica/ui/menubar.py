@@ -127,6 +127,9 @@ class _NoopHud:
     def set_mode(self, mode: str) -> None:
         pass
 
+    def reset_position(self) -> None:
+        pass
+
 
 class VeronicaApp(rumps.App):
     def __init__(self) -> None:
@@ -297,6 +300,8 @@ class VeronicaApp(rumps.App):
                 elif mode in ("mini", "full"):
                     self._hud.set_mode(mode)
                     self._refresh_hud_mode_item()
+                elif mode == "reset":
+                    self._hud.reset_position()
                 continue
             if kind == "settings":
                 # "open settings" / "show history" voice intents: the window

@@ -1404,6 +1404,15 @@ async def test_hud_full_intent_says_okay_emits_hud_and_continues_followup():
     assert "followup" in states
 
 
+async def test_hud_reset_intent_says_here_i_am_emits_reset_and_continues_followup():
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["where are you"])
+    await o.one_turn()
+    assert o.tts.said == ["Here I am."]
+    assert ("hud", {"mode": "reset"}) in ev
+    assert "followup" in states
+    assert o.brain.asked == []
+
+
 async def test_non_intent_text_goes_to_brain():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
     await o.one_turn()
@@ -3395,6 +3404,14 @@ async def test_history_intent_opens_history_tab():
     await o.one_turn()
     assert ("settings", {"open": True, "tab": "history"}) in ev
     assert o.tts.said == ["Here you go."]
+
+
+async def test_hud_reset_intent_in_hindi_replies_in_hindi():
+    o, _, ev = build_d(["kahan ho"], langs=["en"], mode="auto")
+    await o.one_turn()
+    assert ("hud", {"mode": "reset"}) in ev
+    assert o.tts.langs[-1] == ("मैं यहाँ हूँ।", "hi")
+    assert o.brain.asked == []
 
 
 async def test_settings_intent_in_hindi_replies_in_hindi():

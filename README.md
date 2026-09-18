@@ -63,6 +63,10 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
 - **Full mode** — "expand", "make yourself bigger", "full mode", "show details", "go big": returns to the full card
   layout (transcript, reply, tool activity).
 - **Hide** — "hide", "hide yourself", "hide the hud", "hide the panel": hides the HUD immediately and goes idle.
+- **HUD gone? say "where are you"** — also "show yourself", "come back", "reset the hud": forgets the saved
+  position and shows the HUD at its default spot on the main screen (she answers "Here I am."). The HUD also
+  re-checks its position on its own whenever a display is plugged in or unplugged, so it can't be stranded on a
+  monitor that's no longer there.
 
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
 switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
@@ -219,7 +223,7 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
   Hindi voice; timers, briefings and other announcements keep the English voice
   unless they contain Devanagari.
 - **Hinglish commands** — the local intents understand romanized Hindi too: "bas karo" / "chup" ends the turn,
-  "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" for the HUD, "haan" / "ji" / "nahi" answer a
+  "mute karo" / "awaaz band karo", "chhoti ho jao" / "badi ho jao" / "kahan ho" for the HUD, "haan" / "ji" / "nahi" answer a
   "Run …?" confirmation, plus the quick replies above. In pinned Hindi mode whisper writes Devanagari, so the
   common ones are understood in script as well ("बस करो", "हाँ" / "नहीं", "समय क्या है").
 - **Hindi voices** — Alpha, Beta (female), Omega, Psi (male). "Use a hindi voice" / "use the omega voice" picks

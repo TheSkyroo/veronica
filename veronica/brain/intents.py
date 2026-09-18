@@ -4,7 +4,7 @@ import re
 import string
 from typing import Literal
 
-Intent = Literal["end", "hud_mini", "hud_full", "hud_hide", "mute", "unmute", "quit"]
+Intent = Literal["end", "hud_mini", "hud_full", "hud_hide", "hud_reset", "mute", "unmute", "quit"]
 
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
@@ -44,6 +44,18 @@ HUD_FULL_PHRASES = frozenset({
 
 HUD_HIDE_PHRASES = frozenset({
     "hide", "hide yourself", "hide the hud", "hide the panel",
+})
+
+# "The HUD vanished" (typically after a monitor change left it on a
+# display that's gone): forget the saved position and show it at the
+# default spot on the main screen.
+HUD_RESET_PHRASES = frozenset({
+    "where are you", "show yourself", "come back",
+    "reset the hud", "reset hud", "hud reset",
+    # Hinglish
+    "kahan ho", "wapas aao",
+    # Devanagari
+    "कहाँ हो", "वापस आओ",
 })
 
 MUTE_PHRASES = frozenset({
@@ -171,6 +183,7 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "band karo", "ruko", "ruk jao",
     "mute karo", "awaaz band karo", "unmute karo", "awaaz chalu karo",
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
+    "kahan ho", "wapas aao",
     "quit karo", "band ho jao",
 }) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH
 
@@ -233,6 +246,8 @@ def _match_candidate(candidate: str) -> Intent | None:
         return "hud_full"
     if candidate in HUD_HIDE_PHRASES:
         return "hud_hide"
+    if candidate in HUD_RESET_PHRASES:
+        return "hud_reset"
     if candidate in MUTE_PHRASES:
         return "mute"
     if candidate in UNMUTE_PHRASES:

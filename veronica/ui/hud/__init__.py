@@ -111,6 +111,47 @@ def _make_nav_delegate_class():
     return _HudNavDelegate
 
 
+_SCREEN_OBSERVER_CLS = None
+
+
+def _screen_observer_class():
+    """Lazily build (once — PyObjC refuses to register the same Objective-C
+    class name twice) the NSObject that NSNotificationCenter calls back
+    into when the display topology changes."""
+    global _SCREEN_OBSERVER_CLS
+    if _SCREEN_OBSERVER_CLS is not None:
+        return _SCREEN_OBSERVER_CLS
+    import objc
+    from Foundation import NSObject
+
+    class _HudScreenObserver(NSObject):
+        def initWithCallback_(self, callback):
+            self = objc.super(_HudScreenObserver, self).init()
+            if self is None:
+                return None
+            self._callback = callback
+            return self
+
+        def onScreens_(self, note):
+            self._callback()
+
+    _SCREEN_OBSERVER_CLS = _HudScreenObserver
+    return _HudScreenObserver
+
+
+def _real_screens() -> list:
+    """visibleFrame() of every attached display, index 0 = the menu-bar
+    (primary) screen; [] when AppKit isn't available."""
+    import AppKit
+    return [scr.visibleFrame() for scr in AppKit.NSScreen.screens()]
+
+
+# A saved rect must still land at least this much of its area on some
+# screen to be worth keeping; below that it's treated as "on a display
+# that's gone" and the default spot is used instead.
+MIN_VISIBLE_FRACTION = 0.25
+
+
 def _real_panel(s: Settings, web):
     import AppKit
     import Foundation
@@ -149,12 +190,23 @@ class HudWindow:
     def __init__(self, settings: Settings, *, webview_factory=None, panel_factory=None,
                  clock: Callable[[], float] = time.monotonic, main: Callable[[Callable[[], None]], None] = _main_thread,
                  prefs_load: Callable[[], dict] = prefs.load,
-                 prefs_save: Callable[[dict], None] = prefs.save) -> None:
+                 prefs_save: Callable[[dict], None] = prefs.save,
+                 screens: Callable[[], list] | None = None,
+                 subscribe_screen_changes: Callable[[Callable[[], None]], object] | None = None) -> None:
+        """`screens` returns the visibleFrame of every attached display
+        (default: AppKit's NSScreen.screens()). `subscribe_screen_changes`
+        is called with a zero-arg handler to run whenever the display
+        topology changes (may return an unsubscribe callable); the default
+        registers for NSApplicationDidChangeScreenParametersNotification
+        when a real web view is in use, and nothing under test fakes."""
         self.s = settings
         self._clock = clock
         self._main = main
         self._prefs_load = prefs_load
         self._prefs_save = prefs_save
+        self._screens_fn = screens or _real_screens
+        self._screen_observer = None
+        self._unsubscribe_screens: Callable[[], None] | None = None
         self._hide_at: float | None = None
         self._closed = False
         self._fade_gen = 0
@@ -204,6 +256,20 @@ class HudWindow:
                 self._web.on_menu = self._on_webview_menu
             except Exception:
                 log.warning("failed to wire HUD menu click handler", exc_info=True)
+
+        # Monitors get unplugged/plugged and resolutions change while the
+        # HUD is hidden; re-validate the panel's frame whenever that happens
+        # so it can't end up on a display that no longer exists.
+        subscribe = subscribe_screen_changes
+        if subscribe is None and is_real_webview:
+            subscribe = self._subscribe_screen_changes_real
+        if self.available and subscribe is not None:
+            try:
+                unsub = subscribe(self._on_screens_changed)
+                if callable(unsub):
+                    self._unsubscribe_screens = unsub
+            except Exception:
+                log.warning("failed to subscribe to display changes", exc_info=True)
 
         # Only reposition/resize on construction if the saved state actually
         # differs from what the factories already built (full size, top
@@ -262,7 +328,20 @@ class HudWindow:
             return self.s.hud_mini_width, self.s.hud_mini_height
         return self.s.hud_width, self.s.hud_height
 
+    def _screens(self) -> list:
+        """visibleFrame of every attached display ([] if unknown)."""
+        try:
+            return list(self._screens_fn() or [])
+        except Exception:
+            return []
+
     def _visible_frame(self):
+        """The main (menu-bar) screen's visibleFrame — the default spot's
+        reference. Falls back to NSScreen.mainScreen() if the screen list
+        is unavailable."""
+        screens = self._screens()
+        if screens:
+            return screens[0]
         import AppKit
         return AppKit.NSScreen.mainScreen().visibleFrame()
 
@@ -294,21 +373,46 @@ class HudWindow:
             return self._top_center_origin(w, h)
         return self._top_right_origin(w, h)
 
-    def _clamp_to_screen(self, x: float, y: float, w: int, h: int) -> tuple[float, float]:
+    @staticmethod
+    def _clamp_to_frame(x: float, y: float, w: int, h: int, screen) -> tuple[float, float]:
+        max_x = screen.origin.x + screen.size.width - w
+        max_y = screen.origin.y + screen.size.height - h
+        return min(max(x, screen.origin.x), max_x), min(max(y, screen.origin.y), max_y)
+
+    @staticmethod
+    def _intersection_area(x: float, y: float, w: int, h: int, screen) -> float:
+        ix = min(x + w, screen.origin.x + screen.size.width) - max(x, screen.origin.x)
+        iy = min(y + h, screen.origin.y + screen.size.height) - max(y, screen.origin.y)
+        return max(ix, 0.0) * max(iy, 0.0)
+
+    def _forget_position(self, mode: str) -> None:
+        self._pos[mode] = None
         try:
-            screen = self._visible_frame()
-            max_x = screen.origin.x + screen.size.width - w
-            max_y = screen.origin.y + screen.size.height - h
-            x = min(max(x, screen.origin.x), max_x)
-            y = min(max(y, screen.origin.y), max_y)
+            self._prefs_save({f"hud_pos_{mode}": None})
         except Exception:
-            pass
-        return x, y
+            log.warning("failed to clear HUD position pref", exc_info=True)
+
+    def _place(self, pos: tuple[float, float], w: int, h: int) -> tuple[float, float]:
+        """Validate a saved/dragged origin against the displays that exist
+        right now: pick the screen the rect (pos, w, h) mostly lands on and
+        clamp it fully inside; if it's (almost) entirely off every screen
+        — the display it was on is gone — forget it and use the default
+        spot on the main screen. With no screen info, pass it through."""
+        screens = self._screens()
+        if not screens:
+            return pos
+        x, y = pos
+        best = max(screens, key=lambda scr: self._intersection_area(x, y, w, h, scr))
+        if self._intersection_area(x, y, w, h, best) < MIN_VISIBLE_FRACTION * w * h:
+            log.info("hud position (%.0f,%.0f) is off every screen; using the default spot", x, y)
+            self._forget_position(self._mode)
+            return self._default_origin(w, h)
+        return self._clamp_to_frame(x, y, w, h, best)
 
     def _origin(self, w: int, h: int) -> tuple[float, float]:
         pos = self._pos[self._mode]
         if pos is not None:
-            return self._clamp_to_screen(pos[0], pos[1], w, h)
+            return self._place(pos, w, h)
         return self._default_origin(w, h)
 
     def _apply_geometry(self) -> None:
@@ -332,15 +436,55 @@ class HudWindow:
         if not self.available:
             return
         try:
-            origin = self._panel.frame().origin
-            x, y = float(origin.x), float(origin.y)
+            frame = self._panel.frame()
+            x, y = float(frame.origin.x), float(frame.origin.y)
+            w, h = int(frame.size.width), int(frame.size.height)
         except Exception:
             return
+        # Never persist a half-off-screen origin (the panel can be dragged
+        # partly past an edge): keep the clamped spot instead.
+        x, y = self._place((x, y), w, h)
         self._pos[self._mode] = (x, y)
         try:
             self._prefs_save({f"hud_pos_{self._mode}": [x, y]})
         except Exception:
             log.warning("failed to save HUD position pref", exc_info=True)
+
+    def reset_position(self) -> None:
+        """The "where are you?" intent: forget both saved positions, put the panel back
+        at its default spot on the main screen and show it."""
+        for m in MODES:
+            self._forget_position(m)
+        if not self.available or self._closed:
+            return
+        self._apply_geometry()
+        self.show()
+
+    # -- display changes ------------------------------------------------------
+    def _subscribe_screen_changes_real(self, handler: Callable[[], None]):
+        import AppKit
+        import Foundation
+
+        self._screen_observer = _screen_observer_class().alloc().initWithCallback_(handler)
+        Foundation.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._screen_observer, "onScreens:", AppKit.NSApplicationDidChangeScreenParametersNotification, None)
+        return self._unsubscribe_screen_changes_real
+
+    def _unsubscribe_screen_changes_real(self) -> None:
+        import Foundation
+
+        observer, self._screen_observer = self._screen_observer, None
+        if observer is not None:
+            Foundation.NSNotificationCenter.defaultCenter().removeObserver_(observer)
+
+    def _on_screens_changed(self) -> None:
+        """Display topology changed (monitor plugged/unplugged, resolution
+        or arrangement changed): re-validate the panel's frame so it lands
+        on a screen that exists. Runs on the main thread via _apply_geometry."""
+        if self._closed or not self.available:
+            return
+        log.info("display change: repositioning HUD")
+        self._apply_geometry()
 
     # -- menu -------------------------------------------------------------------
     def _on_webview_menu(self, event) -> None:
@@ -440,5 +584,11 @@ class HudWindow:
         # Discard anything still queued for a page that may never finish
         # loading now (or already has, in which case this is a no-op).
         self._pending_js = []
+        unsub, self._unsubscribe_screens = self._unsubscribe_screens, None
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                log.warning("failed to unsubscribe from display changes", exc_info=True)
         if self.available:
             self.hide()

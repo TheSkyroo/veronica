@@ -204,6 +204,60 @@ async def test_screenshot_nonzero_exit_is_error(monkeypatch, fake_screens_dir):
     assert "denied" in res["content"][0]["text"]
 
 
+async def test_screenshot_retries_on_main_display_after_display_change(monkeypatch, fake_screens_dir):
+    """Right after a monitor change, screencapture can fail with "could not
+    create image from display"; a second attempt pinned to display 1
+    usually works."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture" and "-D" not in argv:
+            return Done(rc=1, err="screencapture: could not create image from display")
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(b"\x89PNG-fake")
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    res = await screen.screenshot.handler({})
+    assert not res.get("is_error")
+    captures = [a for a in calls if a[0] == "screencapture"]
+    assert len(captures) == 2
+    assert captures[1][:6] == ["screencapture", "-x", "-t", "png", "-D", "1"]
+    assert captures[1][-1] == captures[0][-1]
+
+
+async def test_screenshot_display_change_error_copy_when_retry_also_fails(monkeypatch, fake_screens_dir):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return Done(rc=1, err="screencapture: could not create image from display")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    res = await screen.screenshot.handler({})
+    assert res["is_error"]
+    assert len([a for a in calls if a[0] == "screencapture"]) == 2
+    text = res["content"][0]["text"]
+    assert "display setup just changed" in text
+    assert "Screen Recording" in text
+    assert "Try again in a moment" in text
+
+
+async def test_screenshot_other_failures_are_not_retried(monkeypatch, fake_screens_dir):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return Done(rc=1, err="denied")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    res = await screen.screenshot.handler({})
+    assert res["is_error"]
+    assert len(calls) == 1
+
+
 async def test_screenshot_timeout_is_error(monkeypatch, fake_screens_dir):
     def run(*a, **k):
         raise subprocess.TimeoutExpired(cmd="x", timeout=15)

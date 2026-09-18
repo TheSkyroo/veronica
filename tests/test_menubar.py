@@ -83,6 +83,7 @@ class FakeHud:
         self._mode = "full"
         self.mode_calls = []
         self.hide_calls = 0
+        self.reset_calls = 0
 
     def push(self, event):
         self.pushed.append(event)
@@ -104,6 +105,9 @@ class FakeHud:
     def set_mode(self, mode):
         self._mode = mode
         self.mode_calls.append(mode)
+
+    def reset_position(self):
+        self.reset_calls += 1
 
 
 class FakeOrch:
@@ -455,12 +459,26 @@ def test_drain_hud_hide_event_calls_hud_hide(fake_env):
         _quit_and_join(app)
 
 
+def test_drain_hud_reset_event_calls_reset_position(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._events.put(("hud", {"mode": "reset"}))
+        app._drain(None)
+        assert app._hud.reset_calls == 1
+        assert app._hud.mode_calls == [] and app._hud.hide_calls == 0
+        assert "hud" not in [e["kind"] for e in app._hud.pushed]
+    finally:
+        _quit_and_join(app)
+
+
 def test_noop_hud_supports_set_mode_and_hide_without_error():
     # When the HUD is disabled/unavailable, drain must still be able to call
     # set_mode()/hide() on the _NoopHud stand-in without raising.
     hud = menubar_module()._NoopHud()
     hud.set_mode("mini")
     hud.hide()
+    hud.reset_position()
     assert hud._mode == "full"
 
 
