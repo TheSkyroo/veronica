@@ -16,6 +16,8 @@ dependencies = [
   "pydantic-settings>=2.6",
   "pyobjc-framework-WebKit>=10",
   "pyobjc-framework-Quartz>=10",
+  "pyobjc-framework-vision>=10",
+  "pyobjc-framework-applicationservices>=10",
 ]
 
 [project.optional-dependencies]
