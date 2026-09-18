@@ -150,6 +150,34 @@ The first time a browser tool runs, macOS prompts for **Automation** access to t
 Permissions below). Reading, listing tabs, opening a URL, finding text, scrolling and going back run automatically;
 **clicking** and **typing** always ask for confirmation first, since they act inside your logged-in session.
 
+## Computer use
+
+Veronica can work the screen directly — any app, not just the browser. She takes a screenshot to see what's there,
+then clicks, double-clicks, right-clicks, drags, scrolls, types and presses key combos. Try "click the Save button",
+"type hello in that box and press enter", "scroll down", "press command S", "double-click the file", or
+"where's the Save button?" (find only — she points, she doesn't click).
+
+**Permission.** Screen control needs **Accessibility** access. The first action prompts for it; Veronica must then
+be enabled under **System Settings → Privacy & Security → Accessibility** (see Permissions below). Until it's
+granted, every action reports the missing permission instead of acting.
+
+**Trust window.** Looking, moving the mouse, scrolling and finding text run automatically. Clicks, drags, typing
+and key presses ask for confirmation — but only once per app: after you say yes, further actions in the **same app**
+run without asking for the next **90 seconds** (the HUD shows them with the normal "auto" pill). Switching to a
+different app asks again, the window expires on its own, and it's cleared when you barge in, say "that's all", or
+answer no. Change the length (or set it to 0 to be asked every time — that also closes a window that's already
+open) in **Settings → Brain → Screen-control trust window**. Two things the window never covers: **pressing Enter**
+(a "type … and press enter" or "press return" is confirmed every time — it submits whatever is in front), and
+**terminals** (Terminal, iTerm2, Warp, kitty, WezTerm, Alacritty, Ghostty — no window opens there and none applies,
+so every screen action in a terminal is confirmed on its own).
+
+**Safety rules.** She never types into a password field; she refuses combos that quit apps, force-quit, log out,
+lock or restart the Mac (cmd+q, cmd+opt+esc, cmd+ctrl+q and friends). System permission dialogs and **System
+Settings** (any pane) are handled as a last line: every action there needs its own confirmation regardless of
+the trust window, and even once confirmed the tools themselves refuse blind clicks, drags, typing and Enter/Space
+while such a window is frontmost — the only buttons she will click there are Don't Allow / Deny / Cancel / Not
+Now / Close and the like, so she can never press Allow or OK (nor an OCR misread of them) on a permission prompt.
+
 ## Push-to-talk
 
 Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
@@ -313,9 +341,11 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
   **Google Chrome** and **Safari** for the browser tools; **System Events** for browser detection (which browser is
   in front) and for dictation's typing.
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
-- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
-  asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if
-  push-to-talk shows as unavailable.
+- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). Not asked for automatically;
+  grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if push-to-talk shows as
+  unavailable.
+- **Accessibility** — computer use (clicking/typing on screen; asked automatically the first time a screen action
+  runs) and dictation's typing into other apps.
 
 ## Run
     uv run python -m veronica                 # menu bar app
@@ -337,7 +367,10 @@ for **Screen Recording** — approve all of these (System Settings → Privacy &
 push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
 Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is
 ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier (`io.manik.veronica`)
-doesn't change.
+doesn't change. **Accessibility** is the exception to watch: macOS ties that grant to the launcher's code hash
+(cdhash), which is stable as long as the launcher binary itself doesn't change — rebuilding the app around the
+same launcher keeps the grant, but a rebuilt or updated launcher needs Accessibility re-granted (remove and re-add
+Veronica in System Settings → Privacy & Security → Accessibility).
 
 The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
 `.venv` (and `.env`, models, `claude auth login`) you set up for `uv run` — there's no separate install step.

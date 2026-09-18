@@ -1093,6 +1093,19 @@ class Orchestrator:
         self._set("idle")
 
     # -- confirmation gate ----------------------------------------------------
+    # Summaries that already read as an action (the computer tools' "Click
+    # 'Save'", "Press cmd+s") are asked as themselves; anything else gets
+    # the generic "Run X?".
+    ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
+
+    @classmethod
+    def confirm_prompt(cls, summary: str) -> str:
+        """The spoken question for a tool `summary`: "Click 'Save'?" for a
+        screen action, "Run Bash: ls?" for everything else."""
+        if summary.startswith(cls.ACTION_SUMMARY_PREFIXES):
+            return f"{summary}?"
+        return f"Run {summary}?"
+
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
@@ -1123,7 +1136,7 @@ class Orchestrator:
                     log.info("confirm aborted by barge")
                     return result
                 self.player.reset()
-                prompt = question if question is not None else f"Run {summary}?"
+                prompt = question if question is not None else self.confirm_prompt(summary)
                 await self._say_unlocked(prompt, kind="prompt")
                 if self._barged:
                     # barged while the prompt was being spoken.
@@ -1177,6 +1190,9 @@ class Orchestrator:
         except Exception:
             log.exception("barged turn raised while being torn down")
         await self.brain.interrupt()
+        # A barge ends whatever screen-control sequence was running; the next
+        # click/type must ask again (fake brains in tests may lack the method).
+        getattr(self.brain, "clear_trust", lambda: None)()
 
     async def _run_with_barge(self, coro) -> str | None:
         """Run a turn coroutine racing the barge listener and the push-to-
@@ -1286,6 +1302,7 @@ class Orchestrator:
             log.info("heard=%r lang=%s", text, self._utterance_lang)
             intent = match_intent(text)
             if intent == "end":
+                getattr(self.brain, "clear_trust", lambda: None)()
                 if normalize(text) in self._SPOKEN_END_PHRASES:
                     self.player.reset()
                     await self.say("Okay.")

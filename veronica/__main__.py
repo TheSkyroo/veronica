@@ -185,7 +185,7 @@ async def _text_mode(text: str) -> None:
     orch = build_orchestrator(settings, audio=False, on_quit=_quit_noop)
     # no mic in text mode: risky (confirm-class) tools ask y/N on stdin.
     async def confirm(summary: str, detail: str = "") -> bool:
-        answer = await asyncio.to_thread(_ask_stdin, f"Run {summary}? [{detail}] [y/N] ")
+        answer = await asyncio.to_thread(_ask_stdin, f"{Orchestrator.confirm_prompt(summary)} [{detail}] [y/N] ")
         ok = answer.strip().lower() in ("y", "yes")
         print(f"[tool] {summary} -> {'allowed' if ok else 'declined'}")
         return ok

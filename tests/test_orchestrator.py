@@ -121,6 +121,28 @@ async def test_confirm_yes_and_no():
     assert o.tts.said[0] == "Run Bash: ls?"
 
 
+@pytest.mark.parametrize("summary,prompt", [
+    ("Click 'Save'", "Click 'Save'?"),
+    ("Double-click (10, 20)", "Double-click (10, 20)?"),
+    ("Right-click (10, 20)", "Right-click (10, 20)?"),
+    ("Type 'hi' + Enter", "Type 'hi' + Enter?"),
+    ("Press cmd+s", "Press cmd+s?"),
+    ("Drag (1, 1) \u2192 (2, 2)", "Drag (1, 1) \u2192 (2, 2)?"),
+    ("Scroll down at (1, 1)", "Scroll down at (1, 1)?"),
+    ("Bash: ls", "Run Bash: ls?"),
+    ("Open Safari", "Run Open Safari?"),
+    ("Clicker", "Run Clicker?"),
+])
+def test_confirm_prompt_wording(summary, prompt):
+    assert Orchestrator.confirm_prompt(summary) == prompt
+
+
+async def test_confirm_screen_action_is_asked_as_the_action_itself():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    assert await o.confirm("Click 'Save'", "Click 'Save'") is True
+    assert o.tts.said[0] == "Click 'Save'?"
+
+
 async def test_confirm_question_override_replaces_default_prompt():
     o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
     assert await o.confirm("Quit Veronica", question="Quit Veronica?") is True
@@ -3707,3 +3729,45 @@ def test_input_volume_corrected_hints_hud_once_per_session(monkeypatch):
     o.input_volume_corrected(33, 85, "AirPods")
     o.input_volume_corrected(27, 85, "AirPods")
     assert ev == [("tool", {"summary": "Input volume 33 → 85 (AirPods)", "decision": "auto"})]
+
+
+# --- trust window is cleared by barge and by the end intent (E4) -----------
+
+class TrustBrain(Brain):
+    def __init__(self):
+        super().__init__()
+        self.cleared = 0
+        self.interrupts = 0
+
+    async def ask(self, text):
+        yield "One."
+        await asyncio.sleep(0.05)
+        yield "Two."
+
+    async def interrupt(self): self.interrupts += 1
+    def clear_trust(self): self.cleared += 1
+
+
+async def test_barge_teardown_clears_trust():
+    o, _ = build(rec_pcms=[], stt_texts=["first"])
+    o.recorder = Rec([np.zeros(1, np.int16), None])
+    o.wake = BargeWake(barge_on_call=1)
+    o.brain = TrustBrain()
+    await o.one_turn()
+    assert o.brain.interrupts == 1
+    assert o.brain.cleared == 1
+
+
+@pytest.mark.parametrize("heard", ["that's all", "stop"])
+async def test_end_intent_clears_trust(heard):
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[heard])
+    o.brain = TrustBrain()
+    await o.one_turn()
+    assert o.brain.asked == []
+    assert o.brain.cleared == 1
+
+
+async def test_brain_without_clear_trust_is_fine():
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["that's all"])
+    await o.one_turn()
+    assert states[-1] == "idle"

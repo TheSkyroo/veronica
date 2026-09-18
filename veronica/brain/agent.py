@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 import os
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -20,6 +21,8 @@ from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.browser import browser_server
+from veronica.tools.computer import computer_server
+from veronica.tools.computer_events import Front, frontmost, is_system_dialog, normalize_combo
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -42,6 +45,36 @@ MEMORY_PREFIX = "mcp__memory__"
 SCREEN_PREFIX = "mcp__screen__"
 MUSIC_PREFIX = "mcp__music__"
 BROWSER_PREFIX = "mcp__browser__"
+COMPUTER_PREFIX = "mcp__computer__"
+
+# Apps where the trust window never opens and never applies: a click or
+# keystroke in a terminal runs whatever is on the prompt line, so every
+# screen action there is confirmed on its own.
+TRUST_EXCLUDED_BUNDLES = frozenset({
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.Warp-Stable",
+    "net.kovidgoyal.kitty",
+    "com.github.wez.wezterm",
+    "io.alacritty",
+    "com.mitchellh.ghostty",
+})
+_ENTER_KEYS = frozenset({"enter", "return"})
+
+
+def _always_confirms(tool_name: str, input: dict) -> bool:
+    """Screen actions the trust window never covers: anything that presses
+    Enter (`computer_type` with submit, `computer_key` enter/return) —
+    it submits whatever is in front, so it always gets its own confirm."""
+    short = tool_name[len(COMPUTER_PREFIX):]
+    if short == "computer_type":
+        return bool(input.get("submit"))
+    if short == "computer_key":
+        try:
+            return normalize_combo(str(input.get("combo") or "")) in _ENTER_KEYS
+        except ValueError:
+            return False
+    return False
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -59,6 +92,46 @@ def summarize_tool(tool_name: str, input: dict) -> str:
     elif tool_name in ("Write", "Edit") and input.get("file_path"):
         desc = f"{desc} in {os.path.basename(str(input['file_path']))}"
     return desc[:80].rstrip(".")
+
+
+def _pt(input: dict, xk: str = "x", yk: str = "y") -> str:
+    def n(v):
+        try:
+            return str(round(float(v)))
+        except (TypeError, ValueError):
+            return str(v)
+    return f"({n(input.get(xk, ''))}, {n(input.get(yk, ''))})"
+
+
+def _summarize_computer(short: str, input: dict) -> str:
+    if short == "computer_click":
+        verb = "Double-click" if input.get("double") else ("Right-click" if input.get("button") == "right" else "Click")
+        return f"{verb} {_pt(input)}"
+    if short == "computer_click_text":
+        verb = "Double-click" if input.get("double") else "Click"
+        return f"{verb} '{input.get('text', '')}'"
+    if short == "computer_drag":
+        return f"Drag {_pt(input, 'x1', 'y1')} \u2192 {_pt(input, 'x2', 'y2')}"
+    if short == "computer_type":
+        desc = f"Type '{str(input.get('text', ''))[:40]}'"
+        return desc + " + Enter" if input.get("submit") else desc
+    if short == "computer_key":
+        return f"Press {input.get('combo', '')}"
+    if short == "computer_scroll":
+        try:
+            dx, dy = float(input.get("dx") or 0), float(input.get("dy") or 0)
+        except (TypeError, ValueError):
+            dx, dy = 0.0, 1.0
+        if dy:
+            direction = "down" if dy > 0 else "up"
+        else:
+            direction = "right" if dx > 0 else "left"
+        return f"Scroll {direction} at {_pt(input)}"
+    if short == "computer_move":
+        return f"Move to {_pt(input)}"
+    if short == "computer_find":
+        return f"Find '{input.get('text', '')}' on screen"
+    return short
 
 
 def summarize_detail(tool_name: str, input: dict) -> str:
@@ -148,6 +221,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "browser_back":
             return "Go back"
         return short
+    if tool_name.startswith(COMPUTER_PREFIX):
+        return _summarize_computer(tool_name[len(COMPUTER_PREFIX):], input)
     if tool_name in ("Write", "Edit") and "file_path" in input:
         return f"{tool_name} file {input['file_path']}"
     for key in ("command", "query", "url", "pattern", "file_path"):
@@ -167,13 +242,23 @@ class Brain:
         confirm: Confirm,
         on_tool: Callable[[str, str], None] | None = None,
         memory=None,
+        frontmost: Callable[[], Front] = frontmost,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.s = settings
         self._confirm = confirm
         self._on_tool = on_tool
         self._memory = memory
+        self._frontmost = frontmost
+        self._clock = clock
         self._client = None
         self._in_flight = False
+        # Trust window (spec E4): after the user approves one confirm-class
+        # screen action, further ones in the same app are auto-allowed until
+        # `_trust_until` (monotonic seconds). Cleared on barge, "that's all",
+        # or a "no".
+        self._trust_until = 0.0
+        self._trust_app: str | None = None
 
     # -- session persistence --------------------------------------------------
     def _load_session(self) -> str | None:
@@ -220,9 +305,58 @@ class Brain:
             if self._on_tool:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
+        if tool_name.startswith(COMPUTER_PREFIX):
+            return await self._gate_computer(tool_name, input, summary)
         log.info("tool request: %s", summary)
         if await self._confirm(summary, summarize_detail(tool_name, input)):
             return PermissionResultAllow(updated_input=input)
+        return PermissionResultDeny(message="user declined")
+
+    # -- trust window (E4) ----------------------------------------------------
+    def clear_trust(self) -> None:
+        self._trust_until = 0.0
+        self._trust_app = None
+
+    @staticmethod
+    def _trustable(front: Front) -> bool:
+        """Can a trust window belong to `front` at all? Never for a system
+        dialog or a terminal, and never without a bundle id."""
+        return bool(front.bundle_id) and not is_system_dialog(front) and front.bundle_id not in TRUST_EXCLUDED_BUNDLES
+
+    def _trusted(self, front: Front, now: float) -> bool:
+        return (
+            self.s.computer_trust_s > 0          # setting it to 0 closes an open window
+            and self._trust_app is not None
+            and now < self._trust_until
+            and front.bundle_id == self._trust_app
+            and self._trustable(front)
+        )
+
+    async def _gate_computer(self, tool_name: str, input: dict, summary: str):
+        """Confirm gate for confirm-class `mcp__computer__*` tools. The
+        frontmost app is looked up at gate time; a system permission dialog
+        (`is_system_dialog`, keyed on bundle id — those windows have empty
+        titles) or a terminal never gets the trust exemption, and neither
+        does anything that presses Enter (`_always_confirms`). After a
+        "yes" the frontmost app and clock are read again: the user may have
+        switched apps while being asked, and the window belongs to what is
+        in front now, from now."""
+        if not _always_confirms(tool_name, input) and self._trusted(self._frontmost(), self._clock()):
+            log.info("trusted: %s", summary)
+            if self._on_tool:
+                self._on_tool(summary, "auto")
+            return PermissionResultAllow(updated_input=input)
+        log.info("tool request: %s", summary)
+        if await self._confirm(summary, summarize_detail(tool_name, input)):
+            front = self._frontmost()
+            now = self._clock()
+            window = self.s.computer_trust_s
+            if window > 0 and self._trustable(front):
+                self._trust_until = now + window
+                self._trust_app = front.bundle_id
+                log.info("trust window opened for %s (%ss)", front.bundle_id, window)
+            return PermissionResultAllow(updated_input=input)
+        self.clear_trust()
         return PermissionResultDeny(message="user declined")
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
@@ -250,7 +384,7 @@ class Brain:
             mcp_servers={
                 "mac": mac_server, "pim": pim_server, "memory": memory_server,
                 "screen": screen_server, "music": music_server,
-                "browser": browser_server,
+                "browser": browser_server, "computer": computer_server,
             },
             cwd=str(self.s.brain_cwd),
             # do not set allowed_tools — it auto-approves and bypasses can_use_tool

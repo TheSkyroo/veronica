@@ -54,7 +54,7 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s"),
     "listening": ("followup_window_s", "confirm_listen_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
-    "brain": ("effort", "memory_enabled", "brain_cwd"),
+    "brain": ("effort", "memory_enabled", "brain_cwd", "computer_trust_s"),
 }
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
 

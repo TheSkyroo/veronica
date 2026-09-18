@@ -239,6 +239,8 @@
       for (const k of ['followup_window_s', 'confirm_listen_s', 'vad_silence_ms', 'max_utterance_s']) frag.push(settingRow('listening', k));
       frag.push(el('h3', {text: 'Wake word'}));
       for (const k of ['wake_phrases', 'wake_min_rms', 'wake_window_s', 'wake_hop_s']) frag.push(settingRow('listening', k, k === 'wake_phrases' ? {wide: true} : null));
+      frag.push(el('h3', {text: 'Microphone'}));
+      frag.push(settingRow('listening', 'input_volume_floor'));
       return frag;
     },
     briefings() {
@@ -259,6 +261,7 @@
         settingRow('brain', 'effort'),
         settingRow('brain', 'memory_enabled'),
         settingRow('brain', 'brain_cwd', {wide: true}),
+        settingRow('brain', 'computer_trust_s'),
       ];
     },
     history() {

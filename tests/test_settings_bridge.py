@@ -210,7 +210,7 @@ def test_state_has_every_section_and_key(h):
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
             "input_volume_floor"} <= set(st["listening"])
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd"}
+    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -447,6 +447,15 @@ def test_set_brain_fields(h):
     assert ("memory_enabled", False) in h.prefs.overrides
     assert h.bridge.set("brain", "brain_cwd", "/tmp")["ok"]
     assert ("brain_cwd", "/tmp") in h.prefs.overrides
+
+
+def test_set_computer_trust_s_is_live_and_clamped(h):
+    res = h.bridge.set("brain", "computer_trust_s", 5000)
+    assert res["ok"] and res["restart_required"] is False
+    assert h.orch.s.computer_trust_s == 600
+    assert ("computer_trust_s", 600) in h.prefs.overrides
+    assert h.bridge.set("brain", "computer_trust_s", 0)["ok"]
+    assert h.orch.s.computer_trust_s == 0
 
 
 def test_set_restart_class_saves_while_warming():

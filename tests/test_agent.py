@@ -743,3 +743,321 @@ async def test_bash_screencapture_is_redirected_to_screenshot_tool():
     assert confirms == []                      # never even asked the user
     res2 = await b._can_use_tool("Bash", {"command": "/usr/sbin/screencapture -x a.png"}, None)
     assert isinstance(res2, PermissionResultDeny)
+
+
+@pytest.mark.parametrize("short,inp,expected", [
+    ("computer_click", {"x": 812, "y": 431}, "Click (812, 431)"),
+    ("computer_click", {"x": 812.4, "y": 431.6, "double": True}, "Double-click (812, 432)"),
+    ("computer_click", {"x": 1, "y": 2, "button": "right"}, "Right-click (1, 2)"),
+    ("computer_click_text", {"text": "Save"}, "Click 'Save'"),
+    ("computer_click_text", {"text": "Save", "double": True}, "Double-click 'Save'"),
+    ("computer_drag", {"x1": 10, "y1": 10, "x2": 300, "y2": 300}, "Drag (10, 10) → (300, 300)"),
+    ("computer_type", {"text": "hello"}, "Type 'hello'"),
+    ("computer_type", {"text": "hello", "submit": True}, "Type 'hello' + Enter"),
+    ("computer_type", {"text": "x" * 50}, "Type '" + "x" * 40 + "'"),
+    ("computer_key", {"combo": "cmd+s"}, "Press cmd+s"),
+    ("computer_scroll", {"x": 500, "y": 400, "dy": 300}, "Scroll down at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dy": -300}, "Scroll up at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dx": 20}, "Scroll right at (500, 400)"),
+    ("computer_scroll", {"x": 500, "y": 400, "dx": -20}, "Scroll left at (500, 400)"),
+    ("computer_move", {"x": 5, "y": 6}, "Move to (5, 6)"),
+    ("computer_find", {"text": "Save"}, "Find 'Save' on screen"),
+    ("computer_other", {}, "computer_other"),
+])
+def test_summarize_computer_tools(short, inp, expected):
+    assert summarize_detail(f"mcp__computer__{short}", inp) == expected
+
+
+async def test_options_register_computer_server(brain):
+    [s async for s in brain.ask("x")]
+    o = FakeClient.instances[0].options
+    assert "computer" in o.mcp_servers
+
+
+def test_system_prompt_has_computer_use_rules():
+    p = system_prompt(dt.date(2026, 9, 15))
+    assert (
+        "You can also act on the screen with the computer tools: take a screenshot, use "
+        "computer_find to locate text, then computer_click_text/computer_click/computer_type/"
+        "computer_key; coordinates are pixels of the last screenshot. After any action take a "
+        "fresh screenshot before claiming it worked. Never type passwords or secrets, never click "
+        "Allow/OK in system permission dialogs, and don't change settings under System Settings > "
+        "Privacy & Security unless the user asked for exactly that."
+    ) in p
+
+
+# --- trust window (E4) -------------------------------------------------------
+
+from veronica.tools.computer_events import Front
+
+_FINDER = Front(app="Finder", bundle_id="com.apple.finder", window_title="Desktop", pid=1)
+_SAFARI = Front(app="Safari", bundle_id="com.apple.Safari", window_title="GitHub", pid=2)
+_SECAGENT = Front(app="SecurityAgent", bundle_id="com.apple.SecurityAgent", window_title="", pid=3)
+_PRIVACY = Front(app="System Settings", bundle_id="com.apple.systempreferences",
+                 window_title="Privacy & Security", pid=4)
+
+
+class _Trust:
+    """Brain wired with a fake frontmost app, fake clock, scripted confirm."""
+
+    def __init__(self, tmp_home, trust_s=90, answers=(True,)):
+        self.front = _FINDER
+        self.now = 1000.0
+        self.answers = list(answers)
+        self.asked: list[str] = []
+        self.tools: list[tuple[str, str]] = []
+
+        async def confirm(summary, detail=""):
+            self.asked.append(summary)
+            return self.answers.pop(0) if self.answers else False
+
+        self.brain = Brain(
+            Settings(computer_trust_s=trust_s), confirm=confirm,
+            on_tool=lambda s, d: self.tools.append((s, d)),
+            frontmost=lambda: self.front, clock=lambda: self.now,
+        )
+
+    async def click(self, x=10, y=20):
+        return await self.brain._can_use_tool("mcp__computer__computer_click", {"x": x, "y": y}, None)
+
+
+async def test_trust_first_computer_action_asks(tmp_home):
+    t = _Trust(tmp_home)
+    res = await t.click()
+    assert res.behavior == "allow"
+    assert t.asked == ["Click (10, 20)"]
+    assert t.tools == []
+
+
+async def test_trust_yes_allows_next_action_in_same_app_without_asking(tmp_home, caplog):
+    t = _Trust(tmp_home)
+    with caplog.at_level("INFO", logger="veronica.brain"):
+        await t.click()
+        t.now += 30
+        res = await t.brain._can_use_tool("mcp__computer__computer_type", {"text": "hi"}, None)
+    assert res.behavior == "allow"
+    assert t.asked == ["Click (10, 20)"]          # no second ask
+    assert t.tools == [("Type 'hi'", "auto")]
+    assert "trusted: Type 'hi'" in caplog.text
+    assert "trust window opened for com.apple.finder (90s)" in caplog.text
+
+
+async def test_trust_different_app_asks_again(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()
+    t.front = _SAFARI
+    await t.click(1, 2)
+    assert t.asked == ["Click (10, 20)", "Click (1, 2)"]
+    assert t.tools == []
+
+
+async def test_trust_expires(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()
+    t.now += 89
+    await t.click(1, 1)
+    assert len(t.asked) == 1
+    t.now += 2                                     # 91 s after the yes
+    await t.click(2, 2)
+    assert len(t.asked) == 2
+
+
+async def test_trust_zero_never_auto_allows(tmp_home):
+    t = _Trust(tmp_home, trust_s=0, answers=(True, True))
+    await t.click()
+    await t.click(1, 1)
+    assert len(t.asked) == 2
+    assert t.brain._trust_app is None
+
+
+async def test_trust_window_read_live_from_settings(tmp_home):
+    t = _Trust(tmp_home, trust_s=0, answers=(True, True))
+    t.brain.s.computer_trust_s = 10
+    await t.click()
+    await t.click(1, 1)
+    assert len(t.asked) == 1
+
+
+@pytest.mark.parametrize("dialog", [_SECAGENT, _PRIVACY])
+async def test_trust_system_dialog_always_asks(tmp_home, dialog):
+    t = _Trust(tmp_home, answers=(True, False))
+    await t.click()
+    t.front = Front(app=dialog.app, bundle_id=dialog.bundle_id, window_title=dialog.window_title, pid=dialog.pid)
+    # even if the window was somehow opened for that bundle id
+    t.brain._trust_app = dialog.bundle_id
+    res = await t.click(1, 1)
+    assert res.behavior == "deny" and len(t.asked) == 2
+
+
+async def test_trust_yes_on_system_dialog_does_not_open_window(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    t.front = _SECAGENT
+    await t.click()
+    assert t.brain._trust_app is None
+    await t.click(1, 1)
+    assert len(t.asked) == 2
+
+
+async def test_trust_no_bundle_id_does_not_open_window(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    t.front = Front(app="", bundle_id="", window_title="", pid=0)
+    await t.click()
+    assert t.brain._trust_app is None
+    await t.click(1, 1)
+    assert len(t.asked) == 2
+
+
+async def test_trust_no_clears_window(tmp_home):
+    t = _Trust(tmp_home, answers=(True, False, True))
+    await t.click()
+    res = await t.click(1, 1)                      # trusted, no ask
+    assert res.behavior == "allow" and len(t.asked) == 1
+    t.front = _SAFARI
+    res = await t.click(2, 2)                      # asks; user says no
+    assert res.behavior == "deny" and t.brain._trust_app is None
+    t.front = _FINDER
+    await t.click(3, 3)                            # Finder trust is gone too
+    assert len(t.asked) == 3
+
+
+async def test_trust_does_not_cover_non_computer_tools(tmp_home):
+    t = _Trust(tmp_home, answers=(True, False))
+    await t.click()
+    res = await t.brain._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "deny" and t.asked == ["Click (10, 20)", "Bash: rm x"]
+
+
+async def test_trust_allow_class_computer_tools_still_auto(tmp_home):
+    t = _Trust(tmp_home, trust_s=0)
+    res = await t.brain._can_use_tool("mcp__computer__computer_scroll", {"x": 1, "y": 1, "dy": 3}, None)
+    assert res.behavior == "allow" and t.asked == [] and t.tools[-1][1] == "auto"
+
+
+_TERMINAL = Front(app="Terminal", bundle_id="com.apple.Terminal", window_title="zsh", pid=5)
+_ITERM = Front(app="iTerm2", bundle_id="com.googlecode.iterm2", window_title="fish", pid=6)
+
+
+def test_trust_excluded_bundles_table():
+    from veronica.brain.agent import TRUST_EXCLUDED_BUNDLES
+    assert TRUST_EXCLUDED_BUNDLES == frozenset({
+        "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "net.kovidgoyal.kitty",
+        "com.github.wez.wezterm", "io.alacritty", "com.mitchellh.ghostty",
+    })
+
+
+@pytest.mark.parametrize("terminal", [_TERMINAL, _ITERM])
+async def test_trust_never_opens_in_a_terminal(tmp_home, terminal, caplog):
+    t = _Trust(tmp_home, answers=(True, True, True))
+    t.front = terminal
+    with caplog.at_level("INFO", logger="veronica.brain"):
+        res = await t.click()
+    assert res.behavior == "allow" and t.brain._trust_app is None
+    assert "trust window opened" not in caplog.text
+    await t.click(1, 1)
+    assert len(t.asked) == 2                          # asked again: no window
+    # nor does it apply if a window was somehow opened for that bundle id
+    t.brain._trust_app = terminal.bundle_id
+    t.brain._trust_until = t.now + 60
+    res = await t.click(2, 2)
+    assert res.behavior == "allow" and len(t.asked) == 3
+
+
+async def test_trust_window_for_another_app_does_not_cover_a_terminal(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()                                   # Finder window open
+    t.front = _TERMINAL
+    await t.click(1, 1)
+    assert len(t.asked) == 2
+
+
+@pytest.mark.parametrize("tool,input", [
+    ("computer_type", {"text": "hi", "submit": True}),
+    ("computer_type", {"submit": True}),
+    ("computer_key", {"combo": "enter"}),
+    ("computer_key", {"combo": "Return"}),
+    ("computer_key", {"combo": " ENTER "}),
+])
+async def test_trust_never_covers_enter(tmp_home, tool, input):
+    """Enter submits whatever is in front — always a fresh confirm."""
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()                                   # Finder trusted for 90s
+    res = await t.brain._can_use_tool(f"mcp__computer__{tool}", input, None)
+    assert res.behavior == "allow" and len(t.asked) == 2
+    assert t.tools == []
+
+
+@pytest.mark.parametrize("tool,input", [
+    ("computer_type", {"text": "hi"}),
+    ("computer_type", {"text": "hi", "submit": False}),
+    ("computer_key", {"combo": "cmd+enter"}),
+    ("computer_key", {"combo": "tab"}),
+    ("computer_key", {"combo": "cmd+s"}),
+    ("computer_key", {"combo": "+"}),                 # unparseable: gate doesn't care, the tool refuses
+])
+async def test_trust_still_covers_plain_typing_and_other_keys(tmp_home, tool, input):
+    t = _Trust(tmp_home, answers=(True,))
+    await t.click()
+    res = await t.brain._can_use_tool(f"mcp__computer__{tool}", input, None)
+    assert res.behavior == "allow" and len(t.asked) == 1
+    assert t.tools[-1][1] == "auto"
+
+
+async def test_trust_enter_yes_still_opens_the_window(tmp_home):
+    t = _Trust(tmp_home, answers=(True,))
+    res = await t.brain._can_use_tool("mcp__computer__computer_key", {"combo": "enter"}, None)
+    assert res.behavior == "allow" and t.brain._trust_app == "com.apple.finder"
+    await t.click()                                   # trusted
+    assert len(t.asked) == 1
+
+
+async def test_trust_window_uses_frontmost_and_clock_after_the_yes(tmp_home, caplog):
+    """The user may switch apps (or take a while) while being asked; the
+    window belongs to what's in front once they said yes."""
+    t = _Trust(tmp_home, answers=(True, True))
+    calls = []
+
+    async def confirm(summary, detail=""):
+        calls.append(summary)
+        t.front = _SAFARI                             # switched while the question was asked
+        t.now += 20
+        return True
+
+    t.brain._confirm = confirm
+    with caplog.at_level("INFO", logger="veronica.brain"):
+        await t.click()
+    assert t.brain._trust_app == "com.apple.Safari"
+    assert t.brain._trust_until == pytest.approx(1020.0 + 90)
+    assert "trust window opened for com.apple.Safari (90s)" in caplog.text
+    await t.click(1, 1)                               # Safari is in front now: trusted
+    assert calls == ["Click (10, 20)"]
+
+
+async def test_trust_yes_landing_on_a_dialog_does_not_open_window(tmp_home):
+    t = _Trust(tmp_home)
+
+    async def confirm(summary, detail=""):
+        t.front = _SECAGENT
+        return True
+
+    t.brain._confirm = confirm
+    await t.click()
+    assert t.brain._trust_app is None
+
+
+async def test_trust_setting_zero_closes_an_open_window(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()
+    assert t.brain._trust_app == "com.apple.finder"
+    t.brain.s.computer_trust_s = 0
+    await t.click(1, 1)
+    assert len(t.asked) == 2
+
+
+async def test_clear_trust_resets(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    await t.click()
+    assert t.brain._trust_app == "com.apple.finder"
+    t.brain.clear_trust()
+    assert t.brain._trust_app is None and t.brain._trust_until == 0.0
+    await t.click(1, 1)
+    assert len(t.asked) == 2
