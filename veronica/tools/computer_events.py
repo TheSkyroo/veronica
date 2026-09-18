@@ -101,6 +101,15 @@ def post(event) -> None:
     q.CGEventPost(q.kCGHIDEventTap, event)
 
 
+def _release(event, what: str) -> None:
+    """Post a key-up / mouse-up from a `finally`: a failure here is logged
+    rather than raised so it never masks the original error."""
+    try:
+        post(event)
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to release %s: %s", what, e)
+
+
 # --- modifiers ---------------------------------------------------------------
 
 # CGEventFlags masks (fixed CoreGraphics header values; same as
@@ -149,14 +158,22 @@ def click(x: float, y: float, button: str = "left", double: bool = False) -> Non
     q = _quartz()
     btn, down, up = _button_consts(button)
     move(x, y)
-    post(_mouse_event(down, x, y, btn))
-    post(_mouse_event(up, x, y, btn))
+
+    def pair(click_state: int | None) -> None:
+        def make(type_):
+            ev = _mouse_event(type_, x, y, btn)
+            if click_state is not None:
+                q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, click_state)
+            return ev
+        try:
+            post(make(down))
+        finally:
+            _release(make(up), f"{button} button")
+
+    pair(None)
     if double:
         _sleep(CLICK_GAP_S)
-        for type_ in (down, up):
-            ev = _mouse_event(type_, x, y, btn)
-            q.CGEventSetIntegerValueField(ev, q.kCGMouseEventClickState, 2)
-            post(ev)
+        pair(2)
 
 
 def drag(x1: float, y1: float, x2: float, y2: float) -> None:
@@ -165,13 +182,15 @@ def drag(x1: float, y1: float, x2: float, y2: float) -> None:
     q = _quartz()
     btn = q.kCGMouseButtonLeft
     move(x1, y1)
-    post(_mouse_event(q.kCGEventLeftMouseDown, x1, y1, btn))
     step_s = DRAG_DURATION_S / DRAG_STEPS
-    for i in range(1, DRAG_STEPS + 1):
-        t = i / DRAG_STEPS
-        _sleep(step_s)
-        post(_mouse_event(q.kCGEventLeftMouseDragged, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, btn))
-    post(_mouse_event(q.kCGEventLeftMouseUp, x2, y2, btn))
+    try:
+        post(_mouse_event(q.kCGEventLeftMouseDown, x1, y1, btn))
+        for i in range(1, DRAG_STEPS + 1):
+            t = i / DRAG_STEPS
+            _sleep(step_s)
+            post(_mouse_event(q.kCGEventLeftMouseDragged, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, btn))
+    finally:
+        _release(_mouse_event(q.kCGEventLeftMouseUp, x2, y2, btn), "left button (drag)")
 
 
 def scroll(x: float, y: float, dx: float = 0, dy: float = 0) -> None:
@@ -221,20 +240,64 @@ def type_text(text: str) -> None:
             _sleep(TYPE_CHUNK_GAP_S)
 
 
-def _parse_combo(combo: str) -> tuple[int, int]:
-    """`"cmd+shift+s"` → (keycode, flags). Raises ValueError for anything
-    that isn't (modifiers)+one key from `KEYCODES`."""
+_MODIFIER_CANON = {
+    "cmd": "cmd", "command": "cmd",
+    "ctrl": "ctrl", "control": "ctrl",
+    "alt": "alt", "option": "alt",
+    "shift": "shift",
+}
+_MODIFIER_ORDER = ("cmd", "ctrl", "alt", "shift")
+_KEY_CANON = {"escape": "esc"}
+
+
+class DangerousCombo(ValueError):
+    """Raised by `key()` for combos that quit/force-quit apps or lock or
+    power off the Mac — never sent, whatever the caller asked."""
+
+
+# Canonical form (see `normalize_combo`).
+DANGEROUS_COMBOS = frozenset({
+    "cmd+q",                 # quit app
+    "cmd+shift+q",           # log out
+    "cmd+ctrl+q",            # lock screen
+    "cmd+alt+esc",           # force quit
+    "cmd+alt+shift+esc",     # force quit frontmost immediately
+    "cmd+ctrl+power",        # restart
+})
+
+
+def normalize_combo(combo: str) -> str:
+    """Canonical form of a combo: lowercase, modifier aliases folded
+    (command→cmd, control→ctrl, option→alt), modifiers deduplicated and
+    ordered cmd, ctrl, alt, shift, then the key. Raises ValueError when
+    the shape isn't (modifiers)+one key; the key name itself is *not*
+    validated here (see `key()`)."""
     parts = [p.strip().lower() for p in combo.split("+")]
     if not parts or any(not p for p in parts):
         raise ValueError(f"can't parse key combo {combo!r}")
     *mods, name = parts
+    canon = set()
+    for m in mods:
+        if m not in _MODIFIER_CANON:
+            raise ValueError(f"unknown modifier {m!r} in {combo!r}")
+        canon.add(_MODIFIER_CANON[m])
+    if name in _MODIFIER_CANON:
+        raise ValueError(f"key combo {combo!r} has modifiers but no key to press")
+    ordered = [m for m in _MODIFIER_ORDER if m in canon]
+    return "+".join([*ordered, _KEY_CANON.get(name, name)])
+
+
+def _parse_combo(combo: str) -> tuple[int, int]:
+    """`"cmd+shift+s"` → (keycode, flags). Raises DangerousCombo for the
+    denylist and ValueError for anything that isn't (modifiers)+one key
+    from `KEYCODES`."""
+    norm = normalize_combo(combo)
+    if norm in DANGEROUS_COMBOS:
+        raise DangerousCombo(f"refusing to press {norm} (quits, locks or powers off)")
+    *mods, name = norm.split("+")
     flags = 0
     for m in mods:
-        if m not in MODIFIERS:
-            raise ValueError(f"unknown modifier {m!r} in {combo!r}")
         flags |= MODIFIERS[m]
-    if name in MODIFIERS:
-        raise ValueError(f"key combo {combo!r} has modifiers but no key to press")
     if name not in KEYCODES:
         raise ValueError(f"unknown key {name!r} in {combo!r}")
     return KEYCODES[name], flags
@@ -244,13 +307,20 @@ def key(combo: str) -> None:
     """Press and release a key combo such as "enter", "cmd+s" or
     "ctrl+shift+tab". Modifier flags are set explicitly on both events
     (so a stuck hardware modifier — e.g. the push-to-talk key — never
-    leaks in)."""
+    leaks in), and the key-up is always attempted even if the key-down
+    fails, so no modifier is left stuck."""
     q = _quartz()
     keycode, flags = _parse_combo(combo)
-    for keydown in (True, False):
+
+    def make(keydown: bool):
         ev = q.CGEventCreateKeyboardEvent(None, keycode, keydown)
         q.CGEventSetFlags(ev, flags)
-        post(ev)
+        return ev
+
+    try:
+        post(make(True))
+    finally:
+        _release(make(False), f"key {combo!r}")
 
 
 # --- accessibility -----------------------------------------------------------

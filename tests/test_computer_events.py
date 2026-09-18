@@ -439,3 +439,119 @@ def test_disallowed_dialog_targets_table():
     assert {"allow", "always allow", "ok", "open system settings", "continue", "install", "trust"} <= ce.DISALLOWED_DIALOG_TARGETS
     assert all(t == t.lower() for t in ce.DISALLOWED_DIALOG_TARGETS)
     assert "com.apple.SecurityAgent" in ce.SYSTEM_DIALOG_BUNDLES
+
+
+# --- release on failure ------------------------------------------------------
+
+class _PostFailsOnFirstDown:
+    """Wraps the fake so the first *down* event raises after being recorded."""
+
+    def __init__(self, q, down_types):
+        self.q, self.down_types, self.tripped = q, set(down_types), False
+
+    def __call__(self, ev):
+        self.q.posted.append(ev)
+        if not self.tripped and ev.type in self.down_types:
+            self.tripped = True
+            raise RuntimeError("tap gone")
+
+
+def test_key_releases_with_same_flags_when_down_post_fails(quartz, monkeypatch):
+    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {"keydown"}))
+    with pytest.raises(RuntimeError, match="tap gone"):
+        ce.key("cmd+shift+s")
+    want = FakeQuartz.kCGEventFlagMaskCommand | FakeQuartz.kCGEventFlagMaskShift
+    assert [(e.type, e.keycode, e.flags) for e in quartz.posted] == [
+        ("keydown", 1, want), ("keyup", 1, want),
+    ]
+
+
+def test_click_releases_button_when_down_post_fails(quartz, monkeypatch):
+    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {3}))
+    with pytest.raises(RuntimeError):
+        ce.click(1, 2, button="right")
+    assert _mouse(quartz) == [(5, 1, 2, 0), (3, 1, 2, 1), (4, 1, 2, 1)]
+
+
+def test_double_click_second_pair_releases_when_down_post_fails(quartz, monkeypatch):
+    class FailSecondDown:
+        def __init__(self):
+            self.downs = 0
+
+        def __call__(self, ev):
+            quartz.posted.append(ev)
+            if ev.type == 1:
+                self.downs += 1
+                if self.downs == 2:
+                    raise RuntimeError("tap gone")
+    monkeypatch.setattr(ce, "post", FailSecondDown())
+    with pytest.raises(RuntimeError):
+        ce.click(5, 6, double=True)
+    assert [e.type for e in quartz.posted] == [5, 1, 2, 1, 2]
+    assert quartz.posted[-1].fields.get(1) == 2
+
+
+def test_drag_releases_at_end_point_when_a_dragged_move_fails(quartz, monkeypatch):
+    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {6}))
+    with pytest.raises(RuntimeError):
+        ce.drag(0, 0, 80, 40)
+    ev = _mouse(quartz)
+    assert [t for t, *_ in ev] == [5, 1, 6, 2]
+    assert ev[-1] == (2, 80, 40, 0)
+
+
+def test_release_failure_is_logged_not_raised_over_original(quartz, monkeypatch, caplog):
+    def always_fail(ev):
+        quartz.posted.append(ev)
+        raise RuntimeError("down failed" if ev.type == "keydown" else "up failed")
+    monkeypatch.setattr(ce, "post", always_fail)
+    with pytest.raises(RuntimeError, match="down failed"):
+        ce.key("a")
+    assert [e.type for e in quartz.posted] == ["keydown", "keyup"]
+    assert "up failed" in caplog.text
+
+
+# --- dangerous combos --------------------------------------------------------
+
+@pytest.mark.parametrize("combo, expected", [
+    ("cmd+q", "cmd+q"),
+    ("Command+Q", "cmd+q"),
+    ("shift+option+control+command+s", "cmd+ctrl+alt+shift+s"),
+    ("option+cmd+esc", "cmd+alt+esc"),
+    ("cmd+option+escape", "cmd+alt+esc"),
+    (" alt + cmd + Escape ", "cmd+alt+esc"),
+    ("cmd+cmd+s", "cmd+s"),
+    ("enter", "enter"),
+    ("ctrl+cmd+power", "cmd+ctrl+power"),
+])
+def test_normalize_combo(combo, expected):
+    assert ce.normalize_combo(combo) == expected
+
+
+def test_normalize_combo_rejects_malformed():
+    for bad in ("", "cmd+", "+s", "cmd+shift", "hyper+s"):
+        with pytest.raises(ValueError):
+            ce.normalize_combo(bad)
+
+
+@pytest.mark.parametrize("combo", [
+    "cmd+q", "Cmd+Q", "command+q", "option+cmd+esc", "cmd+alt+escape", "alt+cmd+esc",
+    "ctrl+cmd+q", "cmd+ctrl+q", "shift+cmd+q", "cmd+option+shift+esc",
+    "ctrl+cmd+power", "control+command+power",
+])
+def test_key_refuses_dangerous_combos(quartz, combo):
+    with pytest.raises(ce.DangerousCombo):
+        ce.key(combo)
+    assert quartz.posted == []
+
+
+def test_dangerous_combo_is_a_value_error_and_table_is_normalised():
+    assert issubclass(ce.DangerousCombo, ValueError)
+    for c in ce.DANGEROUS_COMBOS:
+        assert ce.normalize_combo(c) == c, c
+
+
+def test_key_still_allows_safe_combos_with_cmd(quartz):
+    ce.key("cmd+s")
+    ce.key("cmd+shift+z")
+    assert [e.keycode for e in quartz.posted] == [1, 1, 6, 6]
