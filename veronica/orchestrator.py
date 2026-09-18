@@ -1177,6 +1177,9 @@ class Orchestrator:
         except Exception:
             log.exception("barged turn raised while being torn down")
         await self.brain.interrupt()
+        # A barge ends whatever screen-control sequence was running; the next
+        # click/type must ask again (fake brains in tests may lack the method).
+        getattr(self.brain, "clear_trust", lambda: None)()
 
     async def _run_with_barge(self, coro) -> str | None:
         """Run a turn coroutine racing the barge listener and the push-to-
@@ -1286,6 +1289,7 @@ class Orchestrator:
             log.info("heard=%r lang=%s", text, self._utterance_lang)
             intent = match_intent(text)
             if intent == "end":
+                getattr(self.brain, "clear_trust", lambda: None)()
                 if normalize(text) in self._SPOKEN_END_PHRASES:
                     self.player.reset()
                     await self.say("Okay.")

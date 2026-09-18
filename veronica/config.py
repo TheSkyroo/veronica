@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     effort: str = "low"
     max_turns: int | None = None
     brain_cwd: Path = Field(default_factory=Path.home)
+    # Seconds after one approved screen action during which further
+    # confirm-class computer actions in the SAME app are auto-allowed. 0 = off.
+    computer_trust_s: int = 90
 
     # memory
     memory_enabled: bool = True
@@ -173,6 +176,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
     "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
+    "computer_trust_s": EditableField(
+        "int", "Screen-control trust window (seconds)",
+        "After you approve one click/type, further screen actions in the same app are allowed "
+        "for this long. 0 = ask every time.",
+        min=0, max=600, restart=False,
+    ),
 }
 
 

@@ -150,6 +150,29 @@ The first time a browser tool runs, macOS prompts for **Automation** access to t
 Permissions below). Reading, listing tabs, opening a URL, finding text, scrolling and going back run automatically;
 **clicking** and **typing** always ask for confirmation first, since they act inside your logged-in session.
 
+## Computer use
+
+Veronica can work the screen directly — any app, not just the browser. She takes a screenshot to see what's there,
+then clicks, double-clicks, right-clicks, drags, scrolls, types and presses key combos. Try "click the Save button",
+"type hello in that box and press enter", "scroll down", "press command S", "double-click the file", or
+"where's the Save button?" (find only — she points, she doesn't click).
+
+**Permission.** Screen control needs **Accessibility** access. The first action prompts for it; Veronica must then
+be enabled under **System Settings → Privacy & Security → Accessibility** (see Permissions below). Until it's
+granted, every action reports the missing permission instead of acting.
+
+**Trust window.** Looking, moving the mouse, scrolling and finding text run automatically. Clicks, drags, typing
+and key presses ask for confirmation — but only once per app: after you say yes, further actions in the **same app**
+run without asking for the next **90 seconds** (the HUD shows them with the normal "auto" pill). Switching to a
+different app asks again, the window expires on its own, and it's cleared when you barge in, say "that's all", or
+answer no. Change the length (or set it to 0 to be asked every time) in **Settings → Brain → Screen-control trust
+window**.
+
+**Safety rules.** She never types into a password field; she never clicks Allow/OK or presses Enter on a system
+permission dialog (those need a fresh confirmation regardless of the trust window, and "click Allow" is refused
+outright); she refuses combos that quit apps, force-quit, log out, lock or restart the Mac (cmd+q, cmd+opt+esc,
+cmd+ctrl+q and friends); and she stays off the Privacy & Security pane of System Settings.
+
 ## Push-to-talk
 
 Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
@@ -313,9 +336,11 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
   **Google Chrome** and **Safari** for the browser tools; **System Events** for browser detection (which browser is
   in front) and for dictation's typing.
 - **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
-- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). **Accessibility** — dictation's typing into other apps. Not
-  asked for automatically; grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if
-  push-to-talk shows as unavailable.
+- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). Not asked for automatically;
+  grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if push-to-talk shows as
+  unavailable.
+- **Accessibility** — computer use (clicking/typing on screen; asked automatically the first time a screen action
+  runs) and dictation's typing into other apps.
 
 ## Run
     uv run python -m veronica                 # menu bar app

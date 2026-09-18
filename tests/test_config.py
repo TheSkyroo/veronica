@@ -232,3 +232,13 @@ def test_input_volume_floor_default_and_clamp():
     assert coerce_setting("input_volume_floor", -5) == 0
     assert coerce_setting("input_volume_floor", 250) == 100
     assert coerce_setting("input_volume_floor", "70") == 70
+
+
+def test_computer_trust_s_default_and_clamp():
+    assert Settings().computer_trust_s == 90
+    f = EDITABLE_SETTINGS["computer_trust_s"]
+    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (0, 600)
+    assert f.label == "Screen-control trust window (seconds)"
+    assert coerce_setting("computer_trust_s", -5) == 0
+    assert coerce_setting("computer_trust_s", 5000) == 600
+    assert coerce_setting("computer_trust_s", "30") == 30

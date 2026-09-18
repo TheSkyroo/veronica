@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 import os
 import shlex
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -21,6 +22,7 @@ from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.browser import browser_server
 from veronica.tools.computer import computer_server
+from veronica.tools.computer_events import Front, frontmost, is_system_dialog
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -211,13 +213,23 @@ class Brain:
         confirm: Confirm,
         on_tool: Callable[[str, str], None] | None = None,
         memory=None,
+        frontmost: Callable[[], Front] = frontmost,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.s = settings
         self._confirm = confirm
         self._on_tool = on_tool
         self._memory = memory
+        self._frontmost = frontmost
+        self._clock = clock
         self._client = None
         self._in_flight = False
+        # Trust window (spec E4): after the user approves one confirm-class
+        # screen action, further ones in the same app are auto-allowed until
+        # `_trust_until` (monotonic seconds). Cleared on barge, "that's all",
+        # or a "no".
+        self._trust_until = 0.0
+        self._trust_app: str | None = None
 
     # -- session persistence --------------------------------------------------
     def _load_session(self) -> str | None:
@@ -264,9 +276,47 @@ class Brain:
             if self._on_tool:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
+        if tool_name.startswith(COMPUTER_PREFIX):
+            return await self._gate_computer(tool_name, input, summary)
         log.info("tool request: %s", summary)
         if await self._confirm(summary, summarize_detail(tool_name, input)):
             return PermissionResultAllow(updated_input=input)
+        return PermissionResultDeny(message="user declined")
+
+    # -- trust window (E4) ----------------------------------------------------
+    def clear_trust(self) -> None:
+        self._trust_until = 0.0
+        self._trust_app = None
+
+    def _trusted(self, front: Front, now: float) -> bool:
+        return (
+            self._trust_app is not None
+            and now < self._trust_until
+            and front.bundle_id == self._trust_app
+            and not is_system_dialog(front)
+        )
+
+    async def _gate_computer(self, tool_name: str, input: dict, summary: str):
+        """Confirm gate for confirm-class `mcp__computer__*` tools. The
+        frontmost app is looked up at gate time; a system permission dialog
+        (`is_system_dialog`, keyed on bundle id — those windows have empty
+        titles) never gets the trust exemption."""
+        front = self._frontmost()
+        now = self._clock()
+        if self._trusted(front, now):
+            log.info("trusted: %s", summary)
+            if self._on_tool:
+                self._on_tool(summary, "auto")
+            return PermissionResultAllow(updated_input=input)
+        log.info("tool request: %s", summary)
+        if await self._confirm(summary, summarize_detail(tool_name, input)):
+            window = self.s.computer_trust_s
+            if window > 0 and front.bundle_id and not is_system_dialog(front):
+                self._trust_until = now + window
+                self._trust_app = front.bundle_id
+                log.info("trust window opened for %s (%ss)", front.bundle_id, window)
+            return PermissionResultAllow(updated_input=input)
+        self.clear_trust()
         return PermissionResultDeny(message="user declined")
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:

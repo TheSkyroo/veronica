@@ -259,6 +259,7 @@
         settingRow('brain', 'effort'),
         settingRow('brain', 'memory_enabled'),
         settingRow('brain', 'brain_cwd', {wide: true}),
+        settingRow('brain', 'computer_trust_s'),
       ];
     },
     history() {
