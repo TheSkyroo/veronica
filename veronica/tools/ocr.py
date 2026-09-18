@@ -120,7 +120,10 @@ def recognize_text(
         cand = candidates[0]
         text = str(cand.string())
         confidence = float(cand.confidence())
-        words.append(_word(text, obs.boundingBox(), confidence, width, height, line=True))
+        # A single-token line IS a token (a lone button label like "Save"):
+        # flag it as such so find_text's token-preference never hides it.
+        single = len(_TOKEN.findall(text)) < 2
+        words.append(_word(text, obs.boundingBox(), confidence, width, height, line=not single))
         words.extend(_token_words(vision, cand, text, confidence, width, height))
     return words
 

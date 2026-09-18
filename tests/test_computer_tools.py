@@ -582,3 +582,11 @@ def test_server_and_tool_names():
     ]
     assert c.computer_server is not None
     assert "positive dy scrolls down" in c.computer_scroll.description.lower()
+
+
+def test_dialog_safe_short_labels_are_exact_only():
+    from veronica.tools import computer as c
+    assert c._dialog_safe("no") and c._dialog_safe("No")
+    assert not c._dialog_safe("now")            # "Update Now" must not be safe
+    assert not c._dialog_safe("ok") and not c._dialog_safe("on") and not c._dialog_safe("go")
+    assert c._dialog_safe("Don't Allow") and c._dialog_safe("cancei")   # fuzzy still fine for long labels

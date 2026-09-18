@@ -258,7 +258,7 @@ def test_recognize_text_token_ranges_are_utf16_units():
 def test_recognize_text_single_token_line_is_not_duplicated():
     v = FakeVision([FakeObservation("Save", (0.1, 0.9, 0.2, 0.05), token_boxes={"Save": (0.1, 0.9, 0.2, 0.05)})])
     words = ocr.recognize_text(PNG, vision=v, image_size=(100, 100))
-    assert [(w.text, w.line) for w in words] == [("Save", True)]
+    assert [(w.text, w.line) for w in words] == [("Save", False)]   # a lone label is a token, not a line
     assert v.observations[0]._c.ranges == []
 
 
@@ -343,3 +343,16 @@ def test_find_text_fuzzy_threshold():
     assert [w.text for w in res] == ["Preferences", "Prefernces"]
     assert ocr.find_text(words, "zzzz") == []
     assert ocr.find_text(words, "   ") == []
+
+
+def test_single_token_line_counts_as_token_and_is_not_suppressed():
+    from veronica.tools.ocr import Word, find_text
+    words = [
+        Word("Save changes before closing?", 0, 10, 200, 12, 0.9, line=True),
+        Word("Save", 20, 10, 20, 12, 0.9),
+        Word("changes", 45, 10, 40, 12, 0.9),
+        Word("Save", 310, 100, 30, 20, 0.95),          # a standalone button: line=False
+    ]
+    hits = find_text(words, "Sav")
+    centres = [(round(w.x + w.w / 2), round(w.y + w.h / 2)) for w in hits]
+    assert (325, 110) in centres

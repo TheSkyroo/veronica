@@ -129,8 +129,12 @@ def _dialog_safe(label: str) -> bool:
     norm = _norm_label(label)
     if not norm:
         return False
+    # Short labels only match exactly: "now" vs "no" is 0.8 by ratio, and
+    # "Update Now"/"Restart Now" buttons must never count as safe.
     return any(
-        norm == safe or difflib.SequenceMatcher(None, norm, safe).ratio() >= DIALOG_SAFE_RATIO
+        norm == safe
+        or (len(norm) > 3 and len(safe) > 3
+            and difflib.SequenceMatcher(None, norm, safe).ratio() >= DIALOG_SAFE_RATIO)
         for safe in DIALOG_SAFE_LABELS
     )
 
