@@ -55,8 +55,10 @@ class InputLevelGuard:
 
     `check()` is throttled to one read per `interval_s` unless `force` is
     set (the device-switch hook forces one), and is a no-op while
-    `floor() <= 0`. Safe to call from the mic reader thread: it only runs
-    subprocesses, under a lock so two callers can't race the same fix.
+    `floor() <= 0`. It only runs subprocesses (osascript: ~100 ms typical,
+    worst case 2 x 5 s timeouts), under a lock so a forced and a periodic
+    check can't race the same fix, so call it from a thread that may block
+    for that long, never from the audio loop or under `refresh_lock`.
     """
 
     def __init__(

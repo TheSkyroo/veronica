@@ -86,8 +86,19 @@ def reset() -> None:
 
 def subscribe_change(fn: Callable[[], None]) -> None:
     """Run `fn` after every successful PortAudio refresh (i.e. right after the
-    mic has followed a default-input switch). Errors are logged, not raised."""
+    mic has followed a default-input switch). Callbacks run on a short
+    daemon thread, never on the refreshing thread: the real callers hold
+    `refresh_lock` around the whole refresh, and a subscriber may shell out
+    (the input-volume guard runs osascript). Errors are logged, not raised."""
     _change_subscribers.append(fn)
+
+
+def _run_subscribers() -> None:
+    for fn in list(_change_subscribers):
+        try:
+            fn()
+        except Exception:
+            log.warning("device change callback failed", exc_info=True)
 
 
 def observe(current: int | None) -> bool:
@@ -243,13 +254,12 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
             # off and retries) rather than carrying on silently.
             log.error("PortAudio initialize failed", exc_info=True)
             raise
-    # Outside the lock: a subscriber may shell out (the input-volume guard
-    # runs osascript) and must not hold up stream opens meanwhile.
-    for fn in list(_change_subscribers):
-        try:
-            fn()
-        except Exception:
-            log.warning("device change callback failed", exc_info=True)
+    # Off this thread: mic.refresh_if_pending / play._ensure_stream call us
+    # inside their own `with refresh_lock:` (RLock), so anything run inline
+    # here would still hold the lock and stall every other waiter for as
+    # long as the subscriber takes (osascript: up to 2x5 s worst case).
+    if _change_subscribers:
+        threading.Thread(target=_run_subscribers, name="audio-change-subscribers", daemon=True).start()
 
 
 def _snapshot_baseline(get: Callable[[], int | None] = default_input_id) -> None:

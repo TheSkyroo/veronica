@@ -315,6 +315,7 @@ def test_subscribe_change_runs_after_successful_refresh(monkeypatch):
     order = []
     devices.subscribe_change(lambda: order.append(("cb", list(sd.calls))))
     devices.refresh_portaudio()
+    assert _wait_for(lambda: len(order) == 1)
     assert order == [("cb", ["terminate", "initialize"])]
 
 
@@ -325,6 +326,7 @@ def test_subscribe_change_not_run_when_initialize_fails(monkeypatch):
     devices.subscribe_change(lambda: hits.append(1))
     with pytest.raises(RuntimeError):
         devices.refresh_portaudio()
+    time.sleep(0.05)
     assert hits == []
 
 
@@ -338,29 +340,66 @@ def test_subscribe_change_callback_errors_are_logged_and_isolated(monkeypatch, c
     devices.subscribe_change(lambda: hits.append(1))
     with caplog.at_level(logging.WARNING, logger="veronica.audio"):
         devices.refresh_portaudio()
-    assert hits == [1]
-    assert "device change callback failed" in caplog.text
+        assert _wait_for(lambda: hits == [1])
+        assert _wait_for(lambda: "device change callback failed" in caplog.text)
 
 
-def test_subscribe_change_runs_outside_refresh_lock(monkeypatch):
-    """A subscriber shells out (osascript); it must not hold refresh_lock,
-    or a stream open on another thread would wait on it."""
+def _wait_for(pred, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
+def test_subscribe_change_runs_off_the_lock_holding_thread(monkeypatch):
+    """Real callers (mic.refresh_if_pending, play._ensure_stream) call
+    refresh_portaudio() *inside* an outer `with refresh_lock:`. A subscriber
+    shells out (osascript, up to 2x5 s), so it must run on another thread
+    and must not block the refresh, or every other refresh_lock waiter
+    would stall behind it."""
     monkeypatch.setattr(devices, "sd", FakeSD())
-    seen = []
+    started = threading.Event()
+    release = threading.Event()
+    seen = {}
 
-    def try_lock_from_other_thread():
-        got = devices.refresh_lock.acquire(blocking=False)
-        if got:
+    def slow_subscriber():
+        seen["thread"] = threading.current_thread()
+        seen["lock_free"] = devices.refresh_lock.acquire(blocking=False)
+        if seen["lock_free"]:
             devices.refresh_lock.release()
-        seen.append(got)
+        started.set()
+        release.wait(2.0)
 
-    def probe():
-        t = threading.Thread(target=try_lock_from_other_thread)
-        t.start()
-        t.join()
-    devices.subscribe_change(probe)
-    devices.refresh_portaudio()
-    assert seen == [True]
+    devices.subscribe_change(slow_subscriber)
+    t0 = time.monotonic()
+    with devices.refresh_lock:
+        devices.refresh_portaudio()
+        elapsed = time.monotonic() - t0
+        assert started.wait(2.0)
+        # the caller still holds the lock, so the subscriber must NOT have got it
+        assert seen["lock_free"] is False
+    assert elapsed < 0.5                      # refresh returned without waiting on the subscriber
+    assert seen["thread"] is not threading.current_thread()
+    assert seen["thread"].daemon
+    release.set()
+    assert _wait_for(lambda: not seen["thread"].is_alive())
+
+
+def test_subscribe_change_all_callbacks_run_and_errors_isolated_off_thread(monkeypatch, caplog):
+    monkeypatch.setattr(devices, "sd", FakeSD())
+    hits = []
+
+    def bad():
+        raise RuntimeError("guard exploded")
+    devices.subscribe_change(bad)
+    devices.subscribe_change(lambda: hits.append(threading.current_thread().name))
+    with caplog.at_level(logging.WARNING, logger="veronica.audio"):
+        devices.refresh_portaudio()
+        assert _wait_for(lambda: len(hits) == 1)
+        assert _wait_for(lambda: "device change callback failed" in caplog.text)
+    assert hits == ["audio-change-subscribers"]
 
 
 def test_reset_clears_subscribers(monkeypatch):
@@ -369,4 +408,5 @@ def test_reset_clears_subscribers(monkeypatch):
     devices.subscribe_change(lambda: hits.append(1))
     devices.reset()
     devices.refresh_portaudio()
+    time.sleep(0.05)
     assert hits == []
