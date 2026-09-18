@@ -140,6 +140,31 @@ async def test_screenshot_over_3mb_reencoded_as_jpeg(fake_screens_dir, monkeypat
     assert sorted(p.name for p in fake_screens_dir.iterdir()) == ["latest.png"]
 
 
+async def test_screenshot_jpeg_fallback_still_writes_geometry(fake_screens_dir, monkeypatch):
+    big = b"\x89PNG" + b"\0" * (screen.MAX_PNG_BYTES + 1)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(big)
+        if argv[0] == "sips" and "--out" in argv:
+            with open(argv[argv.index("--out") + 1], "wb") as f:
+                f.write(b"\xff\xd8JPEG-fake")
+        if argv[0] == "sips" and "-g" in argv:
+            return Done(out=SIPS_G_OUT)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert res["content"][0]["mimeType"] == "image/jpeg"
+    g = screen.load_geometry()
+    assert g is not None and (g.image_w, g.image_h) == (1568, 1019)
+    assert sorted(p.name for p in fake_screens_dir.iterdir()) == ["latest.json", "latest.png"]
+
+
 async def test_screenshot_over_3mb_keeps_png_if_reencode_fails(fake_screens_dir, monkeypatch):
     big = b"\x89PNG" + b"\0" * (screen.MAX_PNG_BYTES + 1)
     calls = []
@@ -587,3 +612,26 @@ def test_display_retry_falls_back_to_screen_geometry(fake_screens_dir, monkeypat
     screen.capture_screenshot("window")
     g = screen.load_geometry()
     assert g.region == "screen" and g.window is None and g.width_pt == 1470.0
+
+
+def test_selection_capture_writes_no_sidecar_and_removes_stale_one(fake_screens_dir, monkeypatch):
+    """A dragged selection has no known screen origin: no geometry at all
+    (rather than one claiming the whole display), and the previous
+    capture's sidecar must not survive to describe this image."""
+    (fake_screens_dir / "latest.json").write_text('{"region": "screen"}')
+    _geometry_run(monkeypatch, fake_screens_dir)
+    q = FakeQuartz((0, 0, 1470, 956))
+    monkeypatch.setattr(screen, "_quartz", lambda: q)
+    data, _path, _mime = screen.capture_screenshot("selection")
+    assert data == b"\x89PNG-fake"
+    assert not (fake_screens_dir / "latest.json").exists()
+    assert screen.load_geometry() is None
+    assert not any(c[0] == "bounds" for c in q.calls)
+    assert screen._build_geometry("selection", fake_screens_dir / "latest.png", None) is None
+
+
+async def test_selection_screenshot_text_has_no_geometry(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    res = await screen.screenshot.handler({"region": "selection"})
+    assert text(res) == "Screenshot of the selection."

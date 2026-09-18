@@ -217,7 +217,13 @@ def load_geometry(path: Path | None = None) -> Geometry | None:
 def _build_geometry(region: str, png_path: Path, window_id: int | None) -> Geometry | None:
     """Compute the sidecar for the capture that just landed at `png_path`.
     None (no sidecar) if the image size or the display bounds can't be
-    determined — the screenshot itself is still fine to show."""
+    determined — the screenshot itself is still fine to show — and always
+    None for a `selection` capture: the dragged rectangle's screen origin
+    isn't known, so no geometry is the honest answer (the computer tools
+    then refuse with "take a screenshot first" instead of clicking the
+    wrong place)."""
+    if region == "selection":
+        return None
     size = _png_size(png_path)
     if size is None:
         return None
