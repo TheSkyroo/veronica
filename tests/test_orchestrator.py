@@ -3620,3 +3620,73 @@ async def test_followup_echo_of_own_reply_is_ignored():
     await o.one_turn()
     assert o.brain.asked == ["tell me a joke"]
     assert states[-1] == "idle"
+
+
+# -- input-volume floor guard --------------------------------------------------
+from veronica.audio import devices as devices_mod
+
+
+class FakeInputGuard:
+    def __init__(self):
+        self.calls = []
+        self.interval_s = 10.0
+
+    def check(self, force=False):
+        self.calls.append(force)
+        return None
+
+
+def build_guard(monkeypatch):
+    subs = []
+    monkeypatch.setattr(devices_mod, "subscribe_change", subs.append)
+    events = []
+    g = FakeInputGuard()
+    o = Orchestrator(
+        Settings(followup_window_s=0, confirm_listen_s=0),
+        wake=_WakeBlocks(), recorder=Rec([]), stt=STT([]),
+        brain=Brain(), tts=TTS(), player=Player(),
+        on_event=lambda k, p: events.append((k, p)), input_guard=g,
+    )
+    return o, g, subs, events
+
+
+async def _run_briefly(o):
+    task = asyncio.ensure_future(o.run_forever())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_forever_starts_input_guard_once_forced_and_subscribes(monkeypatch):
+    o, g, subs, _ = build_guard(monkeypatch)
+    await _run_briefly(o)
+    assert g.calls == [True]
+    assert len(subs) == 1
+    subs[0]()
+    assert g.calls == [True, True]
+    o.stop_input_guard()
+
+
+async def test_run_forever_starts_input_guard_only_once(monkeypatch):
+    o, g, subs, _ = build_guard(monkeypatch)
+    await _run_briefly(o)
+    await _run_briefly(o)
+    assert g.calls == [True] and len(subs) == 1
+    o.stop_input_guard()
+
+
+async def test_run_forever_without_input_guard(monkeypatch):
+    subs = []
+    monkeypatch.setattr(devices_mod, "subscribe_change", subs.append)
+    o, _ = build()
+    o.wake = _WakeBlocks()
+    await _run_briefly(o)
+    assert o.input_guard is None and subs == []
+
+
+def test_input_volume_corrected_hints_hud_once_per_session(monkeypatch):
+    o, _, _, ev = build_guard(monkeypatch)
+    o.input_volume_corrected(33, 85, "AirPods")
+    o.input_volume_corrected(27, 85, "AirPods")
+    assert ev == [("tool", {"summary": "Input volume 33 → 85 (AirPods)", "decision": "auto"})]

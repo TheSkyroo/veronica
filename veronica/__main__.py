@@ -5,6 +5,7 @@ import os
 import sys
 
 from veronica import prefs, proactive
+from veronica.audio.input_level import InputLevelGuard
 from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
@@ -128,6 +129,15 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
             announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
             calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
         )
+    guard = None
+    if audio:
+        # Reads the floor live so a Settings change applies without a
+        # restart; the HUD hint goes through the orchestrator (once per
+        # session), which exists by the time the first check runs.
+        guard = InputLevelGuard(
+            floor=lambda: s.input_volume_floor,
+            on_corrected=lambda old, new, name: holder["orch"].input_volume_corrected(old, new, name),
+        )
     player = Player()
     register_for_refresh(player)
     orch = Orchestrator(
@@ -144,6 +154,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         on_event=on_event,
         on_quit=on_quit,
         proactive=pro,
+        input_guard=guard,
         stt_factory=make_stt,
         language=language,
         updater_check=updater_check,

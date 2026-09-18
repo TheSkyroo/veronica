@@ -14,6 +14,7 @@ import numpy as np
 from veronica import prefs
 from veronica import proactive as proactive_mod
 from veronica import version
+from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
 from veronica.brain import quick
 from veronica.brain.intents import (
@@ -156,6 +157,7 @@ class Orchestrator:
                  on_event: Callable[[str, Any], None] | None = None,
                  on_quit: Callable[[], None] | None = None,
                  proactive=None,
+                 input_guard=None,
                  stt_factory: Callable[[str, str | None], Any] | None = None,
                  language: str = "en",
                  updater_check: Callable[[], Any] | None = None,
@@ -182,6 +184,15 @@ class Orchestrator:
         # Started once by run_forever; its schedule is what the "brief me"
         # / "turn on nudges" intents edit. None in --text mode.
         self.proactive = proactive
+        # Optional veronica.audio.input_level.InputLevelGuard: raises the
+        # Mac's input volume back to settings.input_volume_floor when a call
+        # app / device switch lowers it. run_forever starts its periodic
+        # loop once and re-checks after every PortAudio refresh. None in
+        # --text mode.
+        self.input_guard = input_guard
+        self._input_guard_task: asyncio.Task | None = None
+        self._input_guard_stop: asyncio.Event | None = None
+        self._input_hint_shown = False
         self.wake, self.recorder, self.stt = wake, recorder, stt
         self.brain, self.tts, self.player = brain, tts, player
         self.partial_stt = partial_stt
@@ -1515,11 +1526,41 @@ class Orchestrator:
             finally:
                 self._set("idle")
 
+    # -- input-volume floor guard --------------------------------------------
+    def _start_input_guard(self) -> None:
+        if self.input_guard is None or self._input_guard_task is not None:
+            return
+        self._input_guard_stop = asyncio.Event()
+        self._input_guard_task = asyncio.ensure_future(
+            input_level.run_periodic(self.input_guard, self._input_guard_stop)
+        )
+        # A device switch is exactly when macOS resets the input level:
+        # re-check right after the mic has followed it, ignoring the throttle.
+        devices.subscribe_change(lambda: self.input_guard.check(force=True))
+
+    def stop_input_guard(self) -> None:
+        if self._input_guard_stop is not None:
+            self._input_guard_stop.set()
+        if self._input_guard_task is not None:
+            self._input_guard_task.cancel()
+        self._input_guard_task = None
+        self._input_guard_stop = None
+
+    def input_volume_corrected(self, old: int, new: int, device: str) -> None:
+        """Guard callback: surface the first correction of the session on the
+        HUD so the user learns why the level keeps coming back; later ones
+        only log (the guard already does)."""
+        if self._input_hint_shown:
+            return
+        self._input_hint_shown = True
+        self._emit("tool", {"summary": f"Input volume {old} → {new} ({device})", "decision": "auto"})
+
     async def run_forever(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._set("idle")
         if self.proactive is not None:
             await self.proactive.start()
+        self._start_input_guard()
         while True:
             # Deliver anything queued while we were away (e.g. a timer that
             # fired mid-turn), unless muted — while muted, announcements just

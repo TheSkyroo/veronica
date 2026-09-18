@@ -21,8 +21,11 @@ import sounddevice as sd
 log = logging.getLogger("veronica.audio")
 
 _COREAUDIO = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
+_COREFOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 _SYSTEM_OBJECT = 1                                       # kAudioObjectSystemObject
 _DEFAULT_INPUT = int.from_bytes(b"dIn ", "big")          # kAudioHardwarePropertyDefaultInputDevice
+_OBJECT_NAME = int.from_bytes(b"lnam", "big")            # kAudioObjectPropertyName (CFStringRef)
+_CF_UTF8 = 0x08000100                                    # kCFStringEncodingUTF8
 _SCOPE_GLOBAL = int.from_bytes(b"glob", "big")           # kAudioObjectPropertyScopeGlobal
 _ELEMENT_MAIN = 0
 
@@ -37,6 +40,9 @@ pending: bool = False                 # last_input_id != initialised_for: a refr
 generation: int = 0                   # bumped by every refresh_portaudio(); streams opened
                                       # under an older generation are dead (Pa_Terminate closes them)
 _baselined = False
+# Callbacks run at the end of every successful refresh_portaudio() (the
+# input-volume guard re-checks the level right after a device switch).
+_change_subscribers: list[Callable[[], None]] = []
 
 # Held while PortAudio is re-initialised and while any stream is being
 # opened or read, so a re-init can't land between an open starting and the
@@ -74,7 +80,14 @@ def reset() -> None:
     pending = False
     generation = 0
     _baselined = False
+    _change_subscribers.clear()
     reset_busy()
+
+
+def subscribe_change(fn: Callable[[], None]) -> None:
+    """Run `fn` after every successful PortAudio refresh (i.e. right after the
+    mic has followed a default-input switch). Errors are logged, not raised."""
+    _change_subscribers.append(fn)
 
 
 def observe(current: int | None) -> bool:
@@ -141,6 +154,65 @@ def default_input_id(get: Callable | None = None) -> int | None:
         return None
 
 
+_cf_to_str_cache: list = []
+
+
+def _cfstring_to_str():
+    """A CFStringRef -> str converter (releases the ref), or None if
+    CoreFoundation is unavailable."""
+    if _cf_to_str_cache:
+        return _cf_to_str_cache[0]
+    try:
+        cf = ctypes.cdll.LoadLibrary(_COREFOUNDATION)
+        get_c = cf.CFStringGetCString
+        get_c.restype = ctypes.c_bool
+        get_c.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        release = cf.CFRelease
+        release.restype = None
+        release.argtypes = [ctypes.c_void_p]
+
+        def to_str(ref: int) -> str | None:
+            try:
+                buf = ctypes.create_string_buffer(256)
+                if not get_c(ref, buf, 256, _CF_UTF8):
+                    return None
+                return buf.value.decode("utf-8", "replace")
+            finally:
+                release(ref)
+    except Exception:
+        to_str = None
+    _cf_to_str_cache.append(to_str)
+    return to_str
+
+
+def default_input_name(
+    get: Callable | None = None,
+    device_id: int | None = None,
+    to_str: Callable[[int], str | None] | None = None,
+) -> str | None:
+    """The current default input device's name ("MacBook Air Microphone",
+    "AirPods Pro"), or None on any failure. CoreAudio's kAudioObjectPropertyName
+    is a CFStringRef (owned by the caller), read with CFStringGetCString and
+    released. `get`/`device_id`/`to_str` are test injection points."""
+    try:
+        dev = device_id if device_id is not None else default_input_id(get)
+        if dev is None:
+            return None
+        fn = get if get is not None else _coreaudio_getter()
+        conv = to_str if to_str is not None else _cfstring_to_str()
+        if fn is None or conv is None:
+            return None
+        addr = _PropertyAddress(_OBJECT_NAME, _SCOPE_GLOBAL, _ELEMENT_MAIN)
+        ref = ctypes.c_void_p(0)
+        size = ctypes.c_uint32(ctypes.sizeof(ref))
+        status = fn(dev, ctypes.byref(addr), 0, None, ctypes.byref(size), ctypes.byref(ref))
+        if status != 0 or not ref.value:
+            return None
+        return conv(ref.value) or None
+    except Exception:
+        return None
+
+
 def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
     """Re-initialise PortAudio so it re-reads the device list. `before` runs
     first (used to close the persistent Player output stream — PortAudio
@@ -171,6 +243,13 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
             # off and retries) rather than carrying on silently.
             log.error("PortAudio initialize failed", exc_info=True)
             raise
+    # Outside the lock: a subscriber may shell out (the input-volume guard
+    # runs osascript) and must not hold up stream opens meanwhile.
+    for fn in list(_change_subscribers):
+        try:
+            fn()
+        except Exception:
+            log.warning("device change callback failed", exc_info=True)
 
 
 def _snapshot_baseline(get: Callable[[], int | None] = default_input_id) -> None:

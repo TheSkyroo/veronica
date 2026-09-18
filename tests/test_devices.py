@@ -41,6 +41,63 @@ def test_default_input_id_none_when_library_missing(monkeypatch):
     assert devices.default_input_id() is None
 
 
+# -- default_input_name -----------------------------------------------------
+
+def test_default_input_name_reads_lnam_via_cfstring():
+    seen = {}
+
+    def fake_get(obj, addr_ref, qual_size, qual, size_ref, data_ref):
+        addr = addr_ref._obj
+        seen["obj"] = obj
+        seen["selector"] = addr.mSelector.to_bytes(4, "big")
+        seen["scope"] = addr.mScope.to_bytes(4, "big")
+        seen["element"] = addr.mElement
+        data_ref._obj.value = 0xC0FFEE
+        return 0
+
+    released = []
+
+    def fake_to_str(ref):
+        released.append(ref)
+        return "AirPods Pro" if ref == 0xC0FFEE else None
+
+    assert devices.default_input_name(get=fake_get, device_id=71, to_str=fake_to_str) == "AirPods Pro"
+    assert seen == {"obj": 71, "selector": b"lnam", "scope": b"glob", "element": 0}
+    assert released == [0xC0FFEE]
+
+
+def test_default_input_name_none_when_no_default_device(monkeypatch):
+    monkeypatch.setattr(devices, "default_input_id", lambda: None)
+    assert devices.default_input_name(get=lambda *a: 0) is None
+
+
+def test_default_input_name_none_on_status_error_or_null_ref():
+    assert devices.default_input_name(get=lambda *a: -1, device_id=71, to_str=lambda r: "x") is None
+
+    def null_ref(obj, addr_ref, qs, q, size_ref, data_ref):
+        data_ref._obj.value = 0
+        return 0
+    assert devices.default_input_name(get=null_ref, device_id=71, to_str=lambda r: "x") is None
+
+
+def test_default_input_name_none_on_exception():
+    def boom(*a):
+        raise OSError("no coreaudio")
+    assert devices.default_input_name(get=boom, device_id=71) is None
+
+
+def test_default_input_name_none_when_library_missing(monkeypatch):
+    monkeypatch.setattr(devices, "_coreaudio_getter", lambda: None)
+    assert devices.default_input_name(device_id=71) is None
+
+
+def test_default_input_name_empty_string_is_none():
+    def ok(obj, addr_ref, qs, q, size_ref, data_ref):
+        data_ref._obj.value = 5
+        return 0
+    assert devices.default_input_name(get=ok, device_id=71, to_str=lambda r: "") is None
+
+
 # -- refresh_portaudio ------------------------------------------------------
 
 class FakeSD:
@@ -248,3 +305,68 @@ def test_input_watch_survives_getter_exception():
     w = devices.InputWatch(poll_s=0.0, get_id=boom)
     assert w.check(now=0.0) is False
     assert w.last is None
+
+
+# -- subscribe_change ---------------------------------------------------------
+
+def test_subscribe_change_runs_after_successful_refresh(monkeypatch):
+    sd = FakeSD()
+    monkeypatch.setattr(devices, "sd", sd)
+    order = []
+    devices.subscribe_change(lambda: order.append(("cb", list(sd.calls))))
+    devices.refresh_portaudio()
+    assert order == [("cb", ["terminate", "initialize"])]
+
+
+def test_subscribe_change_not_run_when_initialize_fails(monkeypatch):
+    sd = FakeSD(fail=("initialize",))
+    monkeypatch.setattr(devices, "sd", sd)
+    hits = []
+    devices.subscribe_change(lambda: hits.append(1))
+    with pytest.raises(RuntimeError):
+        devices.refresh_portaudio()
+    assert hits == []
+
+
+def test_subscribe_change_callback_errors_are_logged_and_isolated(monkeypatch, caplog):
+    monkeypatch.setattr(devices, "sd", FakeSD())
+    hits = []
+
+    def bad():
+        raise RuntimeError("guard exploded")
+    devices.subscribe_change(bad)
+    devices.subscribe_change(lambda: hits.append(1))
+    with caplog.at_level(logging.WARNING, logger="veronica.audio"):
+        devices.refresh_portaudio()
+    assert hits == [1]
+    assert "device change callback failed" in caplog.text
+
+
+def test_subscribe_change_runs_outside_refresh_lock(monkeypatch):
+    """A subscriber shells out (osascript); it must not hold refresh_lock,
+    or a stream open on another thread would wait on it."""
+    monkeypatch.setattr(devices, "sd", FakeSD())
+    seen = []
+
+    def try_lock_from_other_thread():
+        got = devices.refresh_lock.acquire(blocking=False)
+        if got:
+            devices.refresh_lock.release()
+        seen.append(got)
+
+    def probe():
+        t = threading.Thread(target=try_lock_from_other_thread)
+        t.start()
+        t.join()
+    devices.subscribe_change(probe)
+    devices.refresh_portaudio()
+    assert seen == [True]
+
+
+def test_reset_clears_subscribers(monkeypatch):
+    monkeypatch.setattr(devices, "sd", FakeSD())
+    hits = []
+    devices.subscribe_change(lambda: hits.append(1))
+    devices.reset()
+    devices.refresh_portaudio()
+    assert hits == []

@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     wake_phrases: list[str] = Field(
         default_factory=lambda: ["veronica", "veronika", "hey veronica", "hi veronica"]
     )
+    # macOS input volume floor (0-100): call apps' auto-gain and device
+    # switches keep dropping it (27, 33 seen), which kills far-field wake
+    # detection. The guard raises it back to this; 0 = off.
+    input_volume_floor: int = 85
 
     # speech
     language: str = "en"
@@ -159,6 +163,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         min=0.15, max=0.6, restart=True,
     ),
     "wake_phrases": EditableField("list", "Wake phrases", "Comma-separated; 'veronica' is recommended."),
+    "input_volume_floor": EditableField(
+        "int", "Input volume floor",
+        "Raise the Mac's input volume back to this when a call app or device switch lowers it. 0 = off.",
+        min=0, max=100, restart=False,
+    ),
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Option)"),
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),

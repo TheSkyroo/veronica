@@ -207,7 +207,8 @@ def test_state_has_every_section_and_key(h):
     assert {"language", "start_at_login", "ptt_enabled", "hud_mode", "hud_hide_after_s"} <= set(st["general"])
     assert {"voice", "hindi_voice", "speed", "voices"} == set(st["voice"])
     assert {"followup_window_s", "confirm_listen_s", "wake_min_rms", "wake_phrases",
-            "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s"} <= set(st["listening"])
+            "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
+            "input_volume_floor"} <= set(st["listening"])
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
     assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])

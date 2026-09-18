@@ -362,6 +362,12 @@ every couple of seconds and reopens the mic on the new device (`input device cha
 the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
 in-flight recording finishes.
 
+**She stopped hearing me after a call / after switching mics.** Call apps with auto-gain (Zoom, Meet,
+FaceTime) and device switches quietly drop the Mac's input volume to ~30 %, which starves the wake check.
+Veronica checks the input volume once a minute and right after every mic switch, and raises it back to the
+"Input volume floor" setting (`input_volume_floor`, default 85; never lowers it). The first fix of a session
+shows on the HUD; every fix is an `input volume 33 → 85 (...)` line in the log. Set the floor to 0 to turn it off.
+
 ## Test
     uv run pytest            # unit
     uv run pytest -m live    # needs mic/speaker/models/login

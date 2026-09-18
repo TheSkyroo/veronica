@@ -542,3 +542,42 @@ async def test_build_orchestrator_passes_updater_hooks(monkeypatch, tmp_home):
 
     plain = main_mod.build_orchestrator(Settings(), audio=False)
     assert (plain.updater_check, plain.updater_update, plain.relaunch) == (None, None, None)
+
+
+async def test_build_orchestrator_wires_input_guard(monkeypatch, tmp_home):
+    from veronica.audio.input_level import InputLevelGuard
+
+    orch = await _build_audio_orch(monkeypatch)
+    g = orch.input_guard
+    assert isinstance(g, InputLevelGuard)
+    assert g._floor() == 85
+    orch.s.input_volume_floor = 60
+    assert g._floor() == 60
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_input_guard_hint_reaches_hud_once(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
+    monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
+    monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
+    seen = []
+    orch = main_mod.build_orchestrator(
+        Settings(memory_enabled=False), on_event=lambda k, p: seen.append((k, p)), audio=True
+    )
+    cb = orch.input_guard._on_corrected
+    cb(33, 85, "AirPods")
+    cb(20, 85, "AirPods")
+    assert seen == [("tool", {"summary": "Input volume 33 → 85 (AirPods)", "decision": "auto"})]
+    memory_tools.bind(None)
+
+
+async def test_build_orchestrator_no_input_guard_in_text_mode(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
+    assert orch.input_guard is None
+    memory_tools.bind(None)

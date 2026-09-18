@@ -223,3 +223,12 @@ def test_validate_assignment_rejects_bad_type(tmp_home):
     s = Settings()
     with pytest.raises(Exception):
         s.followup_window_s = "x"
+
+
+def test_input_volume_floor_default_and_clamp():
+    assert Settings().input_volume_floor == 85
+    f = EDITABLE_SETTINGS["input_volume_floor"]
+    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (0, 100)
+    assert coerce_setting("input_volume_floor", -5) == 0
+    assert coerce_setting("input_volume_floor", 250) == 100
+    assert coerce_setting("input_volume_floor", "70") == 70
