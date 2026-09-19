@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from veronica.brain.backends.antigravity import AntigravityBrain
+from veronica.brain.backends.codex import CodexBrain
 from veronica.brain.gate import GateServer, ToolGate
 from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
@@ -20,6 +21,7 @@ from veronica.orchestrator import ConfirmResult
 pytestmark = pytest.mark.live
 FIX = Path(__file__).parent / "fixtures" / "brains"
 needs_agy = pytest.mark.skipif(shutil.which("agy") is None, reason="agy not installed")
+needs_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex not installed")
 
 
 @pytest.fixture
@@ -56,7 +58,7 @@ def _capture(name, argv, cwd):
     return p
 
 
-class RecordingAntigravity(AntigravityBrain):
+class _Recording:
     """Keeps the raw stream so a run can be saved as a fixture."""
 
     def __init__(self, *a, **kw):
@@ -68,9 +70,17 @@ class RecordingAntigravity(AntigravityBrain):
         return super().parse(line)
 
 
-async def _brain_with_gate(home, answers, cards):
-    """An AntigravityBrain whose gate is served on home/gate.sock and whose
-    confirm pops `answers`."""
+class RecordingAntigravity(_Recording, AntigravityBrain):
+    pass
+
+
+class RecordingCodex(_Recording, CodexBrain):
+    pass
+
+
+async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity):
+    """A brain whose gate is served on home/gate.sock and whose confirm
+    pops `answers`."""
     s = Settings(home=home)
 
     async def confirm(summary, detail=""):
@@ -81,7 +91,7 @@ async def _brain_with_gate(home, answers, cards):
     gate = ToolGate(s, confirm, on_tool=lambda su, d: cards.append((su, d)))
     srv = GateServer(gate, s.gate_socket)
     await srv.start()
-    return RecordingAntigravity(s, gate, on_tool=lambda su, d: cards.append((su, d))), srv
+    return brain_cls(s, gate, on_tool=lambda su, d: cards.append((su, d))), srv
 
 
 @needs_agy
@@ -160,5 +170,85 @@ async def test_agy_mcp_tool_through_serve(short_home, agy_hooks_file):
         assert not any(e["call"] == "call_mcp_tool" for e in entries), entries
         assert ("volume_get", "auto") in cards, cards
     finally:
+        await b.close()
+        await srv.stop()
+
+
+# -- codex --------------------------------------------------------------------
+@needs_codex
+def test_codex_plain_turn(tmp_path):
+    p = _capture("codex-plain", ["codex", "exec", "--json", "--skip-git-repo-check", "-C", str(tmp_path),
+                                 "Reply with exactly: pineapple. Nothing else."], tmp_path)
+    assert p.returncode == 0 and "pineapple" in p.stdout.lower()
+
+
+@needs_codex
+async def test_codex_brain_plain_turn_and_resume(short_home):
+    b, srv = await _brain_with_gate(short_home, [], [], RecordingCodex)
+    try:
+        out = [x async for x in b.ask("Reply with exactly: pineapple. Nothing else.")]
+        assert any("pineapple" in x.lower() for x in out), out
+        sid = b.s.session_file_for("codex").read_text()
+        assert sid and b._proc is None
+        out2 = [x async for x in b.ask("What fruit did you just name? One word.")]
+        assert any("pineapple" in x.lower() for x in out2), out2       # resumed the thread
+        assert b.s.session_file_for("codex").read_text() == sid
+    finally:
+        await b.close()
+        await srv.stop()
+
+
+@needs_codex
+async def test_codex_native_shell_gated_and_allowed(short_home):
+    proof = short_home / "canary-ok.txt"
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCodex)
+    try:
+        out = [x async for x in b.ask(f"Run the shell command `touch {proof} && echo canary-ok` and reply "
+                                      "with its output only.")]
+        assert any("canary-ok" in x for x in out), out
+        assert proof.exists()
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert any(e["call"] == "Bash" and "canary-ok" in e["key"] for e in entries), entries
+        assert any(c[0] == "confirm" for c in cards), cards       # the gate was really asked
+        assert b.s.codex_native_tools is True                     # canary did not trip
+    finally:
+        (FIX / "codex-shell.jsonl").write_text("\n".join(b.raw) + "\n")
+        await b.close()
+        await srv.stop()
+
+
+@needs_codex
+async def test_codex_native_shell_denied_does_not_run(short_home):
+    proof = short_home / "denied-proof.txt"
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [False] * 5, cards, RecordingCodex)
+    try:
+        out = [x async for x in b.ask(f"Run the shell command `touch {proof}`, then reply with one short "
+                                      "sentence saying whether it ran.")]
+        assert not proof.exists(), out
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert any(str(proof) in e["key"] for e in entries), entries
+        assert any(c[0] == "confirm" for c in cards)
+        assert b.s.codex_native_tools is True
+    finally:
+        await b.close()
+        await srv.stop()
+
+
+@needs_codex
+async def test_codex_mcp_tool_through_serve(short_home):
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCodex)
+    try:
+        out = [x async for x in b.ask("Call the veronica-mac MCP server's volume_get tool and tell me "
+                                      "the volume level in one short sentence.")]
+        assert any(any(ch.isdigit() for ch in x) for x in out), out
+        assert any('"mcp_tool_call"' in l and "volume_get" in l for l in b.raw), b.raw
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert not any("volume_get" in json.dumps(e) for e in entries), entries   # hook lets ours through
+        assert ("volume_get", "auto") in cards, cards                           # tools.serve gated it
+    finally:
+        (FIX / "codex-mcp.jsonl").write_text("\n".join(b.raw) + "\n")
         await b.close()
         await srv.stop()

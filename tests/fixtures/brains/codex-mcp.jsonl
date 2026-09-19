@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a0b94a-c6cf-7b83-8a60-dc979ecd0eb6"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"veronica-mac","tool":"volume_get","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"veronica-mac","tool":"volume_get","arguments":{},"result":{"content":[{"type":"text","text":"39"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"The volume is set to 39%."}}
+{"type":"turn.completed","usage":{"input_tokens":41690,"cached_input_tokens":39168,"cache_write_input_tokens":0,"output_tokens":108,"reasoning_output_tokens":13}}

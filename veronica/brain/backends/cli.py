@@ -158,6 +158,12 @@ class CliBrain:
         """The string the hook logs for this native call (must match what hook.canary_key logs)."""
         return hook.canary_key(tool, input)
 
+    def canary_matches(self, logged_key: str, stream_key: str) -> bool:
+        """Does a hook.log line's key account for the `native_key` seen in the
+        stream? Equality by default; a CLI whose stream wraps the command
+        (Codex: `/bin/zsh -lc '<cmd>'`) loosens this."""
+        return logged_key == stream_key
+
     def turn_message(self, text: str, image_paths: list[Path]) -> str:
         """persistent mode: the one stdin line that starts a turn."""
         raise NotImplementedError
@@ -349,7 +355,7 @@ class CliBrain:
                         entry = json.loads(line)
                     except ValueError:
                         continue
-                    if entry.get("key") == key and float(entry.get("ts", 0)) >= since:
+                    if float(entry.get("ts", 0)) >= since and self.canary_matches(str(entry.get("key", "")), key):
                         return True
             except FileNotFoundError:
                 pass

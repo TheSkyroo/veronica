@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # External brains: may the vendor CLI use its own shell/file tools
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.
+    codex_native_tools: bool = True
     antigravity_native_tools: bool = True
 
     # memory
@@ -216,6 +217,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", 'Pre-approve when I say "do it"',
         "If your request already says do it / go ahead, skip the yes/no for that one action "
         "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
+    ),
+    "codex_native_tools": EditableField(
+        "bool", "Codex: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
     ),
     "antigravity_native_tools": EditableField(
