@@ -473,6 +473,29 @@ def test_mark_loaded_replays_mode_first_then_flushes_queued_pushes_in_order():
     ]
 
 
+def test_configure_before_loaded_is_queued_then_sent():
+    h, web, _, _ = make(mark_loaded=False)
+    h.configure({"particles": 1200, "intensity": 0.8})
+    assert web.js == []
+    h.mark_loaded()
+    assert web.js[-1] == 'window.hud.configure({"particles": 1200, "intensity": 0.8})'
+
+
+def test_configure_after_loaded_evaluates_immediately():
+    h, web, _, _ = make(mark_loaded=True)
+    h.configure({"particles": 2500, "intensity": 1.5})
+    assert web.js == ['window.hud.configure({"particles": 2500, "intensity": 1.5})']
+
+
+def test_initial_config_pushed_on_load_from_settings():
+    h, web, _, _ = make(mark_loaded=False, hud_particles=3000, hud_intensity=1.25)
+    h.push({"kind": "mic", "payload": 0.2})
+    h.mark_loaded()
+    assert web.js[0] == 'window.hud.setMode("full")'
+    assert web.js[1] == 'window.hud.configure({"particles": 3000, "intensity": 1.25})'
+    assert web.js[2].startswith("window.hud.push(")
+
+
 def test_push_after_loaded_evaluates_immediately():
     h, web, _, _ = make(mark_loaded=True)
     h.push({"kind": "mic", "payload": 0.9})

@@ -242,3 +242,18 @@ def test_computer_trust_s_default_and_clamp():
     assert coerce_setting("computer_trust_s", -5) == 0
     assert coerce_setting("computer_trust_s", 5000) == 600
     assert coerce_setting("computer_trust_s", "30") == 30
+
+
+def test_hud_particles_and_intensity_are_live_editable():
+    s = Settings()
+    assert s.hud_particles == 4000 and s.hud_intensity == 1.0
+    f = EDITABLE_SETTINGS["hud_particles"]
+    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (500, 8000)
+    assert f.label == "HUD particles"
+    g = EDITABLE_SETTINGS["hud_intensity"]
+    assert g.kind == "float" and g.restart is False and (g.min, g.max) == (0.2, 2.0)
+    assert g.label == "HUD intensity"
+    assert coerce_setting("hud_particles", 10) == 500
+    assert coerce_setting("hud_particles", 99999) == 8000
+    assert coerce_setting("hud_intensity", 5) == 2.0
+    assert coerce_setting("hud_intensity", "0.5") == 0.5

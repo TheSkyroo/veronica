@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     hud_mode: str = "full"    # "full" | "mini"; runtime pref, see veronica.prefs
     hud_mini_width: int = 400
     hud_mini_height: int = 72
+    hud_particles: int = 4000   # orb particle count (live-editable)
+    hud_intensity: float = 1.0  # orb glow/brightness multiplier (live-editable)
 
     @property
     def session_file(self) -> Path:
@@ -152,6 +154,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "hud_hide_after_s": EditableField(
         "float", "Hide HUD after (seconds)", "", min=1, max=30, restart=False,
+    ),
+    "hud_particles": EditableField(
+        "int", "HUD particles", "More looks richer, costs CPU.", min=500, max=8000, restart=False,
+    ),
+    "hud_intensity": EditableField(
+        "float", "HUD intensity", "Glow/brightness multiplier.", min=0.2, max=2.0, restart=False,
     ),
     "wake_min_rms": EditableField(
         "float", "Wake sensitivity (min level)",
