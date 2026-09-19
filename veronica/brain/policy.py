@@ -273,6 +273,21 @@ _ALWAYS_BASH: dict[str, Callable[[list[str]], bool]] = {
     "launchctl": lambda argv: bool(argv) and argv[0] in ("unload", "bootout"),
     "defaults": lambda argv: len(argv) >= 2 and argv[0] == "write" and argv[1].startswith("com.apple."),
     "tccutil": lambda argv: True,
+    # Wrappers that hide the real command from this table: whatever they run
+    # is opaque here, so they always get their own yes/no.
+    "sh": lambda argv: "-c" in argv,
+    "bash": lambda argv: "-c" in argv,
+    "zsh": lambda argv: "-c" in argv,
+    "fish": lambda argv: "-c" in argv,
+    "python": lambda argv: "-c" in argv,
+    "python3": lambda argv: "-c" in argv,
+    "perl": lambda argv: "-e" in argv,
+    "ruby": lambda argv: "-e" in argv,
+    "node": lambda argv: "-e" in argv,
+    "xargs": lambda argv: True,
+    "eval": lambda argv: True,
+    "exec": lambda argv: True,
+    "find": lambda argv: any(tok in ("-delete", "-exec", "-execdir", "-ok") for tok in argv),
 }
 _POWER_PHRASES = ("shut down", "restart", "log out", "sleep")
 _APPLESCRIPT_PHRASES = _POWER_PHRASES[:3] + ("delete", "empty trash", "keystroke return", "key code 36")
