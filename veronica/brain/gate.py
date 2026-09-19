@@ -1,8 +1,11 @@
+import asyncio
+import json
 import logging
 import os
 import shlex
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from veronica.brain.agent import (
     COMPUTER_PREFIX,
@@ -201,3 +204,52 @@ class ToolGate:
             return Decision(True, "approved")
         self.clear_trust()
         return self._deny(outcome, heard)
+
+
+class GateServer:
+    """Unix-socket front for ToolGate.decide, for the out-of-process
+    callers (tools.serve, brain.hook). One JSON line per request:
+    {"v": 1, "tool", "input", "origin": "mcp"|"hook", "backend"} in,
+    {"allow", "kind", "reason"} out. Confirms are serialized because the
+    orchestrator can only ask one question at a time."""
+
+    def __init__(self, gate: ToolGate, path: Path) -> None:
+        self.gate, self.path = gate, path
+        self._server: asyncio.AbstractServer | None = None
+        self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.chmod(0o700)
+        if self.path.exists():
+            self.path.unlink()
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path))
+        self.path.chmod(0o600)
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+        if self.path.exists():
+            self.path.unlink()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await reader.readline()
+            try:
+                req = json.loads(line)
+                tool, inp = str(req["tool"]), dict(req.get("input") or {})
+            except Exception:
+                resp = {"allow": False, "kind": "denied", "reason": "bad request"}
+            else:
+                log.info("gate request from %s/%s: %s", req.get("backend"), req.get("origin"), tool)
+                async with self._lock:
+                    d = await self.gate.decide(tool, inp)
+                resp = {"allow": d.allow, "kind": d.kind, "reason": d.message}
+            writer.write((json.dumps(resp) + "\n").encode())
+            await writer.drain()
+        except Exception:
+            log.exception("gate request failed")
+        finally:
+            writer.close()

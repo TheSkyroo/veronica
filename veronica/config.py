@@ -121,6 +121,20 @@ class Settings(BaseSettings):
     def memory_path(self) -> Path:
         return self.home / "memory.db"
 
+    @property
+    def gate_socket(self) -> Path:
+        """Unix socket the external brains' processes ask for tool permission on."""
+        return self.home / "gate.sock"
+
+    def backend_dir(self, name: str) -> Path:
+        """Per-brain workspace (session id, hook config, hook log); private."""
+        d = self.home / "backends" / name
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return d
+
+    def session_file_for(self, name: str) -> Path:
+        return self.session_file if name == "claude" else self.backend_dir(name) / "session"
+
     def ensure_dirs(self) -> None:
         (self.home / "logs").mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)

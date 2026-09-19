@@ -267,3 +267,13 @@ def test_preapprove_by_wording_is_a_live_bool():
     assert "never for sending mail" in f.help
     assert coerce_setting("preapprove_by_wording", "off") is False
     assert coerce_setting("preapprove_by_wording", True) is True
+
+
+def test_gate_socket_and_backend_dirs(tmp_home):
+    s = Settings()
+    assert s.gate_socket == tmp_home / "gate.sock"
+    d = s.backend_dir("codex")
+    assert d == tmp_home / "backends" / "codex" and d.is_dir()
+    assert d.stat().st_mode & 0o777 == 0o700
+    assert s.session_file_for("claude") == s.session_file
+    assert s.session_file_for("codex") == d / "session"

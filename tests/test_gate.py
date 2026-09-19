@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 
 import pytest
 
@@ -88,3 +89,94 @@ async def test_preapproval_never_for_always_confirm():
     g.begin_turn(1); g.preapprove(1, until=30.0)
     d = await g.decide("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"})
     assert d.kind == "approved" and len(calls) == 1
+
+
+# -- GateServer: the socket front for out-of-process callers ------------------
+import asyncio
+import json
+
+from veronica.brain.gate import GateServer
+
+
+@pytest.fixture
+def sock(tmp_path, monkeypatch):
+    """AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path on macOS
+    is longer, so bind relative to it."""
+    monkeypatch.chdir(tmp_path)
+    return Path("gate.sock")
+
+
+async def _roundtrip(path, req):
+    r, w = await asyncio.open_unix_connection(str(path))
+    w.write((json.dumps(req) + "\n").encode())
+    await w.drain()
+    line = await r.readline()
+    w.close()
+    await w.wait_closed()
+    return json.loads(line)
+
+
+async def test_gate_server_allow_and_deny(sock):
+    g, _, _ = make([True, False])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        assert (sock).stat().st_mode & 0o777 == 0o600
+        ok = await _roundtrip(sock,
+                              {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "a"}, "origin": "mcp", "backend": "codex"})
+        assert ok == {"allow": True, "kind": "approved", "reason": ""}
+        no = await _roundtrip(sock,
+                              {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "b"}, "origin": "hook", "backend": "codex"})
+        assert no == {"allow": False, "kind": "denied", "reason": "user declined"}
+    finally:
+        await srv.stop()
+    assert not (sock).exists()
+
+
+async def test_gate_server_allow_class_needs_no_confirm(sock):
+    g, calls, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        ok = await _roundtrip(sock,
+                              {"v": 1, "tool": "mcp__mac__volume_get", "input": {}, "origin": "mcp", "backend": "codex"})
+        assert ok == {"allow": True, "kind": "auto", "reason": ""} and calls == []
+    finally:
+        await srv.stop()
+
+
+async def test_gate_server_malformed_request_is_denied(sock):
+    g, _, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        r, w = await asyncio.open_unix_connection(str(sock))
+        w.write(b"not json\n")
+        await w.drain()
+        assert json.loads(await r.readline()) == {"allow": False, "kind": "denied", "reason": "bad request"}
+        w.close()
+        await w.wait_closed()
+    finally:
+        await srv.stop()
+
+
+async def test_gate_server_serializes_confirms(sock):
+    order = []
+
+    async def confirm(summary, detail=""):
+        order.append(("start", summary))
+        await asyncio.sleep(0.05)
+        order.append(("end", summary))
+        return True
+
+    g = ToolGate(Settings(), confirm)
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        await asyncio.gather(
+            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "A"}, "origin": "mcp", "backend": "x"}),
+            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "B"}, "origin": "mcp", "backend": "x"}),
+        )
+    finally:
+        await srv.stop()
+    assert [o[0] for o in order] == ["start", "end", "start", "end"]
