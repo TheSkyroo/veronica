@@ -1,18 +1,4 @@
 (() => {
-  // Golden holo-globe palette. `tint`, when set, overrides the base gold hues
-  // (front/highlight/back) for that state; `speed` multiplies each shell's
-  // base rotation speed; `alpha` scales overall wireframe/particle opacity.
-  const PALETTE = {
-    idle:       {speed:0.6, alpha:0.7,  glow:'rgba(255,170,60,.20)'},
-    warming:    {speed:0.6, alpha:0.55, glow:'rgba(170,170,175,.18)', grey:true},
-    listening:  {speed:1.0, alpha:1.0,  glow:'rgba(255,195,90,.45)',  micBoost:true},
-    thinking:   {speed:2.5, alpha:1.0,  glow:'rgba(255,190,80,.50)',  flicker:true},
-    speaking:   {speed:1.0, alpha:1.0,  glow:'rgba(255,190,80,.50)',  voiceBoost:true},
-    followup:   {speed:0.8, alpha:0.85, glow:'rgba(255,190,80,.32)'},
-    confirming: {speed:1.0, alpha:1.0,  glow:'rgba(255,138,60,.45)',  tint:{front:'#ff8a3c', highlight:'#ffc199', back:'#8a3d10'}},
-    error:      {speed:0.0, alpha:1.0,  glow:'rgba(255,90,90,.40)',   tint:{front:'#ff5a5a', highlight:'#ffb0b0', back:'#7a1f1f'}},
-  };
-  const GOLD = {front:'#f2c37a', highlight:'#ffe6b0', back:'#6b4a1c'};
   const model = {state:'idle', heard:'', reply:'', tool:null, prompt:'', mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:null, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
@@ -118,9 +104,9 @@
   // Icon-render mode (?icon=1): used by scripts/make_icon.py to screenshot
   // the orb alone (no card/text/caption) at a large size for the app icon.
   // Applied as a body class so hud.css can hide the card chrome and scale
-  // the orb canvas to fill the viewport via CSS; the canvas's own pixel
-  // backing store still comes from SIZE * devicePixelRatio below, so
-  // make_icon.py raises deviceScaleFactor to get a crisp render.
+  // the orb canvas to fill the viewport via CSS; the renderer below uses a
+  // 512-logical / 1024-pixel backing store in this mode, so make_icon.py
+  // screenshots a 1024 px viewport at deviceScaleFactor 1.
   const ICON_MODE = (() => {
     try {
       return new URLSearchParams(location.search).get('icon') === '1';
@@ -245,9 +231,25 @@
         console.error('hud.push failed', err);
       }
     },
-    state() { return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready}; },
+    state() {
+      return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready,
+              particles:activeCount(), intensity:cfg.intensity};
+    },
     setMode(mode) {
       document.body.classList.toggle('mini', mode === 'mini');
+      applyMode();
+    },
+    // Live orb config from settings: {particles: 500..8000, intensity: 0.2..2}.
+    // Rebuilds the particle buffers only when the active count changes.
+    configure(c) {
+      c = c && typeof c === 'object' ? c : {};
+      if (c.particles !== undefined && c.particles !== null && isFinite(+c.particles)) {
+        cfg.particles = Math.round(Math.max(500, Math.min(8000, +c.particles)));
+      }
+      if (c.intensity !== undefined && c.intensity !== null && isFinite(+c.intensity)) {
+        cfg.intensity = Math.max(0.2, Math.min(2, +c.intensity));
+      }
+      ensureParticles();
     },
     setVisible(visible) {
       visible = !!visible;
@@ -263,16 +265,33 @@
   };
   window.hud = hud;
 
-  if (ICON_MODE) hud.push({kind: 'state', payload: 'speaking'});
+  if (ICON_MODE) {
+    hud.push({kind: 'state', payload: 'speaking'});
+    // a synthetic envelope so the speaking spokes are in the icon
+    const lv = []; for (let i = 0; i < 200; i++) lv.push(0.35 + 0.55 * Math.abs(Math.sin(i * 0.9) * Math.sin(i * 0.23)));
+    hud.push({kind: 'voice', payload: {step_ms: 50, levels: lv}});
+  }
 
-  // ---- orb renderer: JARVIS-style golden wireframe holo-globe --------------
-  const SIZE = 170, CX = SIZE / 2, CY = SIZE / 2, R = 66;
+
+  // ---- orb renderer: particle orb -------------------------------------------
+  // A few thousand glow sprites on the surface of a sphere (Fibonacci
+  // distribution), rotated + jittered on the CPU into typed arrays every
+  // frame and drawn additively. All per-state look parameters (rotation,
+  // swirl, radius, brightness, squeeze, three colours) live in `target` and
+  // are eased into `cur` (~400 ms), so state changes never pop.
   const canvas = $('orb'), ctx = canvas.getContext('2d');
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  canvas.width = SIZE * dpr; canvas.height = SIZE * dpr; ctx.scale(dpr, dpr);
+  // Icon mode renders a 512-logical / 1024-pixel canvas (CSS scales it to
+  // the viewport) so the sphere/sprite proportions match the 170 px HUD.
+  const dpr = ICON_MODE ? 2 : Math.max(1, window.devicePixelRatio || 1);
+  const reducedMq = (() => {
+    try { return window.matchMedia('(prefers-reduced-motion: reduce)'); } catch (e) { return null; }
+  })();
+  const reducedMotion = () => !!(reducedMq && reducedMq.matches);
 
-  // Deterministic PRNG (mulberry32) so the "circuit gap" pattern on each
-  // dashed ring/arc is stable frame to frame instead of re-randomized.
+  const cfg = {particles: 4000, intensity: ICON_MODE ? 1.4 : 1.0};   // icon: stronger glow at small sizes
+  const FULL_SIZE = 170, MINI_SIZE = 64, ICON_SIZE = 512;
+  let SIZE = FULL_SIZE, CX = SIZE / 2, CY = SIZE / 2, R = 66, SCALE = 1;
+
   function mulberry32(seed) {
     return function () {
       seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
@@ -281,81 +300,151 @@
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
+  const hex = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+  const grey = c => { const l = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]; return c.map(v => v * 0.2 + l * 0.8); };
+  const GOLD1 = hex('#f0c36c'), GOLD2 = hex('#ffb454'), BLUE = hex('#7ad0ff');
 
-  function sphPoint(lat, lon) {
-    return {x: Math.cos(lat) * Math.cos(lon), y: Math.sin(lat), z: Math.cos(lat) * Math.sin(lon)};
+  // Parameter vector layout (Float32Array): see P_* indices.
+  const P_ROT = 0, P_SWIRL = 1, P_BREATHE = 2, P_RADIUS = 3, P_BRIGHT = 4, P_SQUEEZE = 5,
+        P_C1 = 6, P_C2 = 9, P_C3 = 12, P_RING = 15, P_LEN = 16;
+  function params(o) {
+    const v = new Float32Array(P_LEN);
+    v[P_ROT] = o.rot; v[P_SWIRL] = o.swirl; v[P_BREATHE] = o.breathe; v[P_RADIUS] = o.radius;
+    v[P_BRIGHT] = o.bright; v[P_SQUEEZE] = o.squeeze; v[P_RING] = o.ring || 0;
+    for (let i = 0; i < 3; i++) { v[P_C1 + i] = o.c1[i]; v[P_C2 + i] = o.c2[i]; v[P_C3 + i] = o.c3[i]; }
+    return v;
   }
-  function rotX(p, a) {
-    const c = Math.cos(a), s = Math.sin(a);
-    return {x: p.x, y: p.y * c - p.z * s, z: p.y * s + p.z * c};
-  }
-  function rotY(p, a) {
-    const c = Math.cos(a), s = Math.sin(a);
-    return {x: p.x * c + p.z * s, y: p.y, z: -p.x * s + p.z * c};
-  }
+  const STATES = {
+    idle:       params({rot:0.15, swirl:0,   breathe:0.03, radius:1.0, bright:0.42, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    warming:    params({rot:0.10, swirl:0,   breathe:0,    radius:1.0, bright:0.36, squeeze:1,
+                        c1:grey(GOLD1), c2:grey(GOLD2), c3:grey(BLUE)}),
+    listening:  params({rot:0.25, swirl:0,   breathe:0,    radius:1.0, bright:0.66, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    followup:   params({rot:0.22, swirl:0,   breathe:0,    radius:1.0, bright:0.60, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    thinking:   params({rot:0.45, swirl:1.0, breathe:0,    radius:1.0, bright:0.72, squeeze:1,
+                        c1:GOLD1, c2:hex('#ff9a3c'), c3:BLUE}),
+    speaking:   params({rot:0.25, swirl:0,   breathe:0,    radius:1.0, bright:0.72, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    confirming: params({rot:0.20, swirl:0,   breathe:0,    radius:0.8, bright:0.68, squeeze:0.35, ring:1,
+                        c1:hex('#ff9a5c'), c2:hex('#ff8a3c'), c3:hex('#ffc9a0')}),
+    error:      params({rot:0.05, swirl:0,   breathe:0,    radius:1.0, bright:0.72, squeeze:1,
+                        c1:hex('#ff6a6a'), c2:hex('#ff5a5a'), c3:hex('#ffb0b0')}),
+  };
+  const cur = new Float32Array(STATES.idle);
+  let targetVec = STATES.idle;
 
-  const STEP_DEG = 4;
+  // ---- particle buffers (rebuilt only when the active count changes) ----
+  let N = 0;
+  let base, jw, jp, scat, kind, sz, px, py, pz, bucketIdx, bucketOf;
+  const NB = 6;                                  // depth/alpha buckets
+  const bucketCount = new Int32Array(NB), bucketStart = new Int32Array(NB + 1);
+  const bucketAlpha = new Float32Array(NB);
+  for (let b = 0; b < NB; b++) bucketAlpha[b] = 0.10 + 0.90 * Math.pow(b / (NB - 1), 1.6);
 
-  // Short, sparse gap runs (~10% coverage, 1-2 segments per gap) so rings
-  // and arcs still read as continuous circles rather than a scribble.
-  function buildGapMask(n, rand) {
-    const mask = new Array(n).fill(false);
-    let i = 0;
-    while (i < n) {
-      if (rand() < 0.07) {
-        const runLen = 1 + (rand() < 0.5 ? 0 : 1);
-        for (let j = 0; j < runLen && i < n; j++, i++) mask[i] = true;
-      } else {
-        i++;
-      }
+  function activeCount() {
+    const mini = document.body.classList.contains('mini');
+    return Math.max(1, mini ? Math.round(cfg.particles / 4) : cfg.particles);
+  }
+  function buildParticles(n) {
+    N = n;
+    base = new Float32Array(n * 3); jw = new Float32Array(n); jp = new Float32Array(n); scat = new Float32Array(n);
+    kind = new Uint8Array(n); sz = new Uint8Array(n);
+    px = new Float32Array(n); py = new Float32Array(n); pz = new Float32Array(n);
+    bucketIdx = new Uint16Array(n); bucketOf = new Uint8Array(n);
+    const rnd = mulberry32(42);
+    const GA = Math.PI * (3 - Math.sqrt(5));
+    // Fibonacci spacing keeps the surface evenly covered; a random nudge of
+    // about one spacing per point hides the lattice (otherwise the spiral
+    // reads as a moiré grid when it rotates).
+    const nudge = Math.sqrt(4 * Math.PI / n) * 0.8;
+    for (let i = 0; i < n; i++) {
+      const y0 = 1 - (i + 0.5) * 2 / n, r0 = Math.sqrt(Math.max(0, 1 - y0 * y0)), th = GA * i;
+      let x = Math.cos(th) * r0 + (rnd() - 0.5) * nudge, y = y0 + (rnd() - 0.5) * nudge, z = Math.sin(th) * r0 + (rnd() - 0.5) * nudge;
+      const inv = 1 / Math.sqrt(x * x + y * y + z * z);
+      base[3 * i] = x * inv; base[3 * i + 1] = y * inv; base[3 * i + 2] = z * inv;
+      jw[i] = 0.5 + rnd() * 1.3; jp[i] = rnd() * Math.PI * 2; scat[i] = 0.25 + rnd() * 0.75;
+      const k = rnd(); kind[i] = k < 0.08 ? 2 : (k < 0.5 ? 0 : 1);
+      const s = rnd(); sz[i] = s < 0.62 ? 0 : (s < 0.92 ? 1 : 2);
+      if (kind[i] === 2 && sz[i] > 1) sz[i] = 1;   // accents stay small
     }
-    return mask;
+  }
+  function ensureParticles() {
+    const n = activeCount();
+    if (n !== N) buildParticles(n);
   }
 
-  function buildShellCurves(seed) {
-    const rand = mulberry32(seed);
-    const curves = [];
-    const N_LAT = 9, N_LON = 12;
-    for (let i = 0; i < N_LAT; i++) { // 9 latitude rings, evenly spaced, poles skipped
-      const latDeg = -80 + (160 / (N_LAT - 1)) * i;
-      const lat = latDeg * Math.PI / 180;
-      const pts = [];
-      for (let lonDeg = 0; lonDeg <= 360; lonDeg += STEP_DEG) pts.push(sphPoint(lat, lonDeg * Math.PI / 180));
-      curves.push({pts, gaps: buildGapMask(pts.length, rand)});
+  // ---- sprites: pre-rendered radial glows, 3 kinds x 3 sizes ----
+  const sprites = [[], [], []];
+  let glowSprite = null;
+  const spriteKey = new Int16Array(9).fill(-1);
+  let spriteScale = 1;
+  function makeSprite(rgb, radius, coreMix, edgeAlpha) {
+    const devR = Math.max(1, Math.ceil(radius * dpr));
+    const s = devR * 2 + 2;
+    const c = document.createElement('canvas'); c.width = c.height = s;
+    const g = c.getContext('2d');
+    const core = rgb.map(v => Math.round(v + (255 - v) * coreMix));
+    const mid = rgb.map(Math.round);
+    const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, devR);
+    grad.addColorStop(0, `rgba(${core[0]},${core[1]},${core[2]},1)`);
+    grad.addColorStop(0.3, `rgba(${mid[0]},${mid[1]},${mid[2]},${edgeAlpha})`);
+    grad.addColorStop(0.6, `rgba(${mid[0]},${mid[1]},${mid[2]},${edgeAlpha * 0.26})`);
+    grad.addColorStop(1, `rgba(${mid[0]},${mid[1]},${mid[2]},0)`);
+    g.fillStyle = grad; g.fillRect(0, 0, s, s);
+    return {c, w: s / dpr, h: s / (2 * dpr)};
+  }
+  function buildSprites(force) {
+    let changed = force;
+    for (let i = 0; i < 9; i++) {
+      const q = Math.round(cur[P_C1 + i] / 6);       // quantised: rebuild only on visible change
+      if (q !== spriteKey[i]) { spriteKey[i] = q; changed = true; }
     }
-    for (let i = 0; i < N_LON; i++) { // 12 longitude arcs
-      const lon = (i / N_LON) * Math.PI * 2;
-      const pts = [];
-      for (let latDeg = -90; latDeg <= 90; latDeg += STEP_DEG) pts.push(sphPoint(latDeg * Math.PI / 180, lon));
-      curves.push({pts, gaps: buildGapMask(pts.length, rand)});
+    if (!changed) return;
+    const radii = [0.95, 1.4, 2.0];
+    for (let k = 0; k < 3; k++) {
+      const rgb = [cur[P_C1 + 3 * k], cur[P_C1 + 3 * k + 1], cur[P_C1 + 3 * k + 2]];
+      for (let s = 0; s < 3; s++) sprites[k][s] = makeSprite(rgb, radii[s] * spriteScale, 0.42, 0.9);
     }
-    return curves;
+    // body glow: the sphere's soft interior, drawn once behind the particles
+    const c2 = [cur[P_C2], cur[P_C2 + 1], cur[P_C2 + 2]];
+    glowSprite = makeSprite(c2, R * 0.95, 0.15, 0.32);
   }
 
-  // shell0 = outermost, shell2 = innermost. shell2 spins about a different
-  // axis (X instead of Y) so the three layers visibly slide past each other.
-  const SHELLS = [
-    {factor: 1.00, tilt: 0.35, baseSpeed: 0.25, curves: buildShellCurves(1), angle: 0, axis: 'y'},
-    {factor: 0.78, tilt: -0.60, baseSpeed: -0.40, curves: buildShellCurves(2), angle: 0, axis: 'y'},
-    {factor: 0.55, tilt: 0.55, baseSpeed: 0.60, curves: buildShellCurves(3), angle: 0, axis: 'x'},
-  ];
-
-  const N_PARTICLES = 120;
-  const particles = Array.from({length: N_PARTICLES}, (_, i) => {
-    const rnd = mulberry32(1000 + i);
-    return {base: sphPoint(Math.asin(rnd() * 2 - 1), rnd() * Math.PI * 2), size: 0.8 + rnd() * 0.4};
-  });
-
-  const N_SPARKS = 24;
-  const sparkRand = mulberry32(777);
-  const sparks = Array.from({length: N_SPARKS}, () => spawnSpark(-sparkRand() * 2));
-  function spawnSpark(t0offset) {
-    return {
-      dir: sphPoint(Math.asin(sparkRand() * 2 - 1), sparkRand() * Math.PI * 2),
-      born: performance.now() + (t0offset || 0) * 1000,
-      dur: 1000 + sparkRand() * 1000,
-    };
+  // ---- HUD ring: faint circle + ticks (static path) and a slow arc ----
+  let ringPath = null;
+  function buildRing() {
+    ringPath = new Path2D();
+    const rr = R * 1.16;
+    ringPath.arc(CX, CY, rr, 0, Math.PI * 2);
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * Math.PI * 2, len = (i % 12 === 0) ? 3.2 : 1.6;
+      const s = rr + 1.5;
+      ringPath.moveTo(CX + Math.cos(a) * s, CY + Math.sin(a) * s);
+      ringPath.lineTo(CX + Math.cos(a) * (s + len * SCALE), CY + Math.sin(a) * (s + len * SCALE));
+    }
   }
+
+  // Logical canvas size follows the mode (170 full / 64 mini; icon mode keeps
+  // 170 and lets CSS + a high devicePixelRatio scale it up), so sprites stay
+  // 1-2 px on screen in every mode instead of being downsampled.
+  function applyMode() {
+    const mini = document.body.classList.contains('mini');
+    SIZE = ICON_MODE ? ICON_SIZE : (mini ? MINI_SIZE : FULL_SIZE);
+    CX = CY = SIZE / 2; R = SIZE * (66 / 170); SCALE = SIZE / FULL_SIZE;
+    spriteScale = Math.max(0.55, SCALE) * (ICON_MODE ? 1.2 : 1);
+    canvas.width = Math.round(SIZE * dpr); canvas.height = Math.round(SIZE * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ensureParticles();
+    buildSprites(true);
+    buildRing();
+  }
+
+  // ---- transient effects ----
+  const ripples = [{born: -1}, {born: -1}, {born: -1}, {born: -1}];
+  const RIPPLE_MS = 900;
+  let lastRipple = 0, prevMic = 0;
+  const N_SPOKES = 36;
+  const spokeHist = new Float32Array(N_SPOKES);
+  let spokeHead = 0, lastSpoke = 0, vSmooth = 0;
+  let lastState = 'idle', errorAt = -1, animT = 0, rotA = 0, ringA = 0, lastDraw = -1e9;
 
   let t0 = performance.now(), rafId = 0;
   let rafActive = !(typeof document !== 'undefined' && document.visibilityState === 'hidden');
@@ -380,156 +469,215 @@
     return idx < v.levels.length ? v.levels[idx] : 0;
   }
 
-  function greyOf(hex) {
-    // desaturate a hex color toward mid-grey for the 'warming' state.
-    const n = parseInt(hex.slice(1), 16);
-    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-    const lum = 0.3 * r + 0.59 * g + 0.11 * b;
-    const mix = c => Math.round(c * 0.25 + lum * 0.75);
-    return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
-  }
+  // Bench/diagnostics hook (scripts/orb_bench.py): per-frame draw time.
+  const stats = {frameMs: 0, frames: 0, totalMs: 0, reset() { this.frames = 0; this.totalMs = 0; this.frameMs = 0; }};
+  window.__hud = stats;
 
-  function project(p, factor) {
-    return {x: CX + p.x * R * factor, y: CY + p.y * R * factor, z: p.z};
-  }
-
-  function shellTransform(shell, base) {
-    return shell.axis === 'x'
-      ? rotX(rotY(base, shell.tilt), shell.angle)
-      : rotY(rotX(base, shell.tilt), shell.angle);
-  }
+  function css(r, g, b, a) { return `rgba(${r | 0},${g | 0},${b | 0},${a})`; }
 
   function frame(now) {
     rafId = 0;
-    const dt = Math.min(0.1, (now - t0) / 1000); t0 = now;
-    const pal = PALETTE[model.state] || PALETTE.idle;
-    micSmooth += (model.mic - micSmooth) * 0.25;
-    const vLevel = model.state === 'speaking' ? voiceLevel(now) : 0;
-    statusLevelEl.style.width = (Math.max(0, Math.min(1, micSmooth)) * 100) + '%';
-    const listeningGlow = model.state === 'listening' || model.state === 'followup';
-
-    for (const shell of SHELLS) {
-      shell.angle += dt * shell.baseSpeed * pal.speed;
+    // idle: 30 fps is plenty for a slow breathe; everything else runs at 60.
+    if (model.state === 'idle' && now - lastDraw < 30) {
+      if (rafActive) rafId = requestAnimationFrame(frame);
+      return;
     }
+    const tStart = performance.now();
+    const dt = Math.min(0.1, (now - t0) / 1000); t0 = now; lastDraw = now;
+    const reduced = reducedMotion();
+    const state = model.state;
 
+    if (state !== lastState) {
+      targetVec = STATES[state] || STATES.idle;
+      if (state === 'error') errorAt = now;
+      lastState = state;
+    }
+    // ease every parameter toward its target: ~95% of the way in 400 ms
+    const k = 1 - Math.exp(-dt / 0.13);
+    for (let i = 0; i < P_LEN; i++) cur[i] += (targetVec[i] - cur[i]) * k;
+    buildSprites(false);
+
+    micSmooth += (model.mic - micSmooth) * 0.25;
+    statusLevelEl.style.width = (Math.max(0, Math.min(1, micSmooth)) * 100) + '%';
+    const listening = state === 'listening' || state === 'followup';
+    const vRaw = state === 'speaking' ? voiceLevel(now) : 0;
+    vSmooth += (vRaw - vSmooth) * 0.45;
+
+    if (!reduced) { animT += dt; rotA += cur[P_ROT] * dt; ringA += 0.25 * dt; }
+
+    // per-state modulation of radius / brightness
+    let radius = cur[P_RADIUS] * (1 + cur[P_BREATHE] * Math.sin(animT * Math.PI / 2));   // ~4 s breathe
+    let bright = cur[P_BRIGHT];
+    if (listening) { radius *= 1 + 0.12 * micSmooth; bright += 0.4 * micSmooth; }
+    if (state === 'speaking') { radius *= 1 + 0.12 * vSmooth; bright += 0.35 * vSmooth; }
+    if (state === 'confirming') bright *= 0.75 + 0.25 * Math.sin(now / 1000 * Math.PI * 2);
+    // error: burst outward for ~250 ms, reassemble by ~800 ms
+    let scatter = 0, flash = 0;
+    if (state === 'error' && errorAt >= 0) {
+      const te = (now - errorAt) / 1000;
+      scatter = te < 0.25 ? te / 0.25 : Math.max(0, 1 - (te - 0.25) / 0.55);
+      flash = Math.max(0, 1 - te / 0.3);
+    }
+    bright *= cfg.intensity;
+    const swirl = reduced ? 0 : cur[P_SWIRL];
+    const squeeze = cur[P_SQUEEZE], ring = cur[P_RING];
+    const tiltC = Math.cos(0.38), tiltS = Math.sin(0.38);
+    const RR = R * radius;
+
+    // ---- project particles (hot loop; no allocations) ----
+    for (let b = 0; b < NB; b++) bucketCount[b] = 0;
+    const cosR = Math.cos(rotA), sinR = Math.sin(rotA);
+    for (let i = 0; i < N; i++) {
+      const bx = base[3 * i], by = base[3 * i + 1], bz = base[3 * i + 2];
+      const ph = animT * jw[i] + jp[i];
+      const sJ = Math.sin(ph);
+      let r = 1 + 0.02 * sJ + scatter * scat[i] * 0.55;
+      let x, z;
+      if (swirl !== 0) {
+        // vortex: differential rotation about Y by latitude + a travelling
+        // wave, i.e. a cheap curl-ish flow along the surface
+        const a = rotA + swirl * (0.9 * Math.sin(3 * by + animT * 1.3) + 0.45 * Math.sin(2.5 * bx + animT * 0.8));
+        const c = Math.cos(a), s = Math.sin(a);
+        x = bx * c + bz * s; z = -bx * s + bz * c;
+      } else {
+        x = bx * cosR + bz * sinR; z = -bx * sinR + bz * cosR;
+      }
+      let y = by * squeeze + 0.012 * Math.cos(ph * 0.7);   // drifting noise
+      if (ring > 0.001) {
+        // confirming: pull points out toward the equator's rim so the
+        // squeezed sphere reads as a torus/ring rather than a flat blob
+        const rr = Math.sqrt(x * x + z * z) + 1e-4;
+        const want = 0.84 + 0.16 * rr;
+        const g = 1 + ring * (want / rr - 1);
+        x *= g; z *= g;
+      }
+      // tilt the spin axis toward the viewer a little
+      const ty = y * tiltC - z * tiltS, tz = y * tiltS + z * tiltC;
+      px[i] = CX + x * RR * r; py[i] = CY + ty * RR * r; pz[i] = tz;
+      const u = (tz + 1) * 0.5;
+      const b = (u * (NB - 1) + 0.5) | 0;
+      bucketOf[i] = b; bucketCount[b]++;
+    }
+    bucketStart[0] = 0;
+    for (let b = 0; b < NB; b++) { bucketStart[b + 1] = bucketStart[b] + bucketCount[b]; bucketCount[b] = bucketStart[b]; }
+    for (let i = 0; i < N; i++) bucketIdx[bucketCount[bucketOf[i]]++] = i;
+
+    // ---- draw ----
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, SIZE, SIZE);
 
-    let colors = pal.tint ? pal.tint : GOLD;
-    if (pal.grey) colors = {front: greyOf(GOLD.front), highlight: greyOf(GOLD.highlight), back: greyOf(GOLD.back)};
-
-    // soft radial glow, behind everything, normal blending — brightest at
-    // the very center, fully transparent by 0.9R.
-    let glowAlphaBoost = 1;
-    if (pal.voiceBoost) glowAlphaBoost = 1 + vLevel * 0.6;
-    else if (pal.flicker) glowAlphaBoost = 0.8 + 0.4 * Math.sin(now / 130);
-    else if (listeningGlow) glowAlphaBoost = 1.6;
-    const glow = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * 0.9);
-    glow.addColorStop(0, 'rgba(255,170,60,.45)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = Math.min(1, glowAlphaBoost);
-    ctx.fillStyle = glow; ctx.fillRect(0, 0, SIZE, SIZE);
-    ctx.globalAlpha = 1;
-
-    // ---- wireframe shells (source-over) ----
-    for (let si = 0; si < SHELLS.length; si++) {
-      const shell = SHELLS[si];
-      let factor = shell.factor;
-      if (pal.micBoost && si === 0) factor *= 1 + 0.15 * micSmooth;
-      const extraLine = pal.voiceBoost ? 1.2 * vLevel : 0;
-      const shellBrightness = (listeningGlow && si === 0) ? 1.35 : 1;
-
-      // faint filled disc behind the wireframe so the sphere reads as a body
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = 'rgba(255,180,80,0.04)';
-      ctx.beginPath(); ctx.arc(CX, CY, R * factor, 0, Math.PI * 2); ctx.fill();
-
-      const frontPath = new Path2D(), backPath = new Path2D();
-      for (const curve of shell.curves) {
-        const proj = curve.pts.map(base => project(shellTransform(shell, base), factor));
-        for (let i = 0; i < proj.length - 1; i++) {
-          if (curve.gaps[i] || curve.gaps[i + 1]) continue;
-          const a = proj[i], b = proj[i + 1];
-          const path = (a.z + b.z) >= 0 ? frontPath : backPath;
-          path.moveTo(a.x, a.y); path.lineTo(b.x, b.y);
-        }
-      }
-      // back-facing first, front-facing drawn on top of it
-      ctx.globalAlpha = Math.min(1, pal.alpha * 0.18 * shellBrightness);
-      ctx.strokeStyle = colors.back;
-      ctx.lineWidth = 0.45 + extraLine;
-      ctx.stroke(backPath);
-      ctx.globalAlpha = Math.min(1, pal.alpha * 0.9 * shellBrightness);
-      ctx.strokeStyle = colors.front;
-      ctx.lineWidth = 0.8 + extraLine;
-      ctx.stroke(frontPath);
+    // body glow behind everything
+    if (glowSprite) {
+      ctx.globalAlpha = Math.min(1, bright * 0.7);
+      const gw = glowSprite.w * radius;
+      ctx.drawImage(glowSprite.c, CX - gw / 2, CY - gw / 2, gw, gw);
     }
-    ctx.globalAlpha = 1;
 
-    // ---- additive layer: particles, sparks, hub ----
+    // HUD ring: thin, ticked, with a slow arc; deliberately faint
+    if (ringPath) {
+      const c1r = cur[P_C1], c1g = cur[P_C1 + 1], c1b = cur[P_C1 + 2];
+      ctx.lineWidth = Math.max(0.5, 0.6 * SCALE);
+      ctx.strokeStyle = css(c1r, c1g, c1b, 1);
+      ctx.globalAlpha = 0.11 * Math.min(1.4, cfg.intensity);
+      ctx.stroke(ringPath);
+      ctx.globalAlpha = 0.22 * Math.min(1.4, cfg.intensity);
+      ctx.lineWidth = Math.max(0.7, 1.0 * SCALE);
+      ctx.beginPath(); ctx.arc(CX, CY, R * 1.16, ringA, ringA + 1.1); ctx.stroke();
+      ctx.beginPath(); ctx.arc(CX, CY, R * 1.16, ringA + Math.PI, ringA + Math.PI + 0.35); ctx.stroke();
+    }
+
+    // particles, additive, back (dim) to front (bright)
     ctx.globalCompositeOperation = 'lighter';
-    const shell0 = SHELLS[0];
-
-    // particles: front-facing only, so they don't muddy the wireframe
-    ctx.fillStyle = colors.highlight;
-    ctx.globalAlpha = pal.alpha * 0.6;
-    for (const q of particles) {
-      const proj = project(shellTransform(shell0, q.base), shell0.factor);
-      if (proj.z <= 0.1) continue;
-      ctx.beginPath(); ctx.arc(proj.x, proj.y, q.size, 0, Math.PI * 2); ctx.fill();
+    for (let b = 0; b < NB; b++) {
+      const a = Math.min(1, bright * bucketAlpha[b]);
+      if (a < 0.045) continue;   // far side at idle: invisible, not worth 10% of the draw calls
+      ctx.globalAlpha = a;
+      const end = bucketStart[b + 1];
+      const back = b < NB / 2 ? 1 : 0;
+      for (let j = bucketStart[b]; j < end; j++) {
+        const i = bucketIdx[j];
+        let s = sz[i] - back; if (s < 0) s = 0;
+        const sp = sprites[kind[i]][s];
+        ctx.drawImage(sp.c, px[i] - sp.h, py[i] - sp.h, sp.w, sp.w);
+      }
     }
 
-    ctx.fillStyle = colors.highlight;
-    for (const spark of sparks) {
-      let age = now - spark.born;
-      if (age > spark.dur) { Object.assign(spark, spawnSpark(0)); age = now - spark.born; }
-      if (age < 0) continue;
-      const frac = age / spark.dur;
-      const rr = 1.0 + 0.35 * frac;
-      const proj = project(shellTransform(shell0, spark.dir), rr);
-      ctx.globalAlpha = pal.alpha * 0.5 * (1 - frac);
-      ctx.beginPath(); ctx.arc(proj.x, proj.y, 0.8, 0, Math.PI * 2); ctx.fill();
+    // listening: ripples spawned on mic peaks
+    if (listening && !reduced && micSmooth > 0.22 && micSmooth > prevMic + 0.025 && now - lastRipple > 220) {
+      for (let i = 0; i < ripples.length; i++) {
+        if (ripples[i].born < 0 || now - ripples[i].born > RIPPLE_MS) { ripples[i].born = now; lastRipple = now; break; }
+      }
+    }
+    prevMic = micSmooth;
+    ctx.lineWidth = Math.max(0.6, 0.8 * SCALE);
+    for (let i = 0; i < ripples.length; i++) {
+      const rp = ripples[i];
+      if (rp.born < 0) continue;
+      const f = (now - rp.born) / RIPPLE_MS;
+      if (f >= 1 || reduced) { rp.born = -1; continue; }
+      ctx.globalAlpha = 0.4 * (1 - f) * (1 - f) * Math.min(1.5, cfg.intensity);
+      ctx.strokeStyle = css(cur[P_C3], cur[P_C3 + 1], cur[P_C3 + 2], 1);
+      ctx.beginPath(); ctx.arc(CX, CY, Math.min(SIZE / 2 - 1, RR * (1.02 + 0.22 * f)), 0, Math.PI * 2); ctx.stroke();
     }
 
-    // central hub — the "eye": glow + bright ring + counter-rotating spokes
-    const hubAngle = -shell0.angle * 1.4;
-    let hubAlpha = pal.alpha;
-    if (pal.flicker) hubAlpha *= 0.55 + 0.45 * Math.sin(now / 60);
-    ctx.globalAlpha = hubAlpha;
-    const hubGlow = ctx.createRadialGradient(CX, CY, 0, CX, CY, 20);
-    hubGlow.addColorStop(0, colors.highlight); hubGlow.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = hubGlow;
-    ctx.beginPath(); ctx.arc(CX, CY, 20, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = colors.highlight;
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(CX, CY, 8, 0, Math.PI * 2); ctx.stroke();
-    for (let i = 0; i < 6; i++) {
-      const a = hubAngle + (i / 6) * Math.PI * 2;
+    // speaking: radial spokes whose lengths trace the recent level history
+    if (state === 'speaking') {
+      if (now - lastSpoke > 45) { spokeHist[spokeHead] = vSmooth; spokeHead = (spokeHead + 1) % N_SPOKES; lastSpoke = now; }
+      // one path + one stroke for all spokes (a stroke per spoke is ~2 ms in
+      // WebKit); flicker is expressed as per-spoke length instead of alpha
+      ctx.strokeStyle = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1);
+      ctx.lineWidth = Math.max(0.5, 0.7 * SCALE);
+      const r0 = RR * 1.05;
+      ctx.globalAlpha = Math.min(1, (0.22 + 0.3 * vSmooth) * cfg.intensity);
       ctx.beginPath();
-      ctx.moveTo(CX + Math.cos(a) * 8, CY + Math.sin(a) * 8);
-      ctx.lineTo(CX + Math.cos(a) * 16, CY + Math.sin(a) * 16);
+      for (let s = 0; s < N_SPOKES; s++) {
+        const lvl = spokeHist[(spokeHead + s) % N_SPOKES];
+        if (lvl < 0.02) continue;
+        const a = ringA * 0.5 + (s / N_SPOKES) * Math.PI * 2;
+        const len = (1.5 + 9 * lvl) * (0.8 + 0.2 * Math.sin(now / 70 + s * 1.7)) * SCALE;
+        ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0);
+        ctx.lineTo(CX + Math.cos(a) * (r0 + len), CY + Math.sin(a) * (r0 + len));
+      }
       ctx.stroke();
+    } else if (spokeHist[spokeHead] !== 0) {
+      spokeHist.fill(0);
+    }
+
+    // error: brief red flash over the body
+    if (flash > 0) {
+      ctx.globalAlpha = 0.35 * flash;
+      ctx.fillStyle = css(255, 80, 80, 1);
+      ctx.beginPath(); ctx.arc(CX, CY, RR * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
     // confirming: "?" glyph, always; countdown arc only once the question
-    // has actually been spoken and the 'tool' ask event set confirmStart —
-    // before that (model.confirmStart === null) there's nothing to count
-    // down yet.
-    if (model.state === 'confirming') {
+    // has actually been spoken and the 'tool' ask event set confirmStart.
+    if (state === 'confirming') {
+      const stroke = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1);
       if (model.confirmStart !== null) {
         const frac = Math.max(0, 1 - (now - model.confirmStart) / model.confirmTimeoutMs);
-        ctx.beginPath(); ctx.arc(CX, CY, 58, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-        ctx.lineWidth = 3; ctx.strokeStyle = colors.front; ctx.stroke();
+        ctx.beginPath(); ctx.arc(CX, CY, R * 0.88, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+        ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = stroke; ctx.stroke();
       }
-      ctx.fillStyle = '#fff'; ctx.font = 'bold 26px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.round(26 * SCALE) + 'px system-ui';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('?', CX, CY + 1);
     }
     // warming spinner
-    if (model.state === 'warming') {
-      ctx.beginPath(); ctx.arc(CX, CY, 58, shell0.angle * 2, shell0.angle * 2 + Math.PI * 0.6);
-      ctx.lineWidth = 3; ctx.strokeStyle = colors.front; ctx.stroke();
+    if (state === 'warming') {
+      const a0 = animT * 2.4;
+      ctx.beginPath(); ctx.arc(CX, CY, R * 0.88, a0, a0 + Math.PI * 0.6);
+      ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1); ctx.stroke();
     }
+
+    const ms = performance.now() - tStart;
+    stats.frameMs = ms; stats.frames++; stats.totalMs += ms;
     if (rafActive && rafId === 0) rafId = requestAnimationFrame(frame);
   }
+
+  applyMode();
   if (rafActive && rafId === 0) rafId = requestAnimationFrame(frame);
 })();

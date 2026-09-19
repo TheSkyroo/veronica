@@ -525,3 +525,90 @@ def test_no_overlap_v3():
 
         assert not errors, f"page errors: {errors}"
         browser.close()
+
+
+ALL_STATES = ["idle", "warming", "listening", "thinking", "speaking", "followup", "confirming", "error"]
+
+
+@pytest.mark.live
+def test_configure_particles_reported_in_state():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        st = page.evaluate("window.hud.state()")
+        assert st["particles"] == 4000 and st["intensity"] == 1.0
+        page.evaluate("window.hud.configure({particles: 1200, intensity: 1.5})")
+        st = page.evaluate("window.hud.state()")
+        assert st["particles"] == 1200 and st["intensity"] == 1.5
+        # clamped to the settings range; mini mode quarters the active count
+        page.evaluate("window.hud.configure({particles: 99999, intensity: 9})")
+        st = page.evaluate("window.hud.state()")
+        assert st["particles"] == 8000 and st["intensity"] == 2.0
+        page.evaluate("window.hud.setMode('mini')")
+        assert page.evaluate("window.hud.state().particles") == 2000
+        page.evaluate("window.hud.setMode('full')")
+        assert page.evaluate("window.hud.state().particles") == 8000
+        # garbage is ignored, not thrown
+        page.evaluate("window.hud.configure(null); window.hud.configure({particles: 'x', intensity: NaN})")
+        assert page.evaluate("window.hud.state().particles") == 8000
+        browser.close()
+
+
+@pytest.mark.live
+def test_every_state_renders_without_errors():
+    from playwright.sync_api import sync_playwright
+
+    errors = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        snaps = {}
+        for state in ALL_STATES:
+            page.evaluate("s => window.hud.push({kind:'state', payload:s})", state)
+            if state in ("listening", "followup"):
+                page.evaluate("window.hud.push({kind:'mic', payload:0.8})")
+            if state == "speaking":
+                page.evaluate("window.hud.push({kind:'voice', payload:{step_ms:50, levels:[1,1,1,1,1,1,1,1,1,1]}})")
+            if state == "confirming":
+                page.evaluate("window.hud.push({kind:'tool', payload:{summary:'x', decision:'ask', timeout_ms:5000}})")
+            page.wait_for_timeout(500)
+            snaps[state] = page.evaluate("document.getElementById('orb').toDataURL()")
+            assert page.evaluate("window.__hud.frames") > 0
+        for mode in ("mini", "full"):
+            page.evaluate("m => window.hud.setMode(m)", mode)
+            page.wait_for_timeout(200)
+        assert not errors, f"page errors: {errors}"
+        # every state has its own look
+        assert len(set(snaps.values())) == len(ALL_STATES)
+        browser.close()
+
+
+@pytest.mark.live
+def test_reduced_motion_freezes_idle_but_state_changes_still_draw():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.emulate_media(reduced_motion="reduce")
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        assert page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")
+        page.wait_for_timeout(1000)   # let the idle parameter lerp fully settle
+        a = page.evaluate("document.getElementById('orb').toDataURL()")
+        page.wait_for_timeout(200)
+        b = page.evaluate("document.getElementById('orb').toDataURL()")
+        assert a == b, "idle orb must be frozen under prefers-reduced-motion"
+        page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
+        page.wait_for_timeout(500)
+        c = page.evaluate("document.getElementById('orb').toDataURL()")
+        assert c != a, "colour/brightness changes still apply under reduced motion"
+        browser.close()

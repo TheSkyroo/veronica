@@ -45,11 +45,11 @@ def render_orb_png(dest: Path) -> bool:
             try:
                 page = browser.new_page(
                     viewport={"width": ICON_PNG, "height": ICON_PNG},
-                    device_scale_factor=6,  # canvas backing store ~1020px at SIZE=170
+                    device_scale_factor=1,  # hud.js renders a 1024 px backing store in icon mode
                     base_url=None,
                 )
                 page.goto(url)
-                page.wait_for_timeout(300)  # let the first animation frame(s) paint
+                page.wait_for_timeout(2200)  # transition settled + spoke history filled
                 page.screenshot(path=str(dest), omit_background=True)
             finally:
                 browser.close()
