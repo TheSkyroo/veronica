@@ -3926,11 +3926,9 @@ async def test_confirm_redirect_not_rerun_when_brain_already_answered():
     assert o.brain.pending_redirect is None
     assert ("heard", "open it in the other profile instead") in ev
     assert o.tts.said == ["Run Open Chrome?", "Sure, the other profile it is."]
-    # the redirect is still remembered as the user's turn
-    assert o.store.turns == [
-        ("open chrome", "Sure, the other profile it is."),
-        ("open it in the other profile instead", "Sure, the other profile it is."),
-    ]
+    # one memory row: the reply already answers the redirect (it rode along
+    # in the deny message), so it isn't stored twice
+    assert o.store.turns == [("open chrome", "Sure, the other profile it is.")]
 
 
 async def test_confirm_redirect_logged(caplog):

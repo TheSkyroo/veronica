@@ -614,13 +614,13 @@ class Orchestrator:
             self.store.add_turn(text, " ".join(spoken))
         return spoken
 
-    async def _brain_turn(self, text: str, *, lang: str | None = None) -> list[str]:
+    async def _brain_turn(self, text: str, images: list[bytes] = (), *, lang: str | None = None) -> list[str]:
         """handle_text plus the confirm redirect: if a confirmation in this
         turn was answered with something other than yes/no, the brain got
         it in the deny message and has usually re-planned in its reply
         already; if it said nothing after the deny, run the answer as the
         next request in the same session."""
-        spoken = await self.handle_text(text, lang=lang)
+        spoken = await self.handle_text(text, images, lang=lang)
         heard = getattr(self.brain, "pending_redirect", None)
         if not heard:
             return spoken
@@ -629,8 +629,9 @@ class Orchestrator:
         log.info("heard=%r (redirected from confirm)", heard)
         if not spoken:
             return await self.handle_text(heard, lang=lang)
-        if self.store is not None and self.s.memory_enabled:
-            self.store.add_turn(heard, " ".join(spoken))
+        # The brain already answered the redirect inside this turn (the deny
+        # message carried it), and handle_text stored that reply — no
+        # second memory row with the same reply.
         return spoken
 
     # -- screen awareness -------------------------------------------------------
@@ -644,9 +645,9 @@ class Orchestrator:
         result = await asyncio.to_thread(capture_screenshot, "screen")
         if isinstance(result, str):
             log.warning("screen capture failed: %s", result)
-            return await self.handle_text(text, lang=self._utterance_lang)
+            return await self._brain_turn(text, lang=self._utterance_lang)
         data, _path, _mime = result
-        return await self.handle_text(text, images=[data], lang=self._utterance_lang)
+        return await self._brain_turn(text, [data], lang=self._utterance_lang)
 
     # -- music -----------------------------------------------------------------
     _MUSIC_SUMMARIES = {
