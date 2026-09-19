@@ -517,7 +517,8 @@ class HudWindow:
         self._main(lambda: self._js(js))
 
     def _initial_config(self) -> dict:
-        return {"particles": int(self.s.hud_particles), "intensity": float(self.s.hud_intensity)}
+        return {"particles": int(self.s.hud_particles), "intensity": float(self.s.hud_intensity),
+                "detail": float(self.s.hud_detail)}
 
     @staticmethod
     def _configure_js(cfg: dict) -> str:
