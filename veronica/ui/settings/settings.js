@@ -264,6 +264,7 @@
         settingRow('brain', 'memory_enabled'),
         settingRow('brain', 'brain_cwd', {wide: true}),
         settingRow('brain', 'computer_trust_s'),
+        settingRow('brain', 'preapprove_by_wording'),
       ];
     },
     history() {

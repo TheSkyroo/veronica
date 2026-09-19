@@ -649,3 +649,43 @@ def test_confirm_redirected_pill():
         assert pill_color == badge_color == "rgb(255, 180, 84)"
 
         browser.close()
+
+
+@pytest.mark.live
+def test_confirm_preapproved_pill():
+    """A confirm-class action allowed on the strength of the request's own
+    wording ("copy this, just do it") comes as one 'preapproved' tool
+    event: gold ⚡ badge with a gold outline, a 'pre-approved' pill, and no
+    countdown (nothing was asked)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Copy to clipboard: hi', decision:'preapproved'}})"
+        )
+        assert "preapproved" in page.get_attribute("#tool .badge", "class")
+        assert page.inner_text("#tool .badge") == "⚡"
+        assert page.inner_text("#tool .pill") == "PRE-APPROVED"
+        assert "pre-approved" in page.get_attribute("#tool .pill", "class")
+        assert page.inner_text("#tool .title") == "Copy to clipboard: hi"
+        assert "hidden" in page.get_attribute(".countdown", "class")
+        assert page.inner_text("#hint .msg") == ""
+        badge = page.evaluate("getComputedStyle(document.querySelector('#tool .badge'))"
+                              ".getPropertyValue('box-shadow')")
+        assert badge and badge != "none"
+        pill_color = page.evaluate("getComputedStyle(document.querySelector('#tool .pill')).color")
+        badge_color = page.evaluate("getComputedStyle(document.querySelector('#tool .badge')).color")
+        assert pill_color == badge_color == "rgb(255, 214, 102)"
+        # distinct from the plain auto-allow blue
+        page.evaluate("window.hud.push({kind:'tool', payload:{summary:'Read: /x', decision:'auto'}})")
+        assert page.evaluate("getComputedStyle(document.querySelector('#tool .badge')).color") == "rgb(122, 208, 255)"
+        assert page.evaluate("getComputedStyle(document.querySelector('#tool .badge')).boxShadow") == "none"
+
+        browser.close()

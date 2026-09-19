@@ -165,3 +165,111 @@ def test_browser_tool_risk(short, expected):
 ])
 def test_computer_tool_risk(short, expected):
     assert classify(f"mcp__computer__{short}", {}) == expected
+
+
+# --- always_confirm: never pre-approvable, never trusted ---------------------
+
+from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES, always_confirm
+from veronica.tools.computer_events import Front
+
+_FINDER = Front(app="Finder", bundle_id="com.apple.finder", window_title="Desktop", pid=1)
+_TERMINAL = Front(app="Terminal", bundle_id="com.apple.Terminal", window_title="zsh", pid=2)
+_SECAGENT = Front(app="SecurityAgent", bundle_id="com.apple.SecurityAgent", window_title="", pid=3)
+
+ALWAYS_CASES = [
+    ("mcp__pim__mail_send", {"to": "a@b.c"}, True),
+    ("mcp__pim__calendar_create", {"title": "x"}, False),
+    ("mcp__mac__clipboard_write", {"text": "x"}, False),
+    ("mcp__memory__fact_add", {"text": "x"}, False),
+    ("Write", {"file_path": "/a"}, False),
+    # bash: destructive / power / privilege
+    ("Bash", {"command": "rm -rf build"}, True),
+    ("Bash", {"command": "rm -r build"}, True),
+    ("Bash", {"command": "rm -fr build"}, True),
+    ("Bash", {"command": "rm -Rf build"}, True),
+    ("Bash", {"command": "rm notes.txt"}, False),
+    ("Bash", {"command": "cd x && rm -rf y"}, True),
+    ("Bash", {"command": "git push --force origin main"}, True),
+    ("Bash", {"command": "git push -f"}, True),
+    ("Bash", {"command": "git push --force-with-lease"}, True),
+    ("Bash", {"command": "git push origin main"}, False),
+    ("Bash", {"command": "git commit -m 'rm -rf'"}, False),
+    ("Bash", {"command": "shutdown -h now"}, True),
+    ("Bash", {"command": "sudo shutdown -r now"}, True),
+    ("Bash", {"command": "reboot"}, True),
+    ("Bash", {"command": "halt"}, True),
+    ("Bash", {"command": "/sbin/reboot"}, True),
+    ("Bash", {"command": "pmset sleepnow"}, True),
+    ("Bash", {"command": "pmset restart"}, True),
+    ("Bash", {"command": "pmset -g"}, False),
+    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to shut down'"}, True),
+    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to restart'"}, True),
+    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to log out'"}, True),
+    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to sleep'"}, True),
+    ("Bash", {"command": "osascript -e 'display notification \"hi\"'"}, False),
+    ("Bash", {"command": "sudo ls"}, True),
+    ("Bash", {"command": "killall Finder"}, True),
+    ("Bash", {"command": "diskutil list"}, True),
+    ("Bash", {"command": "launchctl unload ~/Library/LaunchAgents/x.plist"}, True),
+    ("Bash", {"command": "launchctl bootout gui/501/x"}, True),
+    ("Bash", {"command": "launchctl list"}, False),
+    ("Bash", {"command": "defaults write com.apple.finder AppleShowAllFiles YES"}, True),
+    ("Bash", {"command": "defaults write com.example.app key 1"}, False),
+    ("Bash", {"command": "defaults read com.apple.finder"}, False),
+    ("Bash", {"command": "tccutil reset All"}, True),
+    ("Bash", {"command": "echo 'rm -rf'"}, False),
+    ("Bash", {"command": "rm -rf 'unterminated"}, True),   # unparsable: assume the worst
+    # computer: Enter, terminals, system dialogs
+    ("mcp__computer__computer_key", {"combo": "enter"}, True),
+    ("mcp__computer__computer_key", {"combo": "Return"}, True),
+    ("mcp__computer__computer_key", {"combo": "cmd+enter"}, False),
+    ("mcp__computer__computer_key", {"combo": "cmd+s"}, False),
+    ("mcp__computer__computer_key", {"combo": ""}, False),
+    ("mcp__computer__computer_type", {"text": "hi", "submit": True}, True),
+    ("mcp__computer__computer_type", {"text": "hi"}, False),
+    ("mcp__computer__computer_click", {"x": 1, "y": 2}, False),
+    # applescript
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to shut down'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to restart'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to log out'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "Finder" to delete file "x"'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "Finder" to empty trash'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to keystroke return'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to key code 36'}, True),
+    ("mcp__mac__applescript", {"script": 'tell application "System Events" to keystroke "a"'}, False),
+    ("mcp__mac__applescript", {"script": 'tell application "Finder" to activate'}, False),
+]
+
+
+@pytest.mark.parametrize("tool,inp,expected", ALWAYS_CASES)
+def test_always_confirm(tool, inp, expected):
+    assert always_confirm(tool, inp) is expected
+    assert always_confirm(tool, inp, _FINDER) is expected
+
+
+def test_always_confirm_computer_type_in_terminal():
+    assert always_confirm("mcp__computer__computer_type", {"text": "ls"}, _TERMINAL) is True
+    assert always_confirm("mcp__computer__computer_type", {"text": "ls"}, _FINDER) is False
+    for bundle in TRUST_EXCLUDED_BUNDLES:
+        front = Front(app="t", bundle_id=bundle, window_title="", pid=9)
+        assert always_confirm("mcp__computer__computer_type", {"text": "ls"}, front) is True
+    # a click in a terminal is not an always-confirm (the trust window
+    # already never covers terminals)
+    assert always_confirm("mcp__computer__computer_click", {"x": 1, "y": 1}, _TERMINAL) is False
+
+
+@pytest.mark.parametrize("short,inp", [
+    ("computer_click", {"x": 1, "y": 1}), ("computer_click_text", {"text": "Allow"}),
+    ("computer_drag", {}), ("computer_type", {"text": "x"}), ("computer_key", {"combo": "cmd+s"}),
+    ("computer_move", {"x": 1, "y": 1}),
+])
+def test_always_confirm_every_computer_tool_on_system_dialog(short, inp):
+    assert always_confirm(f"mcp__computer__{short}", inp, _SECAGENT) is True
+    assert always_confirm(f"mcp__computer__{short}", inp, None) is False
+
+
+def test_always_confirm_future_send_tools():
+    # any messages/mail "send" tool on any server is an always-ask
+    assert always_confirm("mcp__pim__messages_send", {"to": "x"}) is True
+    assert always_confirm("mcp__messages__send", {"to": "x"}) is True
+    assert always_confirm("mcp__pim__mail_search", {"query": "x"}) is False

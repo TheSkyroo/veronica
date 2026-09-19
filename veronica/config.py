@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # Seconds after one approved screen action during which further
     # confirm-class computer actions in the SAME app are auto-allowed. 0 = off.
     computer_trust_s: int = 90
+    # "Copy this, just do it": a request whose wording already says go
+    # ahead skips the yes/no for the ONE confirm-class action it produces
+    # (never for always-confirm tools, see policy.always_confirm).
+    preapprove_by_wording: bool = True
 
     # memory
     memory_enabled: bool = True
@@ -189,6 +193,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "After you approve one click/type, further screen actions in the same app are allowed "
         "for this long. 0 = ask every time. Never covers pressing Enter, terminals or system dialogs.",
         min=0, max=600, restart=False,
+    ),
+    "preapprove_by_wording": EditableField(
+        "bool", 'Pre-approve when I say "do it"',
+        "If your request already says do it / go ahead, skip the yes/no for that one action "
+        "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
     ),
 }
 

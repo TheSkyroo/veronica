@@ -211,7 +211,7 @@ def test_state_has_every_section_and_key(h):
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
             "input_volume_floor"} <= set(st["listening"])
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s"}
+    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -477,6 +477,16 @@ def test_set_computer_trust_s_is_live_and_clamped(h):
     assert ("computer_trust_s", 600) in h.prefs.overrides
     assert h.bridge.set("brain", "computer_trust_s", 0)["ok"]
     assert h.orch.s.computer_trust_s == 0
+
+
+def test_set_preapprove_by_wording_is_live(h):
+    res = h.bridge.set("brain", "preapprove_by_wording", False)
+    assert res["ok"] and res["restart_required"] is False
+    assert h.orch.s.preapprove_by_wording is False
+    assert ("preapprove_by_wording", False) in h.prefs.overrides
+    assert h.bridge.set("brain", "preapprove_by_wording", "on")["ok"]
+    assert h.orch.s.preapprove_by_wording is True
+    assert h.bridge.get_state()["brain"]["preapprove_by_wording"] is True
 
 
 def test_set_restart_class_saves_while_warming():

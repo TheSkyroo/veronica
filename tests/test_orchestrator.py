@@ -3941,3 +3941,146 @@ async def test_confirm_redirect_logged(caplog):
     with caplog.at_level(logging.INFO, logger="veronica.orchestrator"):
         await o.one_turn()
     assert any("(redirected from confirm)" in r.getMessage() for r in caplog.records)
+
+
+# -- pre-approval by request wording ("copy this, just do it") ---------------
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("copy this to clipboard, just do it", True),
+        ("open chrome and go ahead", True),
+        ("haan kar do abhi", True),
+        ("send the note to the clipboard without asking", True),
+        ("write it to notes, no need to ask", True),
+        ("add a reminder for 5, don't ask", True),
+        ("clipboard mein daal do bina puche", True),
+        ("yes do it, write the file", True),
+        ("Copy this. Do it.", True),
+        # a pure confirm answer is not a command
+        ("do it", False),
+        ("yes", False),
+        ("go ahead", False),
+        ("haan karo", False),
+        ("okay yes do it", False),
+        ("just do it", False),
+        ("yes please", False),
+        ("please do it", False),
+        # ...but a bare "do it now" is telling, not answering
+        ("do it now", True),
+        # questions never pre-approve
+        ("should I do it?", False),
+        ("should I just do it", False),
+        ("can you do it without asking", False),
+        ("what happens if I say do it", False),
+        # negated / overridden
+        ("copy this, don't do it yet", False),
+        ("copy this, do it... actually no", False),
+        ("mat karo, bas dikhao", False),
+        # no confirm phrase at all
+        ("copy this to the clipboard", False),
+        ("open chrome", False),
+        ("", False),
+    ],
+)
+def test_detect_preapproval(text, expected):
+    assert Orchestrator.detect_preapproval(text) is expected
+
+
+class TurnBrain(Brain):
+    """Fake brain that records begin_turn / preapprove like the real one."""
+
+    def __init__(self):
+        super().__init__()
+        self.turns = []
+        self.preapproved = []
+
+    def begin_turn(self, turn_id):
+        self.turns.append(turn_id)
+
+    def preapprove(self, turn_id, until):
+        self.preapproved.append((turn_id, until))
+
+
+async def test_handle_text_numbers_turns_and_tells_the_brain():
+    o, _ = build()
+    o.brain = TurnBrain()
+    await o.handle_text("hi")
+    await o.handle_text("again")
+    assert o.brain.turns == [1, 2]
+    assert o.brain.preapproved == []
+
+
+async def test_one_turn_preapproves_the_brain_turn_it_is_about_to_run(monkeypatch):
+    import time as _time
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    o.brain = TurnBrain()
+    monkeypatch.setattr(_time, "monotonic", lambda: 1000.0)
+    await o.one_turn()
+    assert o.brain.turns == [1]
+    assert o.brain.preapproved == [(1, 1020.0)]
+    assert o.brain.asked == ["copy this to clipboard, just do it"]
+
+
+async def test_one_turn_does_not_preapprove_a_plain_request():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard"])
+    o.brain = TurnBrain()
+    await o.one_turn()
+    assert o.brain.turns == [1] and o.brain.preapproved == []
+
+
+async def test_one_turn_preapproval_honours_the_setting():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    o.s.preapprove_by_wording = False
+    o.brain = TurnBrain()
+    await o.one_turn()
+    assert o.brain.preapproved == []
+
+
+async def test_one_turn_preapproval_counts_from_earlier_turns():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["open chrome and go ahead"])
+    o.brain = TurnBrain()
+    await o.handle_text("one")
+    await o.handle_text("two")
+    await o.one_turn()
+    assert o.brain.turns == [1, 2, 3]
+    assert [tid for tid, _ in o.brain.preapproved] == [3]
+
+
+async def test_one_turn_preapproval_with_a_brain_that_has_no_preapprove():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    await o.one_turn()
+    assert o.brain.asked == ["copy this to clipboard, just do it"]
+
+
+async def test_screen_fast_path_preapproves_the_same_turn(monkeypatch):
+    from veronica import orchestrator as orch_mod
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["look at my screen, copy the title, just do it"])
+    o.brain = TurnBrain()
+    monkeypatch.setattr(orch_mod, "capture_screenshot", lambda _kind: "no screen")
+    await o.one_turn()
+    assert o.brain.turns == [1] and [tid for tid, _ in o.brain.preapproved] == [1]
+
+
+async def test_redirect_turn_is_not_preapproved():
+    """"just do it" pre-approves the request it was said in; a confirm
+    answered with something else runs as a new turn that is asked as usual."""
+    o, _, ev = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome, just do it", "open it in the other profile instead"],
+    )
+    brain = RedirectBrain(o, answers=False)
+    brain.turns, brain.preapproved = [], []
+    brain.begin_turn = lambda tid: brain.turns.append(tid)
+    brain.preapprove = lambda tid, until: brain.preapproved.append(tid)
+    o.brain = brain
+    await o.one_turn()
+    assert brain.asked == ["open chrome, just do it", "open it in the other profile instead"]
+    assert brain.turns == [1, 2] and brain.preapproved == [1]
+
+
+async def test_just_do_it_as_a_confirm_answer_is_still_an_answer():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["just do it"])
+    r = await o.confirm("Open Chrome")
+    assert r.outcome == "approved"
+    assert Orchestrator.detect_preapproval("just do it") is False

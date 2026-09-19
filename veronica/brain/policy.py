@@ -1,8 +1,13 @@
-"""Risk classifier for tool calls: decide whether a call runs without asking."""
+"""Risk classifier for tool calls: decide whether a call runs without asking,
+and which calls are asked about every single time (`always_confirm`)."""
 import ipaddress
+import os
 import shlex
+from collections.abc import Callable
 from typing import Literal
 from urllib.parse import urlsplit
+
+from veronica.tools.computer_events import Front, is_system_dialog, normalize_combo
 
 Decision = Literal["allow", "confirm"]
 
@@ -227,3 +232,124 @@ def classify(tool_name: str, tool_input: dict) -> Decision:
         if risk_table is not None:
             return risk_table.get(short, "confirm")
     return "confirm"
+
+
+# --- always-confirm: asked every time, whatever else is going on ----------------
+# The confirm gate has two ways of skipping the question — the screen-control
+# trust window and pre-approval by request wording ("just do it"). Nothing in
+# this table is ever covered by either: it sends something, destroys
+# something, or presses Enter/submits in a place where that runs a command.
+
+# Apps where the trust window never opens and never applies: a click or
+# keystroke in a terminal runs whatever is on the prompt line, so every
+# screen action there is confirmed on its own.
+TRUST_EXCLUDED_BUNDLES = frozenset({
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "dev.warp.Warp-Stable",
+    "net.kovidgoyal.kitty",
+    "com.github.wez.wezterm",
+    "io.alacritty",
+    "com.mitchellh.ghostty",
+})
+_ENTER_KEYS = frozenset({"enter", "return"})
+
+# Bash: command basename -> predicate on the rest of that command's argv.
+# Checked per shell command — a chain like `cd x && rm -rf y` is split on
+# the chain/pipe characters first, so `rm` is seen as a head.
+_ALWAYS_BASH: dict[str, Callable[[list[str]], bool]] = {
+    "rm": lambda argv: any(_has_flag_char(tok, "rR") for tok in argv),
+    "git": lambda argv: bool(argv) and argv[0] == "push"
+        and any(tok in ("-f", "--force", "--force-with-lease") or tok.startswith("--force-with-lease=")
+                for tok in argv[1:]),
+    "shutdown": lambda argv: True,
+    "reboot": lambda argv: True,
+    "halt": lambda argv: True,
+    "pmset": lambda argv: any(tok in ("sleepnow", "restart", "shutdown") for tok in argv),
+    "osascript": lambda argv: _mentions(" ".join(argv), _POWER_PHRASES),
+    "sudo": lambda argv: True,
+    "killall": lambda argv: True,
+    "diskutil": lambda argv: True,
+    "launchctl": lambda argv: bool(argv) and argv[0] in ("unload", "bootout"),
+    "defaults": lambda argv: len(argv) >= 2 and argv[0] == "write" and argv[1].startswith("com.apple."),
+    "tccutil": lambda argv: True,
+}
+_POWER_PHRASES = ("shut down", "restart", "log out", "sleep")
+_APPLESCRIPT_PHRASES = _POWER_PHRASES[:3] + ("delete", "empty trash", "keystroke return", "key code 36")
+_CHAIN_CHARS = "|&;\n"
+
+
+def _has_flag_char(tok: str, chars: str) -> bool:
+    """`-r`, `-rf`, `-fR`… — a short-flag cluster containing one of `chars`."""
+    return tok.startswith("-") and not tok.startswith("--") and any(c in tok[1:] for c in chars)
+
+
+def _mentions(text: str, phrases: tuple[str, ...]) -> bool:
+    low = text.lower()
+    return any(p in low for p in phrases)
+
+
+def _bash_always_confirms(command: str) -> bool:
+    for part in _split_chain(command):
+        try:
+            argv = shlex.split(part)
+        except ValueError:
+            return True   # unparsable: assume the worst
+        if not argv:
+            continue
+        head = os.path.basename(argv[0])
+        check = _ALWAYS_BASH.get(head)
+        if check is not None and check(argv[1:]):
+            return True
+    return False
+
+
+def _is_send_tool(server: str, short: str) -> bool:
+    """mail_send today; any future messages/mail send on any server."""
+    if short == "mail_send":
+        return True
+    return (short.endswith("_send") and "message" in short) or (server == "messages" and short == "send")
+
+
+def _split_chain(command: str) -> list[str]:
+    parts, cur = [], []
+    for ch in command:
+        if ch in _CHAIN_CHARS:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def always_confirm(tool_name: str, tool_input: dict, front: Front | None = None) -> bool:
+    """True for calls that get their own yes/no no matter what: sending
+    mail/messages, destructive or power/privilege shell commands, an
+    AppleScript that does the same, and screen actions that press Enter,
+    type into a terminal, or touch a system dialog. `front` is the
+    frontmost app for computer tools (None: unknown, only the input is
+    judged)."""
+    if tool_name == "Bash":
+        return _bash_always_confirms(str(tool_input.get("command", "")))
+    if not tool_name.startswith("mcp__"):
+        return False
+    rest = tool_name[len("mcp__"):]
+    server, _, short = rest.partition("__")
+    if _is_send_tool(server, short):
+        return True
+    if server == "mac" and short == "applescript":
+        return _mentions(str(tool_input.get("script", "")), _APPLESCRIPT_PHRASES)
+    if server == "computer":
+        if front is not None and is_system_dialog(front):
+            return True
+        if short == "computer_type":
+            if tool_input.get("submit"):
+                return True
+            return front is not None and front.bundle_id in TRUST_EXCLUDED_BUNDLES
+        if short == "computer_key":
+            try:
+                return normalize_combo(str(tool_input.get("combo") or "")) in _ENTER_KEYS
+            except ValueError:
+                return False
+    return False

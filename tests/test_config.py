@@ -257,3 +257,13 @@ def test_hud_particles_and_intensity_are_live_editable():
     assert coerce_setting("hud_particles", 99999) == 8000
     assert coerce_setting("hud_intensity", 5) == 2.0
     assert coerce_setting("hud_intensity", "0.5") == 0.5
+
+
+def test_preapprove_by_wording_is_a_live_bool():
+    assert Settings().preapprove_by_wording is True
+    f = EDITABLE_SETTINGS["preapprove_by_wording"]
+    assert f.kind == "bool" and f.restart is False
+    assert f.label == 'Pre-approve when I say "do it"'
+    assert "never for sending mail" in f.help
+    assert coerce_setting("preapprove_by_wording", "off") is False
+    assert coerce_setting("preapprove_by_wording", True) is True

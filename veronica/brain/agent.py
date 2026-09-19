@@ -17,13 +17,13 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
-from veronica.brain.policy import classify
+from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES, always_confirm, classify
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
 from veronica.tools.browser import browser_server
 from veronica.tools.computer import computer_server
-from veronica.tools.computer_events import Front, frontmost, is_system_dialog, normalize_combo
+from veronica.tools.computer_events import Front, frontmost, is_system_dialog
 from veronica.tools.mac import mac_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
@@ -59,34 +59,9 @@ MUSIC_PREFIX = "mcp__music__"
 BROWSER_PREFIX = "mcp__browser__"
 COMPUTER_PREFIX = "mcp__computer__"
 
-# Apps where the trust window never opens and never applies: a click or
-# keystroke in a terminal runs whatever is on the prompt line, so every
-# screen action there is confirmed on its own.
-TRUST_EXCLUDED_BUNDLES = frozenset({
-    "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "dev.warp.Warp-Stable",
-    "net.kovidgoyal.kitty",
-    "com.github.wez.wezterm",
-    "io.alacritty",
-    "com.mitchellh.ghostty",
-})
-_ENTER_KEYS = frozenset({"enter", "return"})
-
-
-def _always_confirms(tool_name: str, input: dict) -> bool:
-    """Screen actions the trust window never covers: anything that presses
-    Enter (`computer_type` with submit, `computer_key` enter/return) —
-    it submits whatever is in front, so it always gets its own confirm."""
-    short = tool_name[len(COMPUTER_PREFIX):]
-    if short == "computer_type":
-        return bool(input.get("submit"))
-    if short == "computer_key":
-        try:
-            return normalize_combo(str(input.get("combo") or "")) in _ENTER_KEYS
-        except ValueError:
-            return False
-    return False
+# TRUST_EXCLUDED_BUNDLES (terminals) and the Enter/terminal/system-dialog
+# rules live in policy.always_confirm now; the gate and the trust window
+# both consult it.
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:
@@ -271,6 +246,15 @@ class Brain:
         # or a "no".
         self._trust_until = 0.0
         self._trust_app: str | None = None
+        # Pre-approval by request wording ("copy this, just do it"): the
+        # orchestrator numbers its turns (begin_turn) and, when the request
+        # itself said go ahead, pre-approves that turn for a few seconds.
+        # It covers the FIRST confirm-class call of that turn only, is
+        # consumed on use, and never applies to policy.always_confirm tools.
+        self._current_turn = 0
+        self._asked_this_turn = 0          # confirm-class calls seen this turn
+        self._preapproved_turn: int | None = None
+        self._preapproved_until = 0.0
         # Set by the gate when a confirmation was answered with something
         # other than yes/no: the orchestrator picks it up after the turn
         # and runs it as the next request. Cleared when a turn starts.
@@ -321,8 +305,14 @@ class Brain:
             if self._on_tool:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
-        if tool_name.startswith(COMPUTER_PREFIX):
-            return await self._gate_computer(tool_name, input, summary)
+        front = self._frontmost() if tool_name.startswith(COMPUTER_PREFIX) else None
+        if self._preapproved(tool_name, input, front):
+            log.info("pre-approved by request wording: %s", summary)
+            if self._on_tool:
+                self._on_tool(summary, "preapproved")
+            return PermissionResultAllow(updated_input=input)
+        if front is not None:
+            return await self._gate_computer(tool_name, input, summary, front)
         log.info("tool request: %s", summary)
         outcome, heard = _confirm_outcome(await self._confirm(summary, summarize_detail(tool_name, input)))
         if outcome == "approved":
@@ -337,6 +327,40 @@ class Brain:
             self.pending_redirect = heard
             return PermissionResultDeny(message=f"user declined and said: {heard!r}")
         return PermissionResultDeny(message="user declined")
+
+    # -- pre-approval by request wording ---------------------------------------
+    def begin_turn(self, turn_id: int) -> None:
+        """Called by the orchestrator at the top of every brain turn. A
+        pre-approval that was for some other turn is dropped here."""
+        self._current_turn = turn_id
+        self._asked_this_turn = 0
+        if self._preapproved_turn != turn_id:
+            self._preapproved_turn = None
+
+    def preapprove(self, turn_id: int, until: float) -> None:
+        """Skip the yes/no for the first confirm-class call of `turn_id`,
+        if it comes before `until` (monotonic seconds)."""
+        self._preapproved_turn = turn_id
+        self._preapproved_until = until
+        log.info("pre-approval armed for turn %d", turn_id)
+
+    def _preapproved(self, tool_name: str, input: dict, front: Front | None) -> bool:
+        """One-shot: true once, for the first confirm-class call of the
+        pre-approved turn, and only while the setting is on. Never for an
+        always-confirm tool — and that call still uses up the slot, so a
+        "just do it" can't slide onto whatever comes next."""
+        first = self._asked_this_turn == 0
+        self._asked_this_turn += 1
+        if not (
+            first
+            and self.s.preapprove_by_wording
+            and self._preapproved_turn is not None
+            and self._preapproved_turn == self._current_turn
+            and self._clock() < self._preapproved_until
+        ):
+            return False
+        self._preapproved_turn = None
+        return not always_confirm(tool_name, input, front)
 
     # -- trust window (E4) ----------------------------------------------------
     def clear_trust(self) -> None:
@@ -358,16 +382,16 @@ class Brain:
             and self._trustable(front)
         )
 
-    async def _gate_computer(self, tool_name: str, input: dict, summary: str):
-        """Confirm gate for confirm-class `mcp__computer__*` tools. The
-        frontmost app is looked up at gate time; a system permission dialog
-        (`is_system_dialog`, keyed on bundle id — those windows have empty
-        titles) or a terminal never gets the trust exemption, and neither
-        does anything that presses Enter (`_always_confirms`). After a
-        "yes" the frontmost app and clock are read again: the user may have
-        switched apps while being asked, and the window belongs to what is
-        in front now, from now."""
-        if not _always_confirms(tool_name, input) and self._trusted(self._frontmost(), self._clock()):
+    async def _gate_computer(self, tool_name: str, input: dict, summary: str, front: Front):
+        """Confirm gate for confirm-class `mcp__computer__*` tools. `front`
+        is the frontmost app as looked up at gate time; a system permission
+        dialog (`is_system_dialog`, keyed on bundle id — those windows have
+        empty titles) or a terminal never gets the trust exemption, and
+        neither does anything that presses Enter (`always_confirm`). After
+        a "yes" the frontmost app and clock are read again: the user may
+        have switched apps while being asked, and the window belongs to
+        what is in front now, from now."""
+        if not always_confirm(tool_name, input, front) and self._trusted(front, self._clock()):
             log.info("trusted: %s", summary)
             if self._on_tool:
                 self._on_tool(summary, "auto")

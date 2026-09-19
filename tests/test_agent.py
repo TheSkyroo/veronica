@@ -1141,3 +1141,138 @@ async def test_pending_redirect_cleared_at_start_of_ask(brain):
     brain.pending_redirect = "stale"
     [s async for s in brain.ask("x")]
     assert brain.pending_redirect is None
+
+
+# --- pre-approval by request wording ("just do it") ---------------------------
+
+_TERMINAL = Front(app="Terminal", bundle_id="com.apple.Terminal", window_title="zsh", pid=5)
+
+
+def _preapproved(tmp_home, *, turn=1, on=True, answers=(False,)):
+    """A _Trust brain in turn `turn` with turn 1 pre-approved for 20 s."""
+    t = _Trust(tmp_home, answers=answers)
+    t.brain.s.preapprove_by_wording = on
+    t.brain.begin_turn(turn)
+    t.brain.preapprove(1, until=t.now + 20)
+    return t
+
+
+async def test_preapproved_first_confirm_call_is_allowed_without_asking(tmp_home, caplog):
+    t = _preapproved(tmp_home)
+    with caplog.at_level("INFO", logger="veronica.brain"):
+        res = await t.brain._can_use_tool("mcp__mac__clipboard_write", {"text": "hi"}, None)
+    assert res.behavior == "allow"
+    assert t.asked == []
+    assert t.tools == [("Copy to clipboard: hi", "preapproved")]
+    assert "pre-approved by request wording: Copy to clipboard: hi" in caplog.text
+
+
+async def test_preapproval_is_one_shot(tmp_home):
+    t = _preapproved(tmp_home, answers=(True,))
+    await t.brain._can_use_tool("mcp__mac__clipboard_write", {"text": "hi"}, None)
+    res = await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert res.behavior == "allow" and t.asked == ["Write file /a"]
+    assert t.tools == [("Copy to clipboard: hi", "preapproved")]
+
+
+async def test_preapproval_only_covers_the_first_confirm_class_call(tmp_home):
+    # an always-confirm tool comes first: it is asked, and that used up the
+    # "first call" slot — the next confirm-class call is asked too
+    t = _preapproved(tmp_home, answers=(True, True))
+    await t.brain._can_use_tool("mcp__pim__mail_send", {"to": "a@b.c"}, None)
+    await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert t.asked == ["Send mail to a@b.c", "Write file /a"]
+    assert t.tools == []
+
+
+async def test_preapproval_expires(tmp_home):
+    t = _preapproved(tmp_home)
+    t.now += 21
+    res = await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert res.behavior == "deny" and t.asked == ["Write file /a"] and t.tools == []
+
+
+async def test_preapproval_is_for_one_turn_only(tmp_home):
+    t = _preapproved(tmp_home, turn=2)
+    await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert t.asked == ["Write file /a"]
+    # starting yet another turn drops a pre-approval that was for a different one
+    t.brain.begin_turn(3)
+    assert t.brain._preapproved_turn is None
+
+
+async def test_unused_preapproval_does_not_carry_into_the_next_turn(tmp_home):
+    t = _preapproved(tmp_home)
+    await t.brain._can_use_tool("Read", {"file_path": "/x"}, None)   # no confirm-class call in turn 1
+    t.brain.begin_turn(2)
+    await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert t.asked == ["Write file /a"] and t.tools == [("Read: /x", "auto")]
+
+
+async def test_preapproval_setting_off_asks(tmp_home):
+    t = _preapproved(tmp_home, on=False)
+    await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert t.asked == ["Write file /a"] and t.tools == []
+
+
+async def test_preapproval_not_applied_to_auto_tools_or_redirects(tmp_home):
+    t = _preapproved(tmp_home)
+    await t.brain._can_use_tool("Read", {"file_path": "/x"}, None)
+    assert t.tools == [("Read: /x", "auto")]
+    res = await t.brain._can_use_tool("Bash", {"command": "screencapture x.png"}, None)
+    assert res.behavior == "deny"
+    # neither used up the pre-approval
+    res = await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert res.behavior == "allow" and t.asked == []
+
+
+@pytest.mark.parametrize("tool,inp,front", [
+    ("mcp__pim__mail_send", {"to": "a@b.c"}, _FINDER),
+    ("Bash", {"command": "rm -rf build"}, _FINDER),
+    ("Bash", {"command": "git push --force"}, _FINDER),
+    ("Bash", {"command": "shutdown -h now"}, _FINDER),
+    ("mcp__computer__computer_key", {"combo": "enter"}, _FINDER),
+    ("mcp__computer__computer_type", {"text": "ls"}, _TERMINAL),
+    ("mcp__computer__computer_click", {"x": 1, "y": 1}, _SECAGENT),
+    ("mcp__mac__applescript", {"script": 'tell application "Finder" to empty trash'}, _FINDER),
+])
+async def test_preapproval_never_covers_always_confirm_tools(tmp_home, tool, inp, front):
+    t = _preapproved(tmp_home)
+    t.front = front
+    res = await t.brain._can_use_tool(tool, inp, None)
+    assert res.behavior == "deny" and len(t.asked) == 1 and t.tools == []
+
+
+async def test_preapproved_computer_action_does_not_open_trust_window(tmp_home):
+    t = _preapproved(tmp_home, answers=(True,))
+    res = await t.click()
+    assert res.behavior == "allow" and t.asked == []
+    assert t.tools == [("Click (10, 20)", "preapproved")]
+    assert t.brain._trust_app is None
+    await t.click(1, 1)
+    assert t.asked == ["Click (1, 1)"]
+    assert t.brain._trust_app == "com.apple.finder"   # the spoken yes opened it
+
+
+async def test_trusted_computer_action_still_uses_up_the_preapproval_slot(tmp_home):
+    t = _Trust(tmp_home, answers=(True, True))
+    t.brain.begin_turn(1)
+    await t.click()                                  # yes: trust window for Finder
+    t.brain.preapprove(2, until=t.now + 20)
+    t.brain.begin_turn(2)
+    await t.click(1, 1)                              # would be trusted anyway; it is the first confirm-class call
+    assert t.tools == [("Click (1, 1)", "preapproved")]
+    res = await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert res.behavior == "allow" and t.asked == ["Click (10, 20)", "Write file /a"]
+
+
+async def test_begin_turn_resets_confirm_count_but_not_the_preapproval(tmp_home):
+    t = _Trust(tmp_home, answers=(True,))
+    t.brain.begin_turn(1)
+    await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
+    assert t.asked == ["Write file /a"]
+    t.brain.preapprove(2, until=t.now + 20)
+    t.brain.begin_turn(2)
+    res = await t.brain._can_use_tool("Write", {"file_path": "/b"}, None)
+    assert res.behavior == "allow" and t.asked == ["Write file /a"]
+    assert t.tools == [("Write file /b", "preapproved")]

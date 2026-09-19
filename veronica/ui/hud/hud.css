@@ -50,6 +50,8 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #tool.head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px}
 #tool .badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
 .badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}.badge.redirected{color:#ffb454}
+/* pre-approved by the request's own wording ("just do it"): gold, outlined — it was never asked */
+.badge.preapproved{color:#ffd666;box-shadow:inset 0 0 0 1px rgba(255,214,102,.7)}
 #tool .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.9}
 #tool .pill{flex:0 0 auto;margin-left:auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,.06)}
 .pill.auto{color:#7ad0ff}
@@ -57,6 +59,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 .pill.done{color:#7dffb0}
 .pill.declined{color:#ff7a7a}
 .pill.redirected{color:#ffb454}
+.pill.pre-approved{color:#ffd666;box-shadow:inset 0 0 0 1px rgba(255,214,102,.5)}
 #tool .detail{flex:0 0 100%;font-size:10.5px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 #tool .detail:empty{display:none}
 
