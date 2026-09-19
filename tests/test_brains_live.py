@@ -14,6 +14,7 @@ import pytest
 
 from veronica.brain.backends.antigravity import AntigravityBrain
 from veronica.brain.backends.codex import CodexBrain
+from veronica.brain.backends.copilot import CopilotBrain
 from veronica.brain.gate import GateServer, ToolGate
 from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
@@ -22,6 +23,7 @@ pytestmark = pytest.mark.live
 FIX = Path(__file__).parent / "fixtures" / "brains"
 needs_agy = pytest.mark.skipif(shutil.which("agy") is None, reason="agy not installed")
 needs_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex not installed")
+needs_copilot = pytest.mark.skipif(shutil.which("copilot") is None, reason="copilot not installed")
 
 
 @pytest.fixture
@@ -52,6 +54,22 @@ def agy_hooks_file():
             f.write_text(before)
 
 
+@pytest.fixture
+def copilot_hooks_file():
+    """Back up ~/.copilot/hooks/veronica.json (which may not exist) and put
+    it back exactly as it was."""
+    f = Path.home() / ".copilot" / "hooks" / "veronica.json"
+    before = f.read_text() if f.exists() else None
+    try:
+        yield f
+    finally:
+        if before is None:
+            f.unlink(missing_ok=True)
+        else:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(before)
+
+
 def _capture(name, argv, cwd):
     p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=180)
     (FIX / f"{name}.jsonl").write_text(p.stdout)
@@ -75,6 +93,10 @@ class RecordingAntigravity(_Recording, AntigravityBrain):
 
 
 class RecordingCodex(_Recording, CodexBrain):
+    pass
+
+
+class RecordingCopilot(_Recording, CopilotBrain):
     pass
 
 
@@ -250,5 +272,90 @@ async def test_codex_mcp_tool_through_serve(short_home):
         assert ("volume_get", "auto") in cards, cards                           # tools.serve gated it
     finally:
         (FIX / "codex-mcp.jsonl").write_text("\n".join(b.raw) + "\n")
+        await b.close()
+        await srv.stop()
+
+
+# -- copilot ------------------------------------------------------------------
+@needs_copilot
+def test_copilot_plain_turn(tmp_path):
+    p = _capture("copilot-plain", ["copilot", "-p", "Reply with exactly: pineapple. Nothing else.",
+                                   "--output-format", "json", "--silent", "--no-ask-user", "--disable-builtin-mcps"],
+                 tmp_path)
+    assert p.returncode == 0 and "pineapple" in p.stdout.lower()
+    assert json.loads(p.stdout.splitlines()[-1])["type"] == "result"
+
+
+@needs_copilot
+async def test_copilot_brain_plain_turn_and_resume(short_home, copilot_hooks_file):
+    b, srv = await _brain_with_gate(short_home, [], [], RecordingCopilot)
+    try:
+        out = [x async for x in b.ask("Reply with exactly: pineapple. Nothing else.")]
+        assert any("pineapple" in x.lower() for x in out), out
+        sid = b.s.session_file_for("copilot").read_text()
+        assert sid == b._new_session_id and b._proc is None
+        assert copilot_hooks_file.exists()
+        out2 = [x async for x in b.ask("What fruit did you just name? One word.")]
+        assert any("pineapple" in x.lower() for x in out2), out2       # resumed the session
+        assert b.s.session_file_for("copilot").read_text() == sid
+    finally:
+        await b.close()
+        await srv.stop()
+    assert not copilot_hooks_file.exists()                              # close() removes our hook file
+
+
+@needs_copilot
+async def test_copilot_native_shell_gated_and_allowed(short_home, copilot_hooks_file):
+    proof = short_home / "canary-ok.txt"
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCopilot)
+    try:
+        out = [x async for x in b.ask(f"Run the shell command `touch {proof} && echo canary-ok` with your bash "
+                                      "tool and reply with its output only.")]
+        assert any("canary-ok" in x for x in out), out
+        assert proof.exists()
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert any(e["call"] == "bash" and "canary-ok" in e["key"] for e in entries), entries
+        assert any(c[0] == "confirm" for c in cards), cards       # the gate was really asked
+        assert b.s.copilot_native_tools is True                   # canary did not trip
+    finally:
+        (FIX / "copilot-shell.jsonl").write_text("\n".join(b.raw) + "\n")
+        await b.close()
+        await srv.stop()
+
+
+@needs_copilot
+async def test_copilot_native_shell_denied_does_not_run(short_home, copilot_hooks_file):
+    proof = short_home / "denied-proof.txt"
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [False] * 5, cards, RecordingCopilot)
+    try:
+        out = [x async for x in b.ask(f"Run the shell command `touch {proof}` with your bash tool, then reply "
+                                      "with one short sentence saying whether it ran.")]
+        assert not proof.exists(), out
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert any(str(proof) in e["key"] for e in entries), entries
+        assert any(c[0] == "confirm" for c in cards)
+        assert b.s.copilot_native_tools is True
+    finally:
+        await b.close()
+        await srv.stop()
+
+
+@needs_copilot
+async def test_copilot_mcp_tool_through_serve(short_home, copilot_hooks_file):
+    cards = []
+    b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCopilot)
+    try:
+        out = [x async for x in b.ask("Call the veronica-mac MCP server's volume_get tool and tell me "
+                                      "the volume level in one short sentence.")]
+        assert any(any(ch.isdigit() for ch in x) for x in out), out
+        assert any('"tool.execution_start"' in l and "volume_get" in l for l in b.raw), b.raw
+        entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
+        assert not any("volume_get" in json.dumps(e) for e in entries), entries   # hook lets ours through
+        assert ("volume_get", "auto") in cards, cards                           # tools.serve gated it
+        assert cards.count(("volume_get", "auto")) == 1                         # and gated it once
+    finally:
+        (FIX / "copilot-mcp.jsonl").write_text("\n".join(b.raw) + "\n")
         await b.close()
         await srv.stop()

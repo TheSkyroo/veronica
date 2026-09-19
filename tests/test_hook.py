@@ -19,6 +19,12 @@ from veronica.brain.base import Decision
     ("qwen", "google_web_search", {"query": "x"}, None),
     ("codex", "mcp__veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
     ("copilot", "veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
+    ("copilot", "veronica-mac-clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),  # verified
+    ("copilot", "veronica-pim-mail_send", {"to": "x"}, ("mcp__pim__mail_send", {"to": "x"})),
+    ("copilot", "veronica-mac-", {}, ("veronica-mac-", {})),
+    ("copilot", "github-mcp-server-search_code", {"q": "x"}, ("github-mcp-server-search_code", {"q": "x"})),
+    ("copilot", "rg", {"pattern": "x"}, None),
+    ("copilot", "read_bash", {"id": "0"}, None),
     ("qwen", "mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
     ("antigravity", "some_new_tool", {"a": 1}, ("some_new_tool", {"a": 1})),
 ])
@@ -137,6 +143,29 @@ def test_scope_file_limits_hook_to_our_conversation(tmp_path):
     scope.unlink()
     out, _ = hook.run("antigravity", payload("c2"), ask=deny, log_path=tmp_path / "l3", scope_file=scope)
     assert out == "" and not (tmp_path / "l3").exists()
+
+
+def test_scope_cwd_limits_hook_to_our_workspace(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(ws)
+    payload = lambda cwd: json.dumps({"cwd": cwd, "toolName": "bash", "toolArgs": {"command": "ls"}})
+    deny = lambda *a, **k: Decision(False, "denied", "user declined")
+    # our workspace, by realpath (copilot reports /private/tmp/... for /tmp/...)
+    out, _ = hook.run("copilot", payload(str(link)), ask=deny, log_path=tmp_path / "l", scope_cwd=ws)
+    assert json.loads(out)["permissionDecision"] == "deny" and (tmp_path / "l").exists()
+    out, _ = hook.run("copilot", payload(str(ws)), ask=deny, log_path=tmp_path / "l", scope_cwd=link)
+    assert json.loads(out)["permissionDecision"] == "deny"
+    # another directory, or no cwd at all -> silent no-op, no log line
+    for cwd in (str(tmp_path), "", None):
+        out, _ = hook.run("copilot", payload(cwd), ask=deny, log_path=tmp_path / "l2", scope_cwd=ws)
+        assert out == "" and not (tmp_path / "l2").exists()
+    # the flag
+    out, code = hook.main(["copilot", "--log", str(tmp_path / "l3"), "--scope-cwd", str(ws)], payload(str(ws)), ask=deny)
+    assert code == 0 and json.loads(out)["permissionDecision"] == "deny"
+    out, _ = hook.main(["copilot", "--log", str(tmp_path / "l4"), "--scope-cwd", str(ws)], payload(str(tmp_path)), ask=deny)
+    assert out == "" and not (tmp_path / "l4").exists()
 
 
 def test_main_flags_override_env(tmp_path, monkeypatch):

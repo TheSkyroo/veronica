@@ -12,7 +12,9 @@ Flags (Antigravity's hook is user-level, so it gets no env from us):
 $VERONICA_HOOK_LOG; `--scope-file <path>` makes the hook a no-op unless
 the payload's `conversationId` equals that file's content, so only the
 conversation Veronica is driving is gated and the user's own `agy` is
-untouched."""
+untouched. `--scope-cwd <dir>` does the same by the payload's `cwd`
+(Copilot's hook is user-level too and reports the realpath of its
+working directory, which is our workspace only for Veronica's turns)."""
 import argparse
 import json
 import os
@@ -29,7 +31,8 @@ EDIT_TOOLS = {"replace", "edit", "edit_file", "apply_patch", "str_replace_editor
               "replace_file_content", "multi_replace_file_content", "sed_file"}     # agy
 READONLY_TOOLS = {"read_file", "view", "glob", "grep", "list_directory", "find", "web_fetch",
                   "web_search", "google_web_search", "fetch", "Read", "Glob", "Grep", "ls",
-                  "view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content"}  # agy
+                  "view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content",  # agy
+                  "rg", "read_bash", "list_bash", "fetch_copilot_cli_documentation", "list_agents", "read_agent"}  # copilot
 # Where each CLI puts the one string that identifies a native call: the
 # command line, else the file. Same order on both sides of the canary.
 _KEY_FIELDS = ("command", "CommandLine", "file_path", "TargetFile", "AbsolutePath", "path")
@@ -45,8 +48,15 @@ CANONICAL: dict[str, str] = (
 
 
 def _ours(tool_name: str) -> str | None:
-    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' / 'mac__open_app' -> 'mcp__mac__open_app'."""
-    t = tool_name.removeprefix("mcp__").removeprefix("veronica-")
+    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' / 'mac__open_app'
+    / 'veronica-mac-open_app' (Copilot joins server and tool with '-') -> 'mcp__mac__open_app'."""
+    t = tool_name.removeprefix("mcp__")
+    if t.startswith("veronica-"):
+        t = t.removeprefix("veronica-")
+        if "__" not in t:
+            for server in OUR_SERVERS:
+                if t.startswith(server + "-") and len(t) > len(server) + 1:
+                    return f"mcp__{server}__{t[len(server) + 1:]}"
     server, sep, short = t.partition("__")
     return f"mcp__{server}__{short}" if sep and server in OUR_SERVERS else None
 
@@ -94,7 +104,9 @@ def emit(backend: str, allow: bool, reason: str = "") -> str:
     """The per-CLI decision JSON. Qwen: silence means allow. Antigravity's
     PreToolHookResult is {decision, reason} (verified against agy 1.2.7:
     the Claude-style hookSpecificOutput shape is rejected as an unknown
-    field). Copilot's key is confirmed against its hooks reference in Task 5."""
+    field). Copilot's is the bare {permissionDecision,
+    permissionDecisionReason} (verified against copilot 1.0.86: a deny
+    fails the call with "Denied by preToolUse hook: <reason>")."""
     if backend == "qwen":
         return "" if allow else json.dumps({"decision": "deny", "reason": reason})
     if backend == "antigravity":
@@ -121,9 +133,20 @@ def canary_key(tool: str, inp: dict) -> str:
 
 
 
-def in_scope(payload: dict, scope_file: Path | None) -> bool:
-    """Without a scope file every call is ours. With one, only the
-    conversation whose id it holds (unreadable/empty file -> nothing is)."""
+def in_scope(payload: dict, scope_file: Path | None, scope_cwd: Path | None = None) -> bool:
+    """Without a scope every call is ours. With a scope file, only the
+    conversation whose id it holds (unreadable/empty file -> nothing is);
+    with a scope cwd, only calls whose `cwd` is that directory (compared
+    as realpaths: Copilot reports /private/tmp/... for /tmp/...)."""
+    if scope_cwd is not None:
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return False
+        try:
+            if os.path.realpath(cwd) != os.path.realpath(scope_cwd):
+                return False
+        except OSError:
+            return False
     if scope_file is None:
         return True
     try:
@@ -134,17 +157,19 @@ def in_scope(payload: dict, scope_file: Path | None) -> bool:
 
 
 def run(backend: str, stdin_text: str, *, ask=ask_gate, log_path: Path | None = None,
-        scope_file: Path | None = None) -> tuple[str, int]:
+        scope_file: Path | None = None, scope_cwd: Path | None = None) -> tuple[str, int]:
     """(stdout, exit code). The log line is written *before* the gate is
     asked so the canary sees the call even if the answer never comes."""
     try:
         payload = json.loads(stdin_text or "{}")
-        if not in_scope(payload, scope_file):
+        if not in_scope(payload, scope_file, scope_cwd):
             return "", 0                               # not our conversation: the CLI's own flow applies
         call = payload.get("toolCall") or {}          # agy: {"toolCall": {"name", "args"}}
         tool = payload.get("tool_name") or payload.get("toolName") or call.get("name") or ""
         inp = (payload.get("tool_input") or payload.get("toolArgs") or payload.get("toolInput")
                or call.get("args") or {})
+        if isinstance(inp, str):                      # copilot apply_patch: toolArgs is the patch text
+            inp = {"command": inp}
         canon = canonical_tool(backend, str(tool), dict(inp))
         if canon is None:
             return "", 0
@@ -166,12 +191,14 @@ def main(argv: list[str], stdin_text: str, *, ask=ask_gate) -> tuple[str, int]:
     ap.add_argument("--sock", default=None)
     ap.add_argument("--log", default=None)
     ap.add_argument("--scope-file", default=None)
+    ap.add_argument("--scope-cwd", default=None)
     a = ap.parse_args(argv)
     if a.sock:
         os.environ["VERONICA_GATE_SOCK"] = a.sock   # gateclient reads it; flags win over env
     log_path = a.log or os.environ.get("VERONICA_HOOK_LOG", "")
     return run(a.backend, stdin_text, ask=ask, log_path=Path(log_path) if log_path else None,
-               scope_file=Path(a.scope_file) if a.scope_file else None)
+               scope_file=Path(a.scope_file) if a.scope_file else None,
+               scope_cwd=Path(a.scope_cwd) if a.scope_cwd else None)
 
 
 if __name__ == "__main__":

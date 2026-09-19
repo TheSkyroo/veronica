@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     # MCP tools. Flipped off automatically when the hook canary trips.
     codex_native_tools: bool = True
     antigravity_native_tools: bool = True
+    copilot_native_tools: bool = True
 
     # memory
     memory_enabled: bool = True
@@ -226,6 +227,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "antigravity_native_tools": EditableField(
         "bool", "Antigravity: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
+        restart=False,
+    ),
+    "copilot_native_tools": EditableField(
+        "bool", "Copilot: allow its own shell",
         "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
     ),
