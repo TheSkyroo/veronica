@@ -12,7 +12,7 @@ from veronica.audio.wake import make_wake
 from veronica.brain.agent import Brain
 from veronica.config import Settings, settings, setup_logging
 from veronica.memory.store import MemoryStore
-from veronica.orchestrator import Orchestrator
+from veronica.orchestrator import ConfirmResult, Orchestrator
 from veronica.speech import voices
 from veronica.speech.stt import Transcriber, stt_spec
 from veronica.speech.tts import Synthesizer
@@ -30,7 +30,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     thread)."""
     holder: dict = {}
 
-    async def confirm(summary: str, detail: str = "") -> bool:
+    async def confirm(summary: str, detail: str = "") -> ConfirmResult:
         return await holder["orch"].confirm(summary, detail)
 
     on_level = (lambda v: on_event("mic", v)) if (on_event and audio) else None

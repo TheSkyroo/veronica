@@ -6,6 +6,7 @@ import os
 import shlex
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -37,7 +38,18 @@ def _image_media_type(data: bytes) -> str:
     tools/screen.py), else image/png."""
     return "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
 
-Confirm = Callable[[str, str], Awaitable[bool]]
+# confirm(summary, detail) answers with something truthy only when the
+# user approved: Orchestrator.ConfirmResult (`.outcome` of "approved" /
+# "denied" / "other" plus `.heard`), or a bare bool from older callers.
+Confirm = Callable[[str, str], Awaitable[Any]]
+
+
+def _confirm_outcome(result) -> tuple[str, str]:
+    """(outcome, heard) of a Confirm result; a bare bool is approved/denied."""
+    outcome = getattr(result, "outcome", None)
+    if outcome is None:
+        return ("approved" if result else "denied"), ""
+    return outcome, getattr(result, "heard", "") or ""
 
 MAC_PREFIX = "mcp__mac__"
 PIM_PREFIX = "mcp__pim__"
@@ -259,6 +271,10 @@ class Brain:
         # or a "no".
         self._trust_until = 0.0
         self._trust_app: str | None = None
+        # Set by the gate when a confirmation was answered with something
+        # other than yes/no: the orchestrator picks it up after the turn
+        # and runs it as the next request. Cleared when a turn starts.
+        self.pending_redirect: str | None = None
 
     # -- session persistence --------------------------------------------------
     def _load_session(self) -> str | None:
@@ -308,8 +324,18 @@ class Brain:
         if tool_name.startswith(COMPUTER_PREFIX):
             return await self._gate_computer(tool_name, input, summary)
         log.info("tool request: %s", summary)
-        if await self._confirm(summary, summarize_detail(tool_name, input)):
+        outcome, heard = _confirm_outcome(await self._confirm(summary, summarize_detail(tool_name, input)))
+        if outcome == "approved":
             return PermissionResultAllow(updated_input=input)
+        return self._deny(outcome, heard)
+
+    def _deny(self, outcome: str, heard: str) -> PermissionResultDeny:
+        """A "no" is a plain decline; anything else the user said instead is
+        handed to the brain in the deny message (it usually re-plans right
+        away) and kept in `pending_redirect` for the orchestrator."""
+        if outcome == "other":
+            self.pending_redirect = heard
+            return PermissionResultDeny(message=f"user declined and said: {heard!r}")
         return PermissionResultDeny(message="user declined")
 
     # -- trust window (E4) ----------------------------------------------------
@@ -347,7 +373,8 @@ class Brain:
                 self._on_tool(summary, "auto")
             return PermissionResultAllow(updated_input=input)
         log.info("tool request: %s", summary)
-        if await self._confirm(summary, summarize_detail(tool_name, input)):
+        outcome, heard = _confirm_outcome(await self._confirm(summary, summarize_detail(tool_name, input)))
+        if outcome == "approved":
             front = self._frontmost()
             now = self._clock()
             window = self.s.computer_trust_s
@@ -357,7 +384,7 @@ class Brain:
                 log.info("trust window opened for %s (%ss)", front.bundle_id, window)
             return PermissionResultAllow(updated_input=input)
         self.clear_trust()
-        return PermissionResultDeny(message="user declined")
+        return self._deny(outcome, heard)
 
     def _options(self, resume: str | None) -> ClaudeAgentOptions:
         # Re-read facts/recent turns here (not cached) so a NEW client/session
@@ -461,6 +488,7 @@ class Brain:
 
     # -- public ---------------------------------------------------------------
     async def ask(self, text: str, images: list[bytes] = ()) -> AsyncIterator[str]:
+        self.pending_redirect = None   # a redirect belongs to the turn it was said in
         client = await self._ensure_client()
         splitter = SentenceSplitter()
         try:

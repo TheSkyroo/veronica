@@ -38,7 +38,9 @@ The HUD's status line under the orb shows what she's doing:
 - **Thinking…** — Claude is working on a reply.
 - **Speaking** — she's talking.
 - **Say yes or no** — she's asked for confirmation before a risky action and is listening for your answer; the
-  question itself appears above, and the mic-level bar is still shown while she listens for it.
+  question itself appears above, and the mic-level bar is still shown while she listens for it. During a
+  confirmation, anything that isn't yes/no is taken as your next request ("no, open it in Safari instead",
+  "what will that do?"): the action is skipped and she answers that instead. Silence skips it too.
 - **Error** — something went wrong; check the log.
 
 While she's listening, the HUD also shows a live partial transcript of what you're saying (in italics), which is

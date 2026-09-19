@@ -612,3 +612,40 @@ def test_reduced_motion_freezes_idle_but_state_changes_still_draw():
         c = page.evaluate("document.getElementById('orb').toDataURL()")
         assert c != a, "colour/brightness changes still apply under reduced motion"
         browser.close()
+
+
+@pytest.mark.live
+def test_confirm_redirected_pill():
+    """A confirmation answered with something other than yes/no ends with a
+    'redirected' tool event: amber ↪ badge and a 'redirected' pill, and the
+    hint/prompt rows clear like they do for allowed/declined."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
+        page.evaluate("window.hud.push({kind:'prompt', payload:'Run Open Chrome?'})")
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Open Chrome', "
+            "detail:'mac: open -a Google Chrome', decision:'ask', timeout_ms:8000}})"
+        )
+        assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
+
+        page.evaluate("window.hud.push({kind:'tool', payload:{summary:'Open Chrome', decision:'redirected'}})")
+        assert "redirected" in page.get_attribute("#tool .badge", "class")
+        assert page.inner_text("#tool .badge") == "↪"
+        assert page.inner_text("#tool .pill") == "REDIRECTED"
+        assert "redirected" in page.get_attribute("#tool .pill", "class")
+        assert page.inner_text("#tool .detail") == "mac: open -a Google Chrome"
+        assert page.inner_text("#hint .msg") == ""
+        assert page.inner_text("#prompt .msg") == ""
+        pill_color = page.evaluate("getComputedStyle(document.querySelector('#tool .pill')).color")
+        badge_color = page.evaluate("getComputedStyle(document.querySelector('#tool .badge')).color")
+        assert pill_color == badge_color == "rgb(255, 180, 84)"
+
+        browser.close()

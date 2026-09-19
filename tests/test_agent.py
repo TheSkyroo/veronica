@@ -1061,3 +1061,83 @@ async def test_clear_trust_resets(tmp_home):
     assert t.brain._trust_app is None and t.brain._trust_until == 0.0
     await t.click(1, 1)
     assert len(t.asked) == 2
+
+
+# -- three-way confirm: the gate passes a redirect back to the orchestrator ---
+
+class _Answer:
+    """What Orchestrator.confirm() returns: truthy only when approved."""
+
+    def __init__(self, outcome, heard=""):
+        self.outcome = outcome
+        self.heard = heard
+
+    def __bool__(self):
+        return self.outcome == "approved"
+
+
+def _brain_answering(tmp_home, *answers):
+    answers = list(answers)
+    asked = []
+
+    async def confirm(summary, detail=""):
+        asked.append(summary)
+        return answers.pop(0)
+
+    return Brain(Settings(), confirm=confirm), asked
+
+
+async def test_gate_approved_result_allows(tmp_home):
+    b, asked = _brain_answering(tmp_home, _Answer("approved", "yes"))
+    res = await b._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "allow" and asked == ["Bash: rm x"]
+    assert b.pending_redirect is None
+
+
+async def test_gate_denied_result_denies_without_redirect(tmp_home):
+    b, _ = _brain_answering(tmp_home, _Answer("denied", "no"))
+    res = await b._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "deny" and res.message == "user declined"
+    assert b.pending_redirect is None
+
+
+async def test_gate_other_result_denies_with_text_and_records_redirect(tmp_home):
+    heard = "open it in the other profile instead"
+    b, _ = _brain_answering(tmp_home, _Answer("other", heard))
+    res = await b._can_use_tool("Bash", {"command": "rm x"}, None)
+    assert res.behavior == "deny"
+    assert res.message == f"user declined and said: {heard!r}"
+    assert b.pending_redirect == heard
+
+
+async def test_gate_bare_bool_confirm_still_works(tmp_home):
+    b, _ = _brain_answering(tmp_home, True, False)
+    assert (await b._can_use_tool("Bash", {"command": "rm x"}, None)).behavior == "allow"
+    res = await b._can_use_tool("Bash", {"command": "rm y"}, None)
+    assert res.behavior == "deny" and res.message == "user declined"
+    assert b.pending_redirect is None
+
+
+async def test_computer_gate_other_result_denies_with_text_and_clears_trust(tmp_home):
+    t = _Trust(tmp_home, answers=(True, _Answer("other", "yes, but in Chrome")))
+    await t.click()
+    assert t.brain._trust_app == "com.apple.finder"
+    t.front = _SAFARI
+    res = await t.click(1, 2)
+    assert res.behavior == "deny"
+    assert res.message == "user declined and said: 'yes, but in Chrome'"
+    assert t.brain.pending_redirect == "yes, but in Chrome"
+    assert t.brain._trust_app is None
+
+
+async def test_computer_gate_denied_result_has_plain_message(tmp_home):
+    t = _Trust(tmp_home, answers=(_Answer("denied", "no"),))
+    res = await t.click()
+    assert res.behavior == "deny" and res.message == "user declined"
+    assert t.brain.pending_redirect is None
+
+
+async def test_pending_redirect_cleared_at_start_of_ask(brain):
+    brain.pending_redirect = "stale"
+    [s async for s in brain.ask("x")]
+    assert brain.pending_redirect is None

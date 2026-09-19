@@ -46,7 +46,7 @@
     captionEl.classList.toggle('hidden', !text);
   }
 
-  const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined'};
+  const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined', redirected: 'redirected'};
 
   // Hide an empty bubble/row (no awkward blank box in the card) and show it
   // once it has content.
@@ -172,9 +172,9 @@
             model.tool = t;
             actionEl.classList.remove('hidden');
             badgeEl.className = 'badge ' + decision;
-            badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕'}[decision] || '';
+            badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕', redirected:'↪'}[decision] || '';
             toolTitleEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
-            // The final allowed/declined event doesn't repeat `detail` — keep
+            // The final allowed/declined/redirected event doesn't repeat `detail` — keep
             // whatever the preceding 'ask' event already put there instead
             // of blanking it out.
             if (typeof t.detail === 'string') detailEl.textContent = t.detail;
