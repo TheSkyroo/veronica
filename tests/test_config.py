@@ -244,19 +244,25 @@ def test_computer_trust_s_default_and_clamp():
     assert coerce_setting("computer_trust_s", "30") == 30
 
 
-def test_hud_particles_and_intensity_are_live_editable():
+def test_hud_particles_intensity_and_detail_are_live_editable():
     s = Settings()
-    assert s.hud_particles == 4000 and s.hud_intensity == 1.0
+    assert s.hud_particles == 400 and s.hud_intensity == 1.0 and s.hud_detail == 1.0
     f = EDITABLE_SETTINGS["hud_particles"]
-    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (500, 8000)
-    assert f.label == "HUD particles"
+    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (100, 2000)
+    assert f.label == "HUD specks"
     g = EDITABLE_SETTINGS["hud_intensity"]
     assert g.kind == "float" and g.restart is False and (g.min, g.max) == (0.2, 2.0)
     assert g.label == "HUD intensity"
-    assert coerce_setting("hud_particles", 10) == 500
-    assert coerce_setting("hud_particles", 99999) == 8000
+    d = EDITABLE_SETTINGS["hud_detail"]
+    assert d.kind == "float" and d.restart is False and (d.min, d.max) == (0.5, 1.5)
+    assert d.label == "HUD detail"
+    assert coerce_setting("hud_particles", 10) == 100
+    assert coerce_setting("hud_particles", 99999) == 2000
     assert coerce_setting("hud_intensity", 5) == 2.0
     assert coerce_setting("hud_intensity", "0.5") == 0.5
+    assert coerce_setting("hud_detail", 9) == 1.5
+    assert coerce_setting("hud_detail", 0) == 0.5
+    assert coerce_setting("hud_detail", "1.2") == 1.2
 
 
 def test_preapprove_by_wording_is_a_live_bool():
