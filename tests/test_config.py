@@ -277,3 +277,11 @@ def test_gate_socket_and_backend_dirs(tmp_home):
     assert d.stat().st_mode & 0o777 == 0o700
     assert s.session_file_for("claude") == s.session_file
     assert s.session_file_for("codex") == d / "session"
+
+
+def test_antigravity_native_tools_is_a_live_bool():
+    assert Settings().antigravity_native_tools is True
+    f = EDITABLE_SETTINGS["antigravity_native_tools"]
+    assert f.kind == "bool" and f.restart is False
+    assert f.label == "Antigravity: allow its own shell"
+    assert coerce_setting("antigravity_native_tools", "off") is False

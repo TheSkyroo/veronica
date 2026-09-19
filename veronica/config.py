@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     chime_followup_hz: int = 660
 
     # brain
-    brain_timeout_s: int = 60
-    interrupt_drain_s: int = 3
+    brain_timeout_s: float = 60
+    interrupt_drain_s: float = 3
     effort: str = "low"
     max_turns: int | None = None
     brain_cwd: Path = Field(default_factory=Path.home)
@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # ahead skips the yes/no for the ONE confirm-class action it produces
     # (never for always-confirm tools, see policy.always_confirm).
     preapprove_by_wording: bool = True
+    # External brains: may the vendor CLI use its own shell/file tools
+    # (each call still asked through Veronica's hook)? Off = only our
+    # MCP tools. Flipped off automatically when the hook canary trips.
+    antigravity_native_tools: bool = True
 
     # memory
     memory_enabled: bool = True
@@ -212,6 +216,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", 'Pre-approve when I say "do it"',
         "If your request already says do it / go ahead, skip the yes/no for that one action "
         "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
+    ),
+    "antigravity_native_tools": EditableField(
+        "bool", "Antigravity: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
     ),
 }

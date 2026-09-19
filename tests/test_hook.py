@@ -47,11 +47,10 @@ def test_run_deny_shapes(tmp_path):
     deny = lambda *a, **k: Decision(False, "denied", "user declined")
     out, _ = hook.run("antigravity", json.dumps({"tool_name": "run_command", "tool_input": {"command": "rm x"}}),
                       ask=deny, log_path=tmp_path / "l")
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] == "user declined"
+    assert json.loads(out) == {"decision": "deny", "reason": "user declined"}
     out, _ = hook.run("antigravity", json.dumps({"conversationId": "c1", "toolCall": {"name": "run_command", "args": {"command": "rm x"}}}),
                       ask=deny, log_path=tmp_path / "l")
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert json.loads(out) == {"decision": "deny", "reason": "user declined"}
     out, _ = hook.run("qwen", json.dumps({"tool_name": "run_shell_command", "tool_input": {"command": "rm x"}}),
                       ask=deny, log_path=tmp_path / "l")
     assert json.loads(out) == {"decision": "deny", "reason": "user declined"}
@@ -85,3 +84,78 @@ def test_run_exception_fails_closed(tmp_path):
 def test_run_bad_payload_fails_closed(tmp_path):
     out, code = hook.run("qwen", "not json", ask=lambda *a, **k: Decision(True, "approved"), log_path=None)
     assert code == 0 and json.loads(out) == {"decision": "deny", "reason": "gate error"}
+
+
+def test_agy_shapes_map_to_canonical():
+    assert hook.canonical_tool("antigravity", "run_command", {"CommandLine": "echo hi", "Cwd": "/"}) == ("Bash", {"command": "echo hi"})
+    name, inp = hook.canonical_tool("antigravity", "write_to_file", {"TargetFile": "/tmp/x", "CodeContent": "y"})
+    assert name == "Write" and inp["file_path"] == "/tmp/x" and inp["TargetFile"] == "/tmp/x"
+    name, inp = hook.canonical_tool("antigravity", "replace_file_content", {"TargetFile": "/tmp/x", "TargetContent": "a"})
+    assert name == "Edit" and inp["file_path"] == "/tmp/x"
+    for t in ("view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content"):
+        assert hook.canonical_tool("antigravity", t, {"AbsolutePath": "/x"}) is None
+    # agy wraps MCP calls: ours are unwrapped (allowed here, gated in tools.serve), others confirmed by name
+    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "veronica-mac", "ToolName": "read_battery", "Arguments": {}}) == ("mcp__mac__read_battery", {})
+    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue", "Arguments": {}})[0] == "call_mcp_tool"
+
+
+def test_canary_key_same_on_both_sides():
+    """The adapter keys a native call from the raw stream parameters; the
+    hook keys it from the canonicalised payload. They must agree."""
+    raw = {"CommandLine": "echo canary-ok", "Cwd": "/tmp"}
+    _, canon = hook.canonical_tool("antigravity", "run_command", raw)
+    assert hook.canary_key("run_command", raw) == hook.canary_key("run_command", canon) == "echo canary-ok"
+    raw = {"TargetFile": "/tmp/a.txt", "CodeContent": "hi"}
+    _, canon = hook.canonical_tool("antigravity", "write_to_file", raw)
+    assert hook.canary_key("write_to_file", raw) == hook.canary_key("write_to_file", canon) == "/tmp/a.txt"
+    assert hook.canary_key("browser_click_element", {"Zeta": "z", "Alpha": "a"}) == "a"
+    assert hook.canary_key("wait", {}) == "wait"
+
+
+def test_run_logs_agy_key(tmp_path):
+    out, _ = hook.run("antigravity", json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": "echo canary-ok"}}}),
+                      ask=lambda *a, **k: Decision(True, "approved"), log_path=tmp_path / "l")
+    assert json.loads(out) == {"decision": "allow", "reason": ""}
+    assert json.loads((tmp_path / "l").read_text())["key"] == "echo canary-ok"
+
+
+def test_scope_file_limits_hook_to_our_conversation(tmp_path):
+    scope = tmp_path / "active-conversation"
+    payload = lambda cid: json.dumps({"conversationId": cid, "toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}})
+    deny = lambda *a, **k: Decision(False, "denied", "user declined")
+    # no scope file at all -> everything is ours
+    out, _ = hook.run("antigravity", payload("c1"), ask=deny, log_path=tmp_path / "l")
+    assert json.loads(out)["decision"] == "deny"
+    # scope file names another conversation -> silent no-op, no log line
+    scope.write_text("c2\n")
+    out, _ = hook.run("antigravity", payload("c1"), ask=deny, log_path=tmp_path / "l2", scope_file=scope)
+    assert out == "" and not (tmp_path / "l2").exists()
+    # matching conversation -> gated
+    out, _ = hook.run("antigravity", payload("c2"), ask=deny, log_path=tmp_path / "l2", scope_file=scope)
+    assert json.loads(out)["decision"] == "deny" and (tmp_path / "l2").exists()
+    # missing/empty scope file -> nothing is ours (fail quiet, agy's own flow applies)
+    scope.unlink()
+    out, _ = hook.run("antigravity", payload("c2"), ask=deny, log_path=tmp_path / "l3", scope_file=scope)
+    assert out == "" and not (tmp_path / "l3").exists()
+
+
+def test_main_flags_override_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("VERONICA_GATE_SOCK", "/env/sock")
+    monkeypatch.setenv("VERONICA_HOOK_LOG", str(tmp_path / "env.log"))
+    seen = {}
+
+    def ask(tool, input, **kw):
+        seen["sock"] = hook.os.environ.get("VERONICA_GATE_SOCK")
+        return Decision(True, "approved")
+
+    scope = tmp_path / "scope"
+    scope.write_text("c9")
+    stdin = json.dumps({"conversationId": "c9", "toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}})
+    out, code = hook.main(["antigravity", "--sock", "/flag/sock", "--log", str(tmp_path / "flag.log"),
+                           "--scope-file", str(scope)], stdin, ask=ask)
+    assert code == 0 and json.loads(out)["decision"] == "allow"
+    assert seen["sock"] == "/flag/sock"
+    assert (tmp_path / "flag.log").exists() and not (tmp_path / "env.log").exists()
+    # env alone still works
+    out, _ = hook.main(["antigravity"], stdin, ask=ask)
+    assert json.loads(out)["decision"] == "allow" and (tmp_path / "env.log").exists()
