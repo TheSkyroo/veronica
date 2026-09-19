@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from veronica.brain import agent as agent_mod
+from veronica.brain.backends import claude as claude_mod
 from claude_agent_sdk.types import PermissionResultDeny
 
 from veronica.brain.agent import Brain, summarize_detail, summarize_tool
@@ -166,9 +166,9 @@ class FakeClient:
 
 @pytest.fixture
 def brain(tmp_home, monkeypatch):
-    monkeypatch.setattr(agent_mod, "AssistantMessage", _Assistant)
-    monkeypatch.setattr(agent_mod, "TextBlock", _Text)
-    monkeypatch.setattr(agent_mod, "ResultMessage", _Result)
+    monkeypatch.setattr(claude_mod, "AssistantMessage", _Assistant)
+    monkeypatch.setattr(claude_mod, "TextBlock", _Text)
+    monkeypatch.setattr(claude_mod, "ResultMessage", _Result)
     monkeypatch.setattr(Brain, "_client_cls", FakeClient)
     FakeClient.instances.clear()
 
@@ -288,9 +288,9 @@ class FakeMemory:
 
 
 async def test_memory_injected_into_system_prompt(tmp_home, monkeypatch):
-    monkeypatch.setattr(agent_mod, "AssistantMessage", _Assistant)
-    monkeypatch.setattr(agent_mod, "TextBlock", _Text)
-    monkeypatch.setattr(agent_mod, "ResultMessage", _Result)
+    monkeypatch.setattr(claude_mod, "AssistantMessage", _Assistant)
+    monkeypatch.setattr(claude_mod, "TextBlock", _Text)
+    monkeypatch.setattr(claude_mod, "ResultMessage", _Result)
     monkeypatch.setattr(Brain, "_client_cls", FakeClient)
     FakeClient.instances.clear()
 
@@ -309,9 +309,9 @@ async def test_memory_injected_into_system_prompt(tmp_home, monkeypatch):
 
 
 async def test_memory_not_injected_when_disabled(tmp_home, monkeypatch):
-    monkeypatch.setattr(agent_mod, "AssistantMessage", _Assistant)
-    monkeypatch.setattr(agent_mod, "TextBlock", _Text)
-    monkeypatch.setattr(agent_mod, "ResultMessage", _Result)
+    monkeypatch.setattr(claude_mod, "AssistantMessage", _Assistant)
+    monkeypatch.setattr(claude_mod, "TextBlock", _Text)
+    monkeypatch.setattr(claude_mod, "ResultMessage", _Result)
     monkeypatch.setattr(Brain, "_client_cls", FakeClient)
     FakeClient.instances.clear()
 
@@ -512,7 +512,7 @@ async def test_gate_auto_allows_safe_tools_without_confirm(brain):
         calls.append(summary)
         return False
 
-    brain._confirm = confirm
+    brain.gate._confirm = confirm
     res = await brain._can_use_tool("Read", {"file_path": "/x"}, None)
     assert res.behavior == "allow" and calls == []
     res = await brain._can_use_tool("Bash", {"command": "ls"}, None)
@@ -689,14 +689,14 @@ async def test_interrupt_call_itself_timing_out_closes_client(brain, monkeypatch
 
 async def test_on_tool_auto_allow(brain):
     seen = []
-    brain._on_tool = lambda s, d: seen.append((s, d))
+    brain.gate._on_tool = lambda s, d: seen.append((s, d))
     await brain._can_use_tool("Read", {"file_path": "/x"}, None)
     assert seen == [("Read: /x", "auto")]
 
 
 async def test_on_tool_not_called_on_confirm_path(brain):
     seen = []
-    brain._on_tool = lambda s, d: seen.append((s, d))
+    brain.gate._on_tool = lambda s, d: seen.append((s, d))
     await brain._can_use_tool("Write", {"file_path": "/a"}, None)
     assert seen == []
 
@@ -867,7 +867,7 @@ async def test_trust_zero_never_auto_allows(tmp_home):
     await t.click()
     await t.click(1, 1)
     assert len(t.asked) == 2
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
 
 
 async def test_trust_window_read_live_from_settings(tmp_home):
@@ -884,7 +884,7 @@ async def test_trust_system_dialog_always_asks(tmp_home, dialog):
     await t.click()
     t.front = Front(app=dialog.app, bundle_id=dialog.bundle_id, window_title=dialog.window_title, pid=dialog.pid)
     # even if the window was somehow opened for that bundle id
-    t.brain._trust_app = dialog.bundle_id
+    t.brain.gate._trust_app = dialog.bundle_id
     res = await t.click(1, 1)
     assert res.behavior == "deny" and len(t.asked) == 2
 
@@ -893,7 +893,7 @@ async def test_trust_yes_on_system_dialog_does_not_open_window(tmp_home):
     t = _Trust(tmp_home, answers=(True, True))
     t.front = _SECAGENT
     await t.click()
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
     await t.click(1, 1)
     assert len(t.asked) == 2
 
@@ -902,7 +902,7 @@ async def test_trust_no_bundle_id_does_not_open_window(tmp_home):
     t = _Trust(tmp_home, answers=(True, True))
     t.front = Front(app="", bundle_id="", window_title="", pid=0)
     await t.click()
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
     await t.click(1, 1)
     assert len(t.asked) == 2
 
@@ -914,7 +914,7 @@ async def test_trust_no_clears_window(tmp_home):
     assert res.behavior == "allow" and len(t.asked) == 1
     t.front = _SAFARI
     res = await t.click(2, 2)                      # asks; user says no
-    assert res.behavior == "deny" and t.brain._trust_app is None
+    assert res.behavior == "deny" and t.brain.gate._trust_app is None
     t.front = _FINDER
     await t.click(3, 3)                            # Finder trust is gone too
     assert len(t.asked) == 3
@@ -951,13 +951,13 @@ async def test_trust_never_opens_in_a_terminal(tmp_home, terminal, caplog):
     t.front = terminal
     with caplog.at_level("INFO", logger="veronica.brain"):
         res = await t.click()
-    assert res.behavior == "allow" and t.brain._trust_app is None
+    assert res.behavior == "allow" and t.brain.gate._trust_app is None
     assert "trust window opened" not in caplog.text
     await t.click(1, 1)
     assert len(t.asked) == 2                          # asked again: no window
     # nor does it apply if a window was somehow opened for that bundle id
-    t.brain._trust_app = terminal.bundle_id
-    t.brain._trust_until = t.now + 60
+    t.brain.gate._trust_app = terminal.bundle_id
+    t.brain.gate._trust_until = t.now + 60
     res = await t.click(2, 2)
     assert res.behavior == "allow" and len(t.asked) == 3
 
@@ -1005,7 +1005,7 @@ async def test_trust_still_covers_plain_typing_and_other_keys(tmp_home, tool, in
 async def test_trust_enter_yes_still_opens_the_window(tmp_home):
     t = _Trust(tmp_home, answers=(True,))
     res = await t.brain._can_use_tool("mcp__computer__computer_key", {"combo": "enter"}, None)
-    assert res.behavior == "allow" and t.brain._trust_app == "com.apple.finder"
+    assert res.behavior == "allow" and t.brain.gate._trust_app == "com.apple.finder"
     await t.click()                                   # trusted
     assert len(t.asked) == 1
 
@@ -1022,11 +1022,11 @@ async def test_trust_window_uses_frontmost_and_clock_after_the_yes(tmp_home, cap
         t.now += 20
         return True
 
-    t.brain._confirm = confirm
+    t.brain.gate._confirm = confirm
     with caplog.at_level("INFO", logger="veronica.brain"):
         await t.click()
-    assert t.brain._trust_app == "com.apple.Safari"
-    assert t.brain._trust_until == pytest.approx(1020.0 + 90)
+    assert t.brain.gate._trust_app == "com.apple.Safari"
+    assert t.brain.gate._trust_until == pytest.approx(1020.0 + 90)
     assert "trust window opened for com.apple.Safari (90s)" in caplog.text
     await t.click(1, 1)                               # Safari is in front now: trusted
     assert calls == ["Click (10, 20)"]
@@ -1039,15 +1039,15 @@ async def test_trust_yes_landing_on_a_dialog_does_not_open_window(tmp_home):
         t.front = _SECAGENT
         return True
 
-    t.brain._confirm = confirm
+    t.brain.gate._confirm = confirm
     await t.click()
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
 
 
 async def test_trust_setting_zero_closes_an_open_window(tmp_home):
     t = _Trust(tmp_home, answers=(True, True))
     await t.click()
-    assert t.brain._trust_app == "com.apple.finder"
+    assert t.brain.gate._trust_app == "com.apple.finder"
     t.brain.s.computer_trust_s = 0
     await t.click(1, 1)
     assert len(t.asked) == 2
@@ -1056,9 +1056,9 @@ async def test_trust_setting_zero_closes_an_open_window(tmp_home):
 async def test_clear_trust_resets(tmp_home):
     t = _Trust(tmp_home, answers=(True, True))
     await t.click()
-    assert t.brain._trust_app == "com.apple.finder"
+    assert t.brain.gate._trust_app == "com.apple.finder"
     t.brain.clear_trust()
-    assert t.brain._trust_app is None and t.brain._trust_until == 0.0
+    assert t.brain.gate._trust_app is None and t.brain.gate._trust_until == 0.0
     await t.click(1, 1)
     assert len(t.asked) == 2
 
@@ -1121,13 +1121,13 @@ async def test_gate_bare_bool_confirm_still_works(tmp_home):
 async def test_computer_gate_other_result_denies_with_text_and_clears_trust(tmp_home):
     t = _Trust(tmp_home, answers=(True, _Answer("other", "yes, but in Chrome")))
     await t.click()
-    assert t.brain._trust_app == "com.apple.finder"
+    assert t.brain.gate._trust_app == "com.apple.finder"
     t.front = _SAFARI
     res = await t.click(1, 2)
     assert res.behavior == "deny"
     assert res.message == "user declined and said: 'yes, but in Chrome'"
     assert t.brain.pending_redirect == "yes, but in Chrome"
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
 
 
 async def test_computer_gate_denied_result_has_plain_message(tmp_home):
@@ -1198,7 +1198,7 @@ async def test_preapproval_is_for_one_turn_only(tmp_home):
     assert t.asked == ["Write file /a"]
     # starting yet another turn drops a pre-approval that was for a different one
     t.brain.begin_turn(3)
-    assert t.brain._preapproved_turn is None
+    assert t.brain.gate._preapproved_turn is None
 
 
 async def test_unused_preapproval_does_not_carry_into_the_next_turn(tmp_home):
@@ -1248,10 +1248,10 @@ async def test_preapproved_computer_action_does_not_open_trust_window(tmp_home):
     res = await t.click()
     assert res.behavior == "allow" and t.asked == []
     assert t.tools == [("Click (10, 20)", "preapproved")]
-    assert t.brain._trust_app is None
+    assert t.brain.gate._trust_app is None
     await t.click(1, 1)
     assert t.asked == ["Click (1, 1)"]
-    assert t.brain._trust_app == "com.apple.finder"   # the spoken yes opened it
+    assert t.brain.gate._trust_app == "com.apple.finder"   # the spoken yes opened it
 
 
 async def test_trusted_computer_action_still_uses_up_the_preapproval_slot(tmp_home):
