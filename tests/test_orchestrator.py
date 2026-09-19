@@ -116,8 +116,8 @@ async def test_chime_skipped_when_muted():
 
 async def test_confirm_yes_and_no():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["Yes, do it", "nah"])
-    assert await o.confirm("Bash: ls") is True
-    assert await o.confirm("Bash: rm") is False
+    assert bool(await o.confirm("Bash: ls")) is True
+    assert bool(await o.confirm("Bash: rm")) is False
     assert o.tts.said[0] == "Run Bash: ls?"
 
 
@@ -139,13 +139,13 @@ def test_confirm_prompt_wording(summary, prompt):
 
 async def test_confirm_screen_action_is_asked_as_the_action_itself():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
-    assert await o.confirm("Click 'Save'", "Click 'Save'") is True
+    assert bool(await o.confirm("Click 'Save'", "Click 'Save'")) is True
     assert o.tts.said[0] == "Click 'Save'?"
 
 
 async def test_confirm_question_override_replaces_default_prompt():
     o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
-    assert await o.confirm("Quit Veronica", question="Quit Veronica?") is True
+    assert bool(await o.confirm("Quit Veronica", question="Quit Veronica?")) is True
     assert o.tts.said == ["Quit Veronica?"]
     assert ("prompt", "Quit Veronica?") in ev
     tools = [p for k, p in ev if k == "tool"]
@@ -156,13 +156,13 @@ async def test_confirm_question_override_replaces_default_prompt():
 
 async def test_confirm_no_speech_is_deny():
     o, _ = build(rec_pcms=[None])
-    assert await o.confirm("Write file a") is False
+    assert bool(await o.confirm("Write file a")) is False
 
 
 async def test_confirm_when_muted_denies_silently():
     o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
     o.muted = True
-    assert await o.confirm("Bash: rm x") is False
+    assert bool(await o.confirm("Bash: rm x")) is False
     assert o.tts.said == []
 
 
@@ -374,7 +374,7 @@ class ConfirmingBrain:
 
     async def ask(self, text):
         yield "First."
-        assert await self.orch.confirm("Bash: ls") is True
+        assert bool(await self.orch.confirm("Bash: ls")) is True
         yield "Second."
 
 
@@ -646,7 +646,7 @@ async def test_handle_text_cancel_with_full_queue_does_not_hang():
     out = await asyncio.wait_for(o.handle_text("y"), 1)
     assert out == ["A.", "B.", "C.", "D.", "E."]
 
-    assert await asyncio.wait_for(o.confirm("Bash: rm x"), 1) is True
+    assert bool(await asyncio.wait_for(o.confirm("Bash: rm x"), 1)) is True
 
 
 async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
@@ -676,7 +676,7 @@ async def test_confirm_from_concurrent_task_waits_for_yielded_sentence():
         async def ask(self, text):
             yield "First."
             holder["task"] = asyncio.create_task(self.orch.confirm("Bash: ls"))
-            assert await holder["task"] is True
+            assert bool(await holder["task"]) is True
             yield "Second."
 
     o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
@@ -751,7 +751,7 @@ async def test_now_speaking_set_during_play_and_cleared_after():
     seen.clear()
     o.recorder = Rec([None])
     await o.confirm("do a thing")
-    assert seen == ["Run do a thing?"]
+    assert seen == ["Run do a thing?", "Okay, skipping that."]
     assert o._now_speaking == ""
 
 
@@ -854,7 +854,7 @@ class ConfirmDuringBargeBrain:
 
     async def ask(self, text):
         yield "First."
-        self.results.append(await self.orch.confirm("Bash: rm x"))
+        self.results.append(bool(await self.orch.confirm("Bash: rm x")))
         yield "Second."
 
     async def interrupt(self):
@@ -1018,7 +1018,7 @@ async def test_barge_while_confirm_waits_for_lock_skips_prompt():
     result = await asyncio.wait_for(confirm_task, 1)
     await asyncio.wait_for(holder, 1)
 
-    assert result is False
+    assert bool(result) is False
     assert not any(t.startswith("Run") for t in o.tts.said)
 
 
@@ -1086,8 +1086,8 @@ async def test_events_full_turn():
 
 async def test_events_confirm_ask_then_allowed_and_declined():
     o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16)], stt_texts=["yes", "no"])
-    assert await o.confirm("Bash: rm x", "Bash: rm -rf x") is True
-    assert await o.confirm("Bash: rm y", "Bash: rm -rf y") is False
+    assert bool(await o.confirm("Bash: rm x", "Bash: rm -rf x")) is True
+    assert bool(await o.confirm("Bash: rm y", "Bash: rm -rf y")) is False
     tools = [p for k, p in ev if k == "tool"]
     assert tools == [
         {"summary": "Bash: rm x", "detail": "Bash: rm -rf x", "decision": "ask", "timeout_ms": 0},
@@ -1106,7 +1106,7 @@ async def test_events_confirm_ask_then_allowed_and_declined():
 
 async def test_events_confirm_no_speech_declined():
     o, _, ev = build3(rec_pcms=[None])
-    assert await o.confirm("Bash: rm x") is False
+    assert bool(await o.confirm("Bash: rm x")) is False
     assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "declined"]
 
 
@@ -1232,7 +1232,7 @@ async def test_confirm_capture_does_not_fire_on_audio():
     o._loop = asyncio.get_running_loop()
     rec.on_audio = o._on_recorder_audio
 
-    assert await o.confirm("Bash: rm x") is True
+    assert bool(await o.confirm("Bash: rm x")) is True
     await asyncio.sleep(0.05)
     assert [p for k, p in events if k == "heard_partial"] == []
     assert partial.calls == 0
@@ -3771,3 +3771,316 @@ async def test_brain_without_clear_trust_is_fine():
     o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["that's all"])
     await o.one_turn()
     assert states[-1] == "idle"
+
+
+# -- three-way confirmation: a non-yes/no answer becomes the next request ----
+
+@pytest.mark.parametrize(
+    "heard, expected",
+    [
+        ("", "denied"),
+        (None, "denied"),
+        ("yes", "approved"),
+        ("Yes, do it", "approved"),
+        ("yeah do it", "approved"),
+        ("haan karo", "approved"),
+        ("okay yes do it", "approved"),
+        ("yes please", "approved"),
+        ("go ahead", "approved"),
+        ("okay", "approved"),
+        ("हाँ", "approved"),
+        ("no", "denied"),
+        ("nah", "denied"),
+        ("nope", "denied"),
+        ("no thanks", "denied"),
+        ("No, don't do it.", "denied"),
+        ("nahi rehne do", "denied"),
+        ("नहीं।", "denied"),
+        ("yes no wait", "other"),
+        ("yes, but in Chrome", "other"),
+        ("yes open it in the other profile", "other"),
+        ("haan lekin Chrome mein", "other"),
+        ("no, open it in Safari instead", "other"),
+        ("open it in the other profile instead", "other"),
+        ("what will that do?", "other"),
+        ("why?", "other"),
+        ("wait, which file?", "other"),
+        ("kya karega ye?", "other"),
+        ("yes what?", "other"),
+        ("okay so what will it delete", "other"),
+        # six or more words left after the answer tokens is a request, not an answer
+        ("yes please please please please please please", "other"),
+        # pure hesitation has nothing to redirect to
+        ("um", "denied"),
+        ("hmm", "denied"),
+    ],
+)
+def test_classify_answer(heard, expected):
+    assert Orchestrator.classify_answer(heard) == expected
+
+
+async def test_confirm_result_three_way():
+    from veronica.orchestrator import ConfirmResult
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16)] * 3,
+        stt_texts=["yes", "no", "open it in the other profile instead"],
+    )
+    r = await o.confirm("Bash: ls")
+    assert isinstance(r, ConfirmResult)
+    assert r.outcome == "approved" and r.heard == "yes" and bool(r) is True
+    r = await o.confirm("Bash: rm")
+    assert r.outcome == "denied" and r.heard == "no" and bool(r) is False
+    r = await o.confirm("Open Chrome")
+    assert r.outcome == "other" and r.heard == "open it in the other profile instead"
+    assert bool(r) is False
+    # an explicit answer is never followed by the "skipping" line
+    assert o.tts.said == ["Run Bash: ls?", "Run Bash: rm?", "Run Open Chrome?"]
+
+
+@pytest.mark.parametrize("heard", ["yes, but in Chrome", "what will that do?", "haan lekin Chrome mein"])
+async def test_confirm_other_answers(heard):
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[heard])
+    r = await o.confirm("Open Chrome")
+    assert r.outcome == "other" and r.heard == heard
+
+
+async def test_confirm_timeout_is_denied_and_says_skipping():
+    o, _, ev = build3(rec_pcms=[None])
+    r = await o.confirm("Write file a")
+    assert r.outcome == "denied" and r.heard == "" and not r
+    assert o.tts.said == ["Run Write file a?", "Okay, skipping that."]
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "declined"]
+
+
+async def test_confirm_silence_transcript_is_denied_and_says_skipping():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=[""])
+    r = await o.confirm("Write file a")
+    assert r.outcome == "denied"
+    assert o.tts.said == ["Run Write file a?", "Okay, skipping that."]
+
+
+async def test_events_confirm_redirected():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["no, open it in Safari instead"])
+    r = await o.confirm("Open Chrome", "mac: open -a 'Google Chrome'")
+    assert r.outcome == "other"
+    tools = [p for k, p in ev if k == "tool"]
+    assert tools == [
+        {"summary": "Open Chrome", "detail": "mac: open -a 'Google Chrome'", "decision": "ask", "timeout_ms": 0},
+        {"summary": "Open Chrome", "decision": "redirected"},
+    ]
+
+
+class RedirectBrain:
+    """Awaits orch.confirm() mid-turn like Brain._can_use_tool: on an
+    "other" answer it records the text in `pending_redirect` and, if
+    `answers` is False, stops without saying anything more (the agent
+    stopped after the deny); otherwise it replies to the deny-with-text in
+    the same turn, as the real brain usually does."""
+
+    def __init__(self, orch, answers: bool):
+        self.orch = orch
+        self.answers = answers
+        self.asked = []
+        self.pending_redirect = None
+
+    async def ask(self, text):
+        self.asked.append(text)
+        if len(self.asked) > 1:
+            yield "Opening it in the other profile."
+            return
+        r = await self.orch.confirm("Open Chrome")
+        if r.outcome == "other":
+            self.pending_redirect = r.heard
+            if self.answers:
+                yield "Sure, the other profile it is."
+            return
+        yield "Opened."
+
+
+async def test_confirm_redirect_runs_the_text_as_next_request_when_brain_stopped():
+    o, _, ev = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome", "open it in the other profile instead"],
+    )
+    o.brain = RedirectBrain(o, answers=False)
+    o.store = FakeStore()
+    await o.one_turn()
+    assert o.brain.asked == ["open chrome", "open it in the other profile instead"]
+    assert o.brain.pending_redirect is None
+    assert ("heard", "open it in the other profile instead") in ev
+    # no "I have nothing to say to that." between the deny and the redirect
+    assert o.tts.said == ["Run Open Chrome?", "Opening it in the other profile."]
+    assert o.store.turns == [("open it in the other profile instead", "Opening it in the other profile.")]
+
+
+async def test_confirm_redirect_not_rerun_when_brain_already_answered():
+    o, _, ev = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome", "open it in the other profile instead"],
+    )
+    o.brain = RedirectBrain(o, answers=True)
+    o.store = FakeStore()
+    await o.one_turn()
+    # the brain answered the deny-with-text itself: no second ask
+    assert o.brain.asked == ["open chrome"]
+    assert o.brain.pending_redirect is None
+    assert ("heard", "open it in the other profile instead") in ev
+    assert o.tts.said == ["Run Open Chrome?", "Sure, the other profile it is."]
+    # one memory row: the reply already answers the redirect (it rode along
+    # in the deny message), so it isn't stored twice
+    assert o.store.turns == [("open chrome", "Sure, the other profile it is.")]
+
+
+async def test_confirm_redirect_logged(caplog):
+    import logging
+    o, _ = build(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome", "yes, but in Chrome"],
+    )
+    o.brain = RedirectBrain(o, answers=True)
+    with caplog.at_level(logging.INFO, logger="veronica.orchestrator"):
+        await o.one_turn()
+    assert any("(redirected from confirm)" in r.getMessage() for r in caplog.records)
+
+
+# -- pre-approval by request wording ("copy this, just do it") ---------------
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("copy this to clipboard, just do it", True),
+        ("open chrome and go ahead", True),
+        ("haan kar do abhi", True),
+        ("send the note to the clipboard without asking", True),
+        ("write it to notes, no need to ask", True),
+        ("add a reminder for 5, don't ask", True),
+        ("clipboard mein daal do bina puche", True),
+        ("yes do it, write the file", True),
+        ("Copy this. Do it.", True),
+        # a pure confirm answer is not a command
+        ("do it", False),
+        ("yes", False),
+        ("go ahead", False),
+        ("haan karo", False),
+        ("okay yes do it", False),
+        ("just do it", False),
+        ("yes please", False),
+        ("please do it", False),
+        # ...but a bare "do it now" is telling, not answering
+        ("do it now", True),
+        # questions never pre-approve
+        ("should I do it?", False),
+        ("should I just do it", False),
+        ("can you do it without asking", False),
+        ("what happens if I say do it", False),
+        # negated / overridden
+        ("copy this, don't do it yet", False),
+        ("copy this, do it... actually no", False),
+        ("mat karo, bas dikhao", False),
+        # no confirm phrase at all
+        ("copy this to the clipboard", False),
+        ("open chrome", False),
+        ("", False),
+    ],
+)
+def test_detect_preapproval(text, expected):
+    assert Orchestrator.detect_preapproval(text) is expected
+
+
+class TurnBrain(Brain):
+    """Fake brain that records begin_turn / preapprove like the real one."""
+
+    def __init__(self):
+        super().__init__()
+        self.turns = []
+        self.preapproved = []
+
+    def begin_turn(self, turn_id):
+        self.turns.append(turn_id)
+
+    def preapprove(self, turn_id, until):
+        self.preapproved.append((turn_id, until))
+
+
+async def test_handle_text_numbers_turns_and_tells_the_brain():
+    o, _ = build()
+    o.brain = TurnBrain()
+    await o.handle_text("hi")
+    await o.handle_text("again")
+    assert o.brain.turns == [1, 2]
+    assert o.brain.preapproved == []
+
+
+async def test_one_turn_preapproves_the_brain_turn_it_is_about_to_run(monkeypatch):
+    import time as _time
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    o.brain = TurnBrain()
+    monkeypatch.setattr(_time, "monotonic", lambda: 1000.0)
+    await o.one_turn()
+    assert o.brain.turns == [1]
+    assert o.brain.preapproved == [(1, 1020.0)]
+    assert o.brain.asked == ["copy this to clipboard, just do it"]
+
+
+async def test_one_turn_does_not_preapprove_a_plain_request():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard"])
+    o.brain = TurnBrain()
+    await o.one_turn()
+    assert o.brain.turns == [1] and o.brain.preapproved == []
+
+
+async def test_one_turn_preapproval_honours_the_setting():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    o.s.preapprove_by_wording = False
+    o.brain = TurnBrain()
+    await o.one_turn()
+    assert o.brain.preapproved == []
+
+
+async def test_one_turn_preapproval_counts_from_earlier_turns():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["open chrome and go ahead"])
+    o.brain = TurnBrain()
+    await o.handle_text("one")
+    await o.handle_text("two")
+    await o.one_turn()
+    assert o.brain.turns == [1, 2, 3]
+    assert [tid for tid, _ in o.brain.preapproved] == [3]
+
+
+async def test_one_turn_preapproval_with_a_brain_that_has_no_preapprove():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["copy this to clipboard, just do it"])
+    await o.one_turn()
+    assert o.brain.asked == ["copy this to clipboard, just do it"]
+
+
+async def test_screen_fast_path_preapproves_the_same_turn(monkeypatch):
+    from veronica import orchestrator as orch_mod
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["look at my screen, copy the title, just do it"])
+    o.brain = TurnBrain()
+    monkeypatch.setattr(orch_mod, "capture_screenshot", lambda _kind: "no screen")
+    await o.one_turn()
+    assert o.brain.turns == [1] and [tid for tid, _ in o.brain.preapproved] == [1]
+
+
+async def test_redirect_turn_is_not_preapproved():
+    """"just do it" pre-approves the request it was said in; a confirm
+    answered with something else runs as a new turn that is asked as usual."""
+    o, _, ev = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome, just do it", "open it in the other profile instead"],
+    )
+    brain = RedirectBrain(o, answers=False)
+    brain.turns, brain.preapproved = [], []
+    brain.begin_turn = lambda tid: brain.turns.append(tid)
+    brain.preapprove = lambda tid, until: brain.preapproved.append(tid)
+    o.brain = brain
+    await o.one_turn()
+    assert brain.asked == ["open chrome, just do it", "open it in the other profile instead"]
+    assert brain.turns == [1, 2] and brain.preapproved == [1]
+
+
+async def test_just_do_it_as_a_confirm_answer_is_still_an_answer():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["just do it"])
+    r = await o.confirm("Open Chrome")
+    assert r.outcome == "approved"
+    assert Orchestrator.detect_preapproval("just do it") is False

@@ -38,8 +38,19 @@ The HUD's status line under the orb shows what she's doing:
 - **Thinking…** — Claude is working on a reply.
 - **Speaking** — she's talking.
 - **Say yes or no** — she's asked for confirmation before a risky action and is listening for your answer; the
-  question itself appears above, and the mic-level bar is still shown while she listens for it.
+  question itself appears above, and the mic-level bar is still shown while she listens for it. During a
+  confirmation, anything that isn't yes/no is taken as your next request ("no, open it in Safari instead",
+  "what will that do?"): the action is skipped and she answers that instead. Silence skips it too.
 - **Error** — something went wrong; check the log.
+
+**Pre-approval by wording.** If the request itself already says go ahead — "copy this to the clipboard, just do
+it", "open chrome and go ahead", "add the reminder without asking", "haan kar do abhi" — she skips the yes/no for
+the **one** action that request produces (the HUD shows it with a gold "pre-approved" pill). It's one-shot and
+short-lived (20 s, the first confirmable action of that request only); a second action in the same request is
+asked as usual, and the pre-approval never covers sending mail or messages, `rm -r`, force-pushes, shutdown /
+restart / sleep, `sudo`, pressing Enter, typing into a terminal, or anything on a system dialog — those are
+confirmed every time, however you phrase it. A bare "do it" or "yes" is an answer, not a request, and a question
+("should I do it?") never pre-approves. Turn it off in **Settings → Brain → Pre-approve when I say "do it"**.
 
 While she's listening, the HUD also shows a live partial transcript of what you're saying (in italics), which is
 replaced by the final transcript once you finish talking. This costs a bit of CPU; disable it with

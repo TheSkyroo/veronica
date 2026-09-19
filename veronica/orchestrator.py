@@ -7,7 +7,8 @@ import re
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import numpy as np
 
@@ -57,6 +58,19 @@ _TRAILING_STOP_DICTATION_RE = re.compile(
     r"[\s,.;!?]*\b(?:stop|end)\s+dictat(?:ion|ing)\b[\s.!?]*$", re.IGNORECASE
 )
 
+@dataclass(frozen=True)
+class ConfirmResult:
+    """What confirm() heard: "approved" (a yes), "denied" (a no, or
+    silence), or "other" — anything that is neither, which becomes the next
+    request. Truthy only when approved, so `if await confirm(...)` callers
+    keep working."""
+    outcome: Literal["approved", "denied", "other"]
+    heard: str = ""
+
+    def __bool__(self) -> bool:
+        return self.outcome == "approved"
+
+
 class Orchestrator:
     # No bare "ha": whisper writes laughter as "ha ha", which must never
     # approve a tool. Devanagari forms are for pinned Hindi mode, where
@@ -78,7 +92,7 @@ class Orchestrator:
     })
     CONFIRM_WORDS = STRONG_CONFIRMS | FILLER_CONFIRMS
     DENY_WORDS = frozenset({
-        "no", "nope", "not", "don't", "dont", "cancel", "stop", "never",
+        "no", "nope", "nah", "not", "don't", "dont", "cancel", "stop", "never", "skip",
         "nahi", "nahin", "mat", "rehne",
         "नहीं", "नही", "मत", "रहने",
     })
@@ -150,6 +164,110 @@ class Orchestrator:
         for start, end in strong + filler:
             covered.update(range(start, end + 1))
         return len(covered) == len(words)
+
+    # Words that can pad a yes/no without turning it into a request ("yes
+    # please", "no thanks", "haan ji", "not now"). Anything else left over
+    # after the confirm/deny tokens is new content the brain should hear.
+    ANSWER_FILLERS = frozenset({
+        "please", "pls", "thanks", "thank", "you", "veronica", "now", "it", "that", "this",
+        "then", "so", "and", "just", "already", "really", "ahead", "for", "me", "on",
+        "right", "good", "great", "cool", "yes", "no",
+        "um", "uh", "hmm", "hm", "oh", "ah", "well", "er",
+        "ji", "na", "hai", "ha", "do", "kar", "kijiye", "zaroor", "abhi", "bhai", "yaar", "aap", "toh", "to",
+        "जी", "ना", "है", "अभी", "अब", "ही", "तो",
+    })
+
+    @staticmethod
+    def classify_answer(heard: str | None) -> Literal["approved", "denied", "other"]:
+        """Three-way reading of a confirm reply. Silence is a no. A yes or a
+        no with at most a little padding ("yes please", "no thanks", "haan
+        karo") is what it says. Anything carrying content beyond the answer
+        — a question ("what will that do?"), a qualifier ("yes, but in
+        Chrome"), an instruction ("no, open it in Safari instead"), six or
+        more leftover words — is "other": not an answer, but the next
+        request."""
+        no_apostrophes = (heard or "").lower().replace("'", "").replace("’", "")
+        words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
+        if not words:
+            return "denied"
+        confirmed = Orchestrator.is_confirmation(heard)
+        # Every word that is part of a confirm phrase, negated or not.
+        covered = set()
+        for phrase in Orchestrator.CONFIRM_WORDS:
+            pw = phrase.split()
+            for i in range(len(words) - len(pw) + 1):
+                if words[i:i + len(pw)] == pw:
+                    covered.update(range(i, i + len(pw)))
+        if confirmed and len(covered) == len(words):
+            return "approved"   # pure yes, e.g. "okay yes do it"
+        answer_tokens = Orchestrator.DENY_WORDS | Orchestrator._NEGATORS
+        remaining = [w for i, w in enumerate(words) if i not in covered and w not in answer_tokens]
+        if any(w in Orchestrator.QUESTION_WORDS for w in words):
+            return "other"
+        if len(remaining) >= 6:
+            return "other"
+        if any(w not in Orchestrator.ANSWER_FILLERS for w in remaining):
+            return "other"
+        if confirmed:
+            return "approved"
+        # No yes, no content: a no, or a mumble with nothing to redirect to.
+        return "denied"
+
+    # Phrases that, inside a request, mean "and don't ask me first"; with
+    # STRONG_CONFIRMS ("copy this, just do it", "open chrome and go ahead",
+    # "haan kar do abhi") they pre-approve the one confirm-class action that
+    # request produces (see Brain.preapprove).
+    PREAPPROVE_PHRASES = frozenset({
+        "without asking", "no need to ask", "dont ask", "bina puche", "bina pooche",
+        "बिना पूछे",
+    })
+    # A request that opens like a question ("should I do it?", "can you do
+    # it without asking") is asking, not telling.
+    _QUESTION_LEADS = frozenset({"should", "shall", "can", "could", "would", "will", "may", "kya", "क्या"})
+    # Padding that keeps a yes an answer ("just do it", "yes please") —
+    # ANSWER_FILLERS minus the "now" words: "do it now" / "kar do abhi" is
+    # an order, and gets pre-approved.
+    _ANSWER_PADDING = ANSWER_FILLERS - {"now", "abhi", "अभी", "अब"}
+    PREAPPROVE_WINDOW_S = 20
+
+    @staticmethod
+    def detect_preapproval(text: str) -> bool:
+        """True when the request's own wording says go ahead: a strong
+        confirm / "without asking" phrase, not negated and not taken back
+        by a later no, inside something that is NOT itself a pure confirm
+        answer ("do it", "yes", "haan karo" — those answer a question) and
+        not a question ("should I do it?"). Pure, no state."""
+        raw = (text or "").strip()
+        no_apostrophes = raw.lower().replace("'", "").replace("’", "")
+        words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
+        if not words or raw.endswith("?"):
+            return False
+        if words[0] in Orchestrator._QUESTION_LEADS or any(w in Orchestrator.QUESTION_WORDS for w in words):
+            return False
+        hits: list[tuple[int, int]] = []
+        for phrase in Orchestrator.STRONG_CONFIRMS | Orchestrator.PREAPPROVE_PHRASES:
+            pw = phrase.split()
+            n = len(pw)
+            for i in range(len(words) - n + 1):
+                if words[i:i + n] == pw and not (i > 0 and words[i - 1] in Orchestrator._NEGATORS):
+                    hits.append((i, i + n - 1))
+        if not hits:
+            return False
+        covered = {j for start, end in hits for j in range(start, end + 1)}
+        # Nothing but confirm phrases and padding ("just do it", "okay yes
+        # do it"): an answer, not a request.
+        for phrase in Orchestrator.FILLER_CONFIRMS:
+            pw = phrase.split()
+            for i in range(len(words) - len(pw) + 1):
+                if words[i:i + len(pw)] == pw:
+                    covered.update(range(i, i + len(pw)))
+        if all(i in covered or w in Orchestrator._ANSWER_PADDING for i, w in enumerate(words)):
+            return False
+        last_hit = max(end for _, end in hits)
+        # "do it... actually no": a deny after the last go-ahead takes it back
+        # (a deny that is part of a phrase, "no need to ask", doesn't count).
+        last_deny = max((i for i, w in enumerate(words) if w in Orchestrator.DENY_WORDS and i not in covered), default=-1)
+        return last_deny < last_hit
 
     def __init__(self, settings: Settings, *, wake, recorder, stt, brain, tts, player,
                  partial_stt=None, store=None,
@@ -226,6 +344,9 @@ class Orchestrator:
         self._capture_in_flight = False
         self._barged = False
         self._now_speaking = ""
+        # Brain turns are numbered per handle_text call; the brain gets the
+        # id (begin_turn) so a pre-approval can be pinned to one turn.
+        self._turn_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
         # Push-to-talk is a *signal* into run_forever / the in-flight turn,
@@ -434,6 +555,8 @@ class Orchestrator:
         `lang` ("hi"/"en"/None) picks the voice the reply is spoken with."""
         self._set("thinking")
         self._barged = False   # fresh turn: any earlier barge no longer applies
+        self._turn_id += 1
+        getattr(self.brain, "begin_turn", lambda _tid: None)(self._turn_id)
         t0 = time.monotonic()
         spoken: list[str] = []
         first = True
@@ -543,9 +666,33 @@ class Orchestrator:
             _drain(queue)
             self._speech_queue = None
         if not spoken:
-            await self.say("I have nothing to say to that.")
+            # A brain that stopped right after a redirected confirm isn't
+            # speechless — the redirect is about to be run as the next
+            # request (see _brain_turn).
+            if not getattr(self.brain, "pending_redirect", None):
+                await self.say("I have nothing to say to that.")
         elif self.store is not None and self.s.memory_enabled:
             self.store.add_turn(text, " ".join(spoken))
+        return spoken
+
+    async def _brain_turn(self, text: str, images: list[bytes] = (), *, lang: str | None = None) -> list[str]:
+        """handle_text plus the confirm redirect: if a confirmation in this
+        turn was answered with something other than yes/no, the brain got
+        it in the deny message and has usually re-planned in its reply
+        already; if it said nothing after the deny, run the answer as the
+        next request in the same session."""
+        spoken = await self.handle_text(text, images, lang=lang)
+        heard = getattr(self.brain, "pending_redirect", None)
+        if not heard:
+            return spoken
+        self.brain.pending_redirect = None
+        self._emit("heard", heard)
+        log.info("heard=%r (redirected from confirm)", heard)
+        if not spoken:
+            return await self.handle_text(heard, lang=lang)
+        # The brain already answered the redirect inside this turn (the deny
+        # message carried it), and handle_text stored that reply — no
+        # second memory row with the same reply.
         return spoken
 
     # -- screen awareness -------------------------------------------------------
@@ -559,9 +706,9 @@ class Orchestrator:
         result = await asyncio.to_thread(capture_screenshot, "screen")
         if isinstance(result, str):
             log.warning("screen capture failed: %s", result)
-            return await self.handle_text(text, lang=self._utterance_lang)
+            return await self._brain_turn(text, lang=self._utterance_lang)
         data, _path, _mime = result
-        return await self.handle_text(text, images=[data], lang=self._utterance_lang)
+        return await self._brain_turn(text, [data], lang=self._utterance_lang)
 
     # -- music -----------------------------------------------------------------
     _MUSIC_SUMMARIES = {
@@ -1106,13 +1253,17 @@ class Orchestrator:
             return f"{summary}?"
         return f"Run {summary}?"
 
-    async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> bool:
+    async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> ConfirmResult:
+        """Ask `summary` (or `question`) aloud and listen for the answer.
+        Returns a ConfirmResult: truthy for a yes; a no or silence is
+        "denied"; anything else said is "other" and carried in `.heard` so
+        the brain can take it as the next request instead."""
         if self.muted:
             log.info("confirm skipped (muted): %s", summary)
-            return False
+            return ConfirmResult("denied")
         prev = self.state
         self._set("confirming")
-        result = False
+        result = ConfirmResult("denied")
         try:
             queue = self._speech_queue
             if queue is not None:
@@ -1151,19 +1302,28 @@ class Orchestrator:
                     "timeout_ms": self.s.confirm_listen_s * 1000,
                 })
                 pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
-                if pcm is None:
-                    return result
-                heard = await self.stt.atranscribe(pcm)
+                heard = await self.stt.atranscribe(pcm) if pcm is not None else None
                 if self._barged:
-                    # barged while we were transcribing the reply.
+                    # barged while we were listening for / transcribing the
+                    # reply (a barge unblocks the capture, so pcm is None).
                     log.info("confirm aborted by barge")
                     return result
-                result = self.is_confirmation(heard)
-                log.info("confirm heard=%r -> %s", heard, result)
+                if not heard:
+                    # Silence: say so, so the user knows the window closed
+                    # (an explicit "no" gets no such line).
+                    log.info("confirm heard nothing -> denied")
+                    await self._say_unlocked("Okay, skipping that.")
+                    return result
+                result = ConfirmResult(self.classify_answer(heard), heard)
+                log.info("confirm heard=%r -> %s", heard, result.outcome)
         finally:
             self._set(prev)
-            self._emit("tool", {"summary": summary, "decision": "allowed" if result else "declined"})
+            self._emit("tool", {"summary": summary, "decision": self._DECISION_EVENT[result.outcome]})
         return result
+
+    # `allowed` stays the wire value for an approved confirm (the HUD and
+    # older tests know it); "other" shows as a redirect.
+    _DECISION_EVENT = {"approved": "allowed", "denied": "declined", "other": "redirected"}
 
     # -- barge-in ---------------------------------------------------------------
     async def _barge_teardown(self, turn: asyncio.Future) -> None:
@@ -1300,6 +1460,14 @@ class Orchestrator:
                 text = ""
             self._emit("heard", text)
             log.info("heard=%r lang=%s", text, self._utterance_lang)
+            if self.s.preapprove_by_wording and self.detect_preapproval(text):
+                # The request itself said go ahead: the brain turn this is
+                # about to become (the next handle_text) gets its first
+                # confirm-class action without the yes/no.
+                log.info("pre-approval by wording: %r", text)
+                getattr(self.brain, "preapprove", lambda _tid, until: None)(
+                    self._turn_id + 1, until=time.monotonic() + self.PREAPPROVE_WINDOW_S,
+                )
             intent = match_intent(text)
             if intent == "end":
                 getattr(self.brain, "clear_trust", lambda: None)()
@@ -1467,7 +1635,7 @@ class Orchestrator:
                         break
                     continue
             else:
-                barged = await self._run_with_barge(self.handle_text(text, lang=self._utterance_lang))
+                barged = await self._run_with_barge(self._brain_turn(text, lang=self._utterance_lang))
                 if barged:
                     pcm = await self._relisten(barged)
                     is_followup = False

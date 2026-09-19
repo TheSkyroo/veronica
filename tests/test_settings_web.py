@@ -31,7 +31,8 @@ def fixture_state(**over) -> dict:
                       "max_utterance_s": 20, "wake_min_rms": 0.01, "wake_window_s": 1.5, "wake_hop_s": 0.25,
                       "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
-        "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90},
+        "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
+                  "preapprove_by_wording": True},
         "about": {"version": "0.1.0", "build": "a517483", "built_at": "2026-09-17T10:00:00+05:30", "dirty": True,
                   "describe": "Veronica 0.1.0 (a517483, 17 Sep)", "update": {"available": False, "detail": ""},
                   "updating": False, "log_path": "/tmp/veronica.log", "can_restart": True},
@@ -114,6 +115,14 @@ def test_controls_post_set_and_reply_drives_banner():
         page.click("#pane input[data-key=memory_enabled]")
         msg = sent(page)[-1]
         assert msg["args"] == {"section": "brain", "key": "memory_enabled", "value": False}
+        # pre-approval toggle: rendered from state, live (no restart banner text)
+        assert page.is_checked("#pane input[data-key=preapprove_by_wording]")
+        assert 'Pre-approve when I say "do it"' in page.inner_text("#pane .row[data-key=preapprove_by_wording]")
+        page.click("#pane input[data-key=preapprove_by_wording]")
+        msg = sent(page)[-1]
+        assert msg["args"] == {"section": "brain", "key": "preapprove_by_wording", "value": False}
+        reply(page, msg["id"], {"ok": True, "restart_required": False, "message": ""})
+        assert page.inner_text("#pane .row[data-key=preapprove_by_wording] .status") == ""
 
         # text commits on Enter (and not on every keystroke)
         before = len(sent(page))
