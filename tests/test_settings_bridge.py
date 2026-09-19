@@ -204,7 +204,8 @@ def h():
 def test_state_has_every_section_and_key(h):
     st = h.bridge.get_state()
     assert set(st) == {"general", "voice", "listening", "briefings", "brain", "about", "meta"}
-    assert {"language", "start_at_login", "ptt_enabled", "hud_mode", "hud_hide_after_s"} <= set(st["general"])
+    assert {"language", "start_at_login", "ptt_enabled", "hud_mode", "hud_hide_after_s",
+            "hud_particles", "hud_intensity"} <= set(st["general"])
     assert {"voice", "hindi_voice", "speed", "voices"} == set(st["voice"])
     assert {"followup_window_s", "confirm_listen_s", "wake_min_rms", "wake_phrases",
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
@@ -365,6 +366,26 @@ def test_set_hud_hide_after_is_live_and_clamped(h):
     assert res["ok"] and res["restart_required"] is False
     assert h.orch.s.hud_hide_after_s == 30.0
     assert h.prefs.overrides == [("hud_hide_after_s", 30.0)]
+
+
+def test_set_hud_particles_is_live_and_emits_hud_config(h):
+    res = h.bridge.set("general", "hud_particles", 1200)
+    assert res["ok"] and res["restart_required"] is False
+    assert h.orch.s.hud_particles == 1200
+    assert h.prefs.overrides == [("hud_particles", 1200)]
+    assert h.orch.emitted == [("hud", {"config": {"particles": 1200, "intensity": 1.0}})]
+
+
+def test_set_hud_intensity_is_live_clamped_and_emits_hud_config(h):
+    res = h.bridge.set("general", "hud_intensity", 9)
+    assert res["ok"] and res["restart_required"] is False
+    assert h.orch.s.hud_intensity == 2.0
+    assert h.orch.emitted == [("hud", {"config": {"particles": 4000, "intensity": 2.0}})]
+
+
+def test_set_other_live_setting_does_not_emit_hud_config(h):
+    assert h.bridge.set("general", "hud_hide_after_s", 5)["ok"]
+    assert h.orch.emitted == []
 
 
 # -- set: voice ------------------------------------------------------------------

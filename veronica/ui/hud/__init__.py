@@ -319,6 +319,10 @@ class HudWindow:
         # everything else queued while the page was still loading, in order.
         self._web.evaluateJavaScript_completionHandler_(
             "window.hud.setMode(" + json.dumps(self._mode) + ")", None)
+        # Initial orb config (particle count / intensity) from settings,
+        # before anything queued so a queued configure() from a live
+        # settings change still wins.
+        self._web.evaluateJavaScript_completionHandler_(self._configure_js(self._initial_config()), None)
         pending, self._pending_js = self._pending_js, []
         for js in pending:
             self._web.evaluateJavaScript_completionHandler_(js, None)
@@ -510,6 +514,21 @@ class HudWindow:
         if not self.available or self._closed:
             return
         js = "window.hud.push(" + json.dumps(event, ensure_ascii=False) + ")"
+        self._main(lambda: self._js(js))
+
+    def _initial_config(self) -> dict:
+        return {"particles": int(self.s.hud_particles), "intensity": float(self.s.hud_intensity)}
+
+    @staticmethod
+    def _configure_js(cfg: dict) -> str:
+        return "window.hud.configure(" + json.dumps(cfg) + ")"
+
+    def configure(self, cfg: dict) -> None:
+        """Live orb config (`{"particles": int, "intensity": float}`),
+        routed through the load gate like push()."""
+        if not self.available or self._closed:
+            return
+        js = self._configure_js(dict(cfg or {}))
         self._main(lambda: self._js(js))
 
     def on_state(self, state: str) -> None:

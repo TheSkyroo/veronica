@@ -209,6 +209,8 @@
       }, g.start_at_login));
       frag.push(row('general', 'hud_mode', {kind: 'choice', label: 'HUD style', help: 'Full card with the conversation, or a small orb.', options: HUD_MODES}, g.hud_mode));
       frag.push(settingRow('general', 'hud_hide_after_s'));
+      frag.push(settingRow('general', 'hud_particles'));
+      frag.push(settingRow('general', 'hud_intensity'));
       frag.push(settingRow('general', 'ptt_enabled'));
       frag.push(el('div', {class: 'actions'}, [
         button('Open Login Items…', {attrs: {'data-cmd': 'open_login_items'}, onclick: () => post('open_login_items')}),

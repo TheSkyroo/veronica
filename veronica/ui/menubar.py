@@ -130,6 +130,9 @@ class _NoopHud:
     def reset_position(self) -> None:
         pass
 
+    def configure(self, cfg: dict) -> None:
+        pass
+
 
 class VeronicaApp(rumps.App):
     def __init__(self) -> None:
@@ -302,6 +305,8 @@ class VeronicaApp(rumps.App):
                     self._refresh_hud_mode_item()
                 elif mode == "reset":
                     self._hud.reset_position()
+                elif isinstance(payload, dict) and isinstance(payload.get("config"), dict):
+                    self._hud.configure(payload["config"])
                 continue
             if kind == "settings":
                 # "open settings" / "show history" voice intents: the window
