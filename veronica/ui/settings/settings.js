@@ -211,7 +211,6 @@
       frag.push(settingRow('general', 'hud_hide_after_s'));
       frag.push(settingRow('general', 'hud_particles'));
       frag.push(settingRow('general', 'hud_intensity'));
-      frag.push(settingRow('general', 'hud_detail'));
       frag.push(settingRow('general', 'ptt_enabled'));
       frag.push(el('div', {class: 'actions'}, [
         button('Open Login Items…', {attrs: {'data-cmd': 'open_login_items'}, onclick: () => post('open_login_items')}),

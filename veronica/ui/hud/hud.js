@@ -233,27 +233,23 @@
     },
     state() {
       return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready,
-              particles:activeCount(), intensity:cfg.intensity, detail:cfg.detail};
+              particles:activeCount(), intensity:cfg.intensity};
     },
     setMode(mode) {
       document.body.classList.toggle('mini', mode === 'mini');
       applyMode();
     },
-    // Live orb config from settings: {particles: 100..2000 (specks),
-    // intensity: 0.2..2, detail: 0.5..1.5}. Rebuilds the geometry only when
-    // the active speck count or the detail level changes.
+    // Live orb config from settings: {particles: 500..8000, intensity: 0.2..2}.
+    // Rebuilds the particle buffers only when the active count changes.
     configure(c) {
       c = c && typeof c === 'object' ? c : {};
       if (c.particles !== undefined && c.particles !== null && isFinite(+c.particles)) {
-        cfg.particles = Math.round(Math.max(100, Math.min(2000, +c.particles)));
+        cfg.particles = Math.round(Math.max(500, Math.min(8000, +c.particles)));
       }
       if (c.intensity !== undefined && c.intensity !== null && isFinite(+c.intensity)) {
         cfg.intensity = Math.max(0.2, Math.min(2, +c.intensity));
       }
-      if (c.detail !== undefined && c.detail !== null && isFinite(+c.detail)) {
-        cfg.detail = Math.max(0.5, Math.min(1.5, +c.detail));
-      }
-      ensureGeometry();
+      ensureParticles();
     },
     setVisible(visible) {
       visible = !!visible;
@@ -277,32 +273,24 @@
   }
 
 
-  // ---- orb renderer: hologram orb ---------------------------------------------
-  // A J.A.R.V.I.S.-style hologram globe: three nested spherical shells, each a
-  // set of great-circle rings at fixed pseudo-random tilts, drawn as
-  // *segmented* traces (lit runs with gaps, tick marks, chip blocks, a few
-  // radial connectors between shells), a dense bright core (two bold rings,
-  // a glow disc, drifting specks) and a sparse scatter of twinkling specks
-  // in the volume between the shells. Everything is drawn additively with a
-  // wide low-alpha pass under each stroke for bloom. Ring geometry is
-  // precomputed once (unit-sphere points per ring, Float32Array), projected
-  // per frame with a rotation about a tilted axis, and stroked once per
-  // shell per depth bucket (front/back), never per segment. All per-state
-  // look parameters live in `target` and are eased into `cur` (~400 ms).
+  // ---- orb renderer: particle orb -------------------------------------------
+  // A few thousand glow sprites on the surface of a sphere (Fibonacci
+  // distribution), rotated + jittered on the CPU into typed arrays every
+  // frame and drawn additively. All per-state look parameters (rotation,
+  // swirl, radius, brightness, squeeze, three colours) live in `target` and
+  // are eased into `cur` (~400 ms), so state changes never pop.
   const canvas = $('orb'), ctx = canvas.getContext('2d');
   // Icon mode renders a 512-logical / 1024-pixel canvas (CSS scales it to
-  // the viewport) so the proportions match the 170 px HUD.
+  // the viewport) so the sphere/sprite proportions match the 170 px HUD.
   const dpr = ICON_MODE ? 2 : Math.max(1, window.devicePixelRatio || 1);
   const reducedMq = (() => {
     try { return window.matchMedia('(prefers-reduced-motion: reduce)'); } catch (e) { return null; }
   })();
   const reducedMotion = () => !!(reducedMq && reducedMq.matches);
 
-  // particles = speck count (100..2000), intensity = glow multiplier (0.2..2),
-  // detail = rings-per-shell and lit-fraction multiplier (0.5..1.5)
-  const cfg = {particles: 400, intensity: ICON_MODE ? 1.4 : 1.0, detail: 1.0};
+  const cfg = {particles: 4000, intensity: ICON_MODE ? 1.4 : 1.0};   // icon: stronger glow at small sizes
   const FULL_SIZE = 170, MINI_SIZE = 64, ICON_SIZE = 512;
-  let SIZE = FULL_SIZE, CX = SIZE / 2, CY = SIZE / 2, R = 66, SCALE = 1, LW = 1;
+  let SIZE = FULL_SIZE, CX = SIZE / 2, CY = SIZE / 2, R = 66, SCALE = 1;
 
   function mulberry32(seed) {
     return function () {
@@ -314,226 +302,113 @@
   }
   const hex = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
   const grey = c => { const l = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]; return c.map(v => v * 0.2 + l * 0.8); };
-  const CORE = hex('#ffd27a'), MID = hex('#ff9a3c'), RIM = hex('#d8641e'), COOL = hex('#8fd3ff');
+  const GOLD1 = hex('#f0c36c'), GOLD2 = hex('#ffb454'), BLUE = hex('#7ad0ff');
 
-  // Parameter vector layout (Float32Array): see P_* indices. c1/c2/c3 are the
-  // inner/mid/outer shell colours (core / mid / rim of the palette).
-  const P_ROT = 0, P_BREATHE = 1, P_RADIUS = 2, P_BRIGHT = 3, P_SQUEEZE = 4, P_RING = 5,
-        P_LIT = 6, P_MARCH = 7, P_INNER = 8, P_C1 = 9, P_C2 = 12, P_C3 = 15, P_LEN = 18;
+  // Parameter vector layout (Float32Array): see P_* indices.
+  const P_ROT = 0, P_SWIRL = 1, P_BREATHE = 2, P_RADIUS = 3, P_BRIGHT = 4, P_SQUEEZE = 5,
+        P_C1 = 6, P_C2 = 9, P_C3 = 12, P_RING = 15, P_LEN = 16;
   function params(o) {
     const v = new Float32Array(P_LEN);
-    v[P_ROT] = o.rot; v[P_BREATHE] = o.breathe; v[P_RADIUS] = o.radius; v[P_BRIGHT] = o.bright;
-    v[P_SQUEEZE] = o.squeeze; v[P_RING] = o.ring || 0; v[P_LIT] = o.lit === undefined ? 0.55 : o.lit;
-    v[P_MARCH] = o.march || 0; v[P_INNER] = o.inner || 1;
+    v[P_ROT] = o.rot; v[P_SWIRL] = o.swirl; v[P_BREATHE] = o.breathe; v[P_RADIUS] = o.radius;
+    v[P_BRIGHT] = o.bright; v[P_SQUEEZE] = o.squeeze; v[P_RING] = o.ring || 0;
     for (let i = 0; i < 3; i++) { v[P_C1 + i] = o.c1[i]; v[P_C2 + i] = o.c2[i]; v[P_C3 + i] = o.c3[i]; }
     return v;
   }
   const STATES = {
-    idle:       params({rot:0.12, breathe:0.02, radius:1.0, bright:0.50, squeeze:1, c1:CORE, c2:MID, c3:RIM}),
-    warming:    params({rot:0.10, breathe:0,    radius:1.0, bright:0.40, squeeze:1,
-                        c1:grey(CORE), c2:grey(MID), c3:grey(RIM)}),
-    listening:  params({rot:0.22, breathe:0,    radius:1.0, bright:0.62, squeeze:1, c1:CORE, c2:MID, c3:RIM}),
-    followup:   params({rot:0.20, breathe:0,    radius:1.0, bright:0.58, squeeze:1, c1:CORE, c2:MID, c3:RIM}),
-    thinking:   params({rot:0.22, breathe:0,    radius:1.0, bright:0.70, squeeze:1, march:1, inner:3,
-                        c1:hex('#ffc46a'), c2:MID, c3:hex('#ff9a3c')}),
-    speaking:   params({rot:0.22, breathe:0,    radius:1.0, bright:0.70, squeeze:1, c1:CORE, c2:MID, c3:RIM}),
-    confirming: params({rot:0.20, breathe:0,    radius:0.8, bright:0.66, squeeze:0.35, ring:1,
-                        c1:hex('#ffd0a0'), c2:hex('#ff9a5c'), c3:hex('#ff8a3c')}),
-    error:      params({rot:0.05, breathe:0,    radius:1.0, bright:0.72, squeeze:1,
-                        c1:hex('#ffb0b0'), c2:hex('#ff6a6a'), c3:hex('#ff4a4a')}),
+    idle:       params({rot:0.15, swirl:0,   breathe:0.03, radius:1.0, bright:0.42, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    warming:    params({rot:0.10, swirl:0,   breathe:0,    radius:1.0, bright:0.36, squeeze:1,
+                        c1:grey(GOLD1), c2:grey(GOLD2), c3:grey(BLUE)}),
+    listening:  params({rot:0.25, swirl:0,   breathe:0,    radius:1.0, bright:0.66, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    followup:   params({rot:0.22, swirl:0,   breathe:0,    radius:1.0, bright:0.60, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    thinking:   params({rot:0.45, swirl:1.0, breathe:0,    radius:1.0, bright:0.72, squeeze:1,
+                        c1:GOLD1, c2:hex('#ff9a3c'), c3:BLUE}),
+    speaking:   params({rot:0.25, swirl:0,   breathe:0,    radius:1.0, bright:0.72, squeeze:1, c1:GOLD1, c2:GOLD2, c3:BLUE}),
+    confirming: params({rot:0.20, swirl:0,   breathe:0,    radius:0.8, bright:0.68, squeeze:0.35, ring:1,
+                        c1:hex('#ff9a5c'), c2:hex('#ff8a3c'), c3:hex('#ffc9a0')}),
+    error:      params({rot:0.05, swirl:0,   breathe:0,    radius:1.0, bright:0.72, squeeze:1,
+                        c1:hex('#ff6a6a'), c2:hex('#ff5a5a'), c3:hex('#ffb0b0')}),
   };
   const cur = new Float32Array(STATES.idle);
   let targetVec = STATES.idle;
 
-  // ---- geometry (rebuilt only when mode / detail / speck count changes) ----
-  const SHELL_R = [0.55, 0.78, 1.0];
-  const SHELL_SPEED = [-1.6, 1.25, 1.0];          // inner counter-rotates, faster
-  const RINGS_BASE = [6, 8, 10];                   // rings per shell at detail 1 (inner..outer)
-  const CORE_SPECKS = 200, MAX_CONNECTORS = 12;   // core: everything at r <= 0.35
-  let nShells = 3, litScale = 1;
-  // rings: flat point buffers + per-ring descriptors
-  let rings = [];        // {shell, off, n, thr:Float32Array(n), feat:Uint16Array, ftype:Uint8Array, dir}
-  let NP = 0, base, px, py, pz, scat, segCode;
-  let conns = [];        // {shell, ring, seg}
-  // core rings (fixed): two bold rings inside r <= 0.35
-  const coreRings = [];
-  let NC = 0, cbase, cpx, cpy, cpz;
-  // specks: volume (between shells) + core
-  let NS = 0, sbase, sw, sp, skind, ssz, spx, spy, spz, sbucket;
-  let NCS = 0, csbase, csw, csp, cspx, cspy;
-  const geomKey = {mode: '', detail: -1, specks: -1};
+  // ---- particle buffers (rebuilt only when the active count changes) ----
+  let N = 0;
+  let base, jw, jp, scat, kind, sz, px, py, pz, bucketIdx, bucketOf;
+  const NB = 6;                                  // depth/alpha buckets
+  const bucketCount = new Int32Array(NB), bucketStart = new Int32Array(NB + 1);
+  const bucketAlpha = new Float32Array(NB);
+  for (let b = 0; b < NB; b++) bucketAlpha[b] = 0.10 + 0.90 * Math.pow(b / (NB - 1), 1.6);
 
-  function ringBasis(rnd, out, axis) {
-    // unit normal -> two orthonormal tangents. With `axis`, the normal is
-    // kept near the plane perpendicular to it (a meridian family sharing
-    // poles, which is what makes a set of great circles read as a globe
-    // cage rather than a tangle); otherwise it's uniformly random.
-    let nx, ny, nz;
-    if (axis) {
-      const a = rnd() * Math.PI * 2, wob = (rnd() - 0.5) * 0.45;     // +-13 deg off the equatorial plane
-      // tangents of the axis
-      const [ax, ay, az] = axis;
-      let tx, ty, tz;
-      if (Math.abs(ay) < 0.9) { tx = az; ty = 0; tz = -ax; } else { tx = 0; ty = -az; tz = ay; }
-      const il = 1 / Math.sqrt(tx * tx + ty * ty + tz * tz); tx *= il; ty *= il; tz *= il;
-      const bx = ay * tz - az * ty, by = az * tx - ax * tz, bz = ax * ty - ay * tx;
-      const cw = Math.cos(wob), sw = Math.sin(wob);
-      nx = (tx * Math.cos(a) + bx * Math.sin(a)) * cw + ax * sw;
-      ny = (ty * Math.cos(a) + by * Math.sin(a)) * cw + ay * sw;
-      nz = (tz * Math.cos(a) + bz * Math.sin(a)) * cw + az * sw;
-    } else {
-      const z = rnd() * 2 - 1, a = rnd() * Math.PI * 2, r = Math.sqrt(1 - z * z);
-      nx = r * Math.cos(a); ny = r * Math.sin(a); nz = z;
-    }
-    // u = normalize(n x (0,1,0)) unless n ~ y, then n x (1,0,0)
-    let ux, uy, uz;
-    if (Math.abs(ny) < 0.9) { ux = nz; uy = 0; uz = -nx; } else { ux = 0; uy = -nz; uz = ny; }
-    const il = 1 / Math.sqrt(ux * ux + uy * uy + uz * uz); ux *= il; uy *= il; uz *= il;
-    const vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
-    out[0] = ux; out[1] = uy; out[2] = uz; out[3] = vx; out[4] = vy; out[5] = vz;
-  }
-
-  function buildGeometry() {
-    const mini = document.body.classList.contains('mini');
-    nShells = mini ? 1 : 3;
-    litScale = cfg.detail;
-    const rnd = mulberry32(31);
-    const B = new Float64Array(6);
-    rings = []; conns = [];
-    // pass 1: descriptors + point count
-    let off = 0;
-    for (let s = 0; s < 3; s++) {
-      // per-shell axis, tilted 25..45 deg off the view direction so the
-      // meridian family reads as nested ellipses sharing two poles
-      const tilt = 0.45 + rnd() * 0.35, aa = rnd() * Math.PI * 2;
-      const axis = [Math.sin(tilt) * Math.cos(aa), Math.sin(tilt) * Math.sin(aa), Math.cos(tilt)];
-      const nr = Math.max(3, Math.min(15, Math.round(RINGS_BASE[s] * cfg.detail)));
-      for (let j = 0; j < nr; j++) {
-        const n = 60 + Math.floor(rnd() * 81);
-        const d = {shell: s, off, n, thr: new Float32Array(n), feat: null, ftype: null, dir: (j & 1) ? 1 : -1,
-                   B: new Float64Array(6)};
-        ringBasis(rnd, B, j < Math.ceil(nr * 0.75) ? axis : null); d.B.set(B);
-        // segmented mask: runs of 4..14 lit (outer shell 6..18: its long arcs
-        // are what sells the globe), gaps of 3..10. thr < litFrac means lit;
-        // lit segments get thr in [0, .5), gap segments fill in from the run
-        // ends toward the gap middle as the lit fraction rises.
-        let i = 0, lit = rnd() < 0.5;
-        d.runScat = new Float32Array(n);
-        const runMin = s === 2 ? 6 : 4, runSpan = s === 2 ? 13 : 11;
-        while (i < n) {
-          const len = lit ? runMin + Math.floor(rnd() * runSpan) : 3 + Math.floor(rnd() * 8);
-          const end = Math.min(n, i + len);
-          const rs = 0.3 + rnd() * 0.7;                   // error shatter: whole runs fly, not points
-          for (let k = i; k < end; k++) {
-            d.runScat[k] = rs;
-            if (lit) d.thr[k] = rnd() * 0.5;
-            else {
-              const dist = Math.min(k - i, end - 1 - k) / Math.max(1, (end - i) / 2);   // 0 at edges, 1 mid
-              d.thr[k] = 0.55 + 0.42 * dist + rnd() * 0.03;
-            }
-          }
-          i = end; lit = !lit;
-        }
-        // trace features: ticks + chips at random segments (~1 per 9 segments)
-        const nf = Math.max(2, Math.round(n / 9));
-        d.feat = new Uint16Array(nf); d.ftype = new Uint8Array(nf); d.fsize = new Float32Array(nf);
-        for (let f = 0; f < nf; f++) {
-          d.feat[f] = Math.floor(rnd() * n);
-          d.ftype[f] = rnd() < 0.55 ? 0 : 1;                       // 0 tick, 1 chip
-          d.fsize[f] = d.ftype[f] === 0 ? 2 + rnd() * 2 : 3 + rnd() * 3;   // px at 170
-        }
-        rings.push(d);
-        off += n;
-      }
-    }
-    NP = off;
-    base = new Float32Array(NP * 3); px = new Float32Array(NP); py = new Float32Array(NP); pz = new Float32Array(NP);
-    scat = new Float32Array(NP); segCode = new Uint8Array(NP);
-    for (const d of rings) {
-      const [ux, uy, uz, vx, vy, vz] = d.B;
-      for (let i = 0; i < d.n; i++) {
-        const th = i / d.n * Math.PI * 2, c = Math.cos(th), s = Math.sin(th), k = 3 * (d.off + i);
-        base[k] = ux * c + vx * s; base[k + 1] = uy * c + vy * s; base[k + 2] = uz * c + vz * s;
-        scat[d.off + i] = d.runScat[i];
-      }
-    }
-    // radial connectors from shell s to s+1 (max 12 on screen)
-    const nConn = mini ? 0 : MAX_CONNECTORS;
-    for (let c = 0; c < nConn; c++) {
-      const shell = c % 2, cand = rings.filter(r => r.shell === shell);
-      const rg = cand[Math.floor(rnd() * cand.length)];
-      conns.push({ring: rg, seg: Math.floor(rnd() * rg.n)});
-    }
-    // core rings: two bold rings at r = 0.30 / 0.23
-    coreRings.length = 0;
-    const CN = 72;
-    NC = CN * 2; cbase = new Float32Array(NC * 3); cpx = new Float32Array(NC); cpy = new Float32Array(NC); cpz = new Float32Array(NC);
-    for (let r = 0; r < 2; r++) {
-      ringBasis(rnd, B);
-      const rad = r === 0 ? 0.27 : 0.20;
-      coreRings.push({off: r * CN, n: CN, rad});
-      for (let i = 0; i < CN; i++) {
-        const th = i / CN * Math.PI * 2, c = Math.cos(th), s = Math.sin(th), k = 3 * (r * CN + i);
-        cbase[k] = (B[0] * c + B[3] * s) * rad; cbase[k + 1] = (B[1] * c + B[4] * s) * rad; cbase[k + 2] = (B[2] * c + B[5] * s) * rad;
-      }
-    }
-    // volume specks: between the shells, never on them
-    const srnd = mulberry32(99);
-    NS = activeCount();
-    sbase = new Float32Array(NS * 3); sw = new Float32Array(NS); sp = new Float32Array(NS);
-    skind = new Uint8Array(NS); ssz = new Float32Array(NS);
-    spx = new Float32Array(NS); spy = new Float32Array(NS); spz = new Float32Array(NS); sbucket = new Uint8Array(NS);
-    const bands = mini ? [[0.40, 0.95]] : [[0.38, 0.52], [0.58, 0.75], [0.81, 0.97]];
-    for (let i = 0; i < NS; i++) {
-      const band = bands[Math.floor(srnd() * bands.length)];
-      const rr = band[0] + srnd() * (band[1] - band[0]);
-      const z = srnd() * 2 - 1, a = srnd() * Math.PI * 2, q = Math.sqrt(1 - z * z);
-      sbase[3 * i] = q * Math.cos(a) * rr; sbase[3 * i + 1] = q * Math.sin(a) * rr; sbase[3 * i + 2] = z * rr;
-      sw[i] = 0.8 + srnd() * 2.2; sp[i] = srnd() * Math.PI * 2;
-      skind[i] = srnd() < 0.06 ? 1 : 0;
-      ssz[i] = 0.9 + srnd() * 0.5;
-    }
-    // core specks: inside r < 0.33, drifting
-    NCS = mini ? 40 : CORE_SPECKS;
-    csbase = new Float32Array(NCS * 3); csw = new Float32Array(NCS); csp = new Float32Array(NCS);
-    cspx = new Float32Array(NCS); cspy = new Float32Array(NCS);
-    for (let i = 0; i < NCS; i++) {
-      const rr = 0.33 * Math.cbrt(srnd());
-      const z = srnd() * 2 - 1, a = srnd() * Math.PI * 2, q = Math.sqrt(1 - z * z);
-      csbase[3 * i] = q * Math.cos(a) * rr; csbase[3 * i + 1] = q * Math.sin(a) * rr; csbase[3 * i + 2] = z * rr;
-      csw[i] = 0.5 + srnd() * 1.5; csp[i] = srnd() * Math.PI * 2;
-    }
-    geomKey.mode = mini ? 'mini' : 'full'; geomKey.detail = cfg.detail; geomKey.specks = NS;
-  }
   function activeCount() {
     const mini = document.body.classList.contains('mini');
-    return Math.max(1, mini ? Math.round(cfg.particles * 0.15) : cfg.particles);
+    return Math.max(1, mini ? Math.round(cfg.particles / 4) : cfg.particles);
   }
-  function ensureGeometry() {
-    const mini = document.body.classList.contains('mini');
-    if (geomKey.mode !== (mini ? 'mini' : 'full') || geomKey.detail !== cfg.detail || geomKey.specks !== activeCount()) buildGeometry();
+  function buildParticles(n) {
+    N = n;
+    base = new Float32Array(n * 3); jw = new Float32Array(n); jp = new Float32Array(n); scat = new Float32Array(n);
+    kind = new Uint8Array(n); sz = new Uint8Array(n);
+    px = new Float32Array(n); py = new Float32Array(n); pz = new Float32Array(n);
+    bucketIdx = new Uint16Array(n); bucketOf = new Uint8Array(n);
+    const rnd = mulberry32(42);
+    const GA = Math.PI * (3 - Math.sqrt(5));
+    // Fibonacci spacing keeps the surface evenly covered; a random nudge of
+    // about one spacing per point hides the lattice (otherwise the spiral
+    // reads as a moiré grid when it rotates).
+    const nudge = Math.sqrt(4 * Math.PI / n) * 0.8;
+    for (let i = 0; i < n; i++) {
+      const y0 = 1 - (i + 0.5) * 2 / n, r0 = Math.sqrt(Math.max(0, 1 - y0 * y0)), th = GA * i;
+      let x = Math.cos(th) * r0 + (rnd() - 0.5) * nudge, y = y0 + (rnd() - 0.5) * nudge, z = Math.sin(th) * r0 + (rnd() - 0.5) * nudge;
+      const inv = 1 / Math.sqrt(x * x + y * y + z * z);
+      base[3 * i] = x * inv; base[3 * i + 1] = y * inv; base[3 * i + 2] = z * inv;
+      jw[i] = 0.5 + rnd() * 1.3; jp[i] = rnd() * Math.PI * 2; scat[i] = 0.25 + rnd() * 0.75;
+      const k = rnd(); kind[i] = k < 0.08 ? 2 : (k < 0.5 ? 0 : 1);
+      const s = rnd(); sz[i] = s < 0.62 ? 0 : (s < 0.92 ? 1 : 2);
+      if (kind[i] === 2 && sz[i] > 1) sz[i] = 1;   // accents stay small
+    }
+  }
+  function ensureParticles() {
+    const n = activeCount();
+    if (n !== N) buildParticles(n);
   }
 
-  // ---- core glow disc: pre-rendered radial gradient (alpha .35 -> 0) ----
-  let coreGlow = null, glowKey = -1;
-  function buildGlow(force) {
-    const q = Math.round(cur[P_C1] / 6) * 1000 + Math.round(cur[P_C2 + 1] / 6);
-    if (!force && q === glowKey) return;
-    glowKey = q;
-    const rad = R * 0.42, devR = Math.max(2, Math.ceil(rad * dpr)), s = devR * 2 + 2;
+  // ---- sprites: pre-rendered radial glows, 3 kinds x 3 sizes ----
+  const sprites = [[], [], []];
+  let glowSprite = null;
+  const spriteKey = new Int16Array(9).fill(-1);
+  let spriteScale = 1;
+  function makeSprite(rgb, radius, coreMix, edgeAlpha) {
+    const devR = Math.max(1, Math.ceil(radius * dpr));
+    const s = devR * 2 + 2;
     const c = document.createElement('canvas'); c.width = c.height = s;
     const g = c.getContext('2d');
-    const c1 = [cur[P_C1] | 0, cur[P_C1 + 1] | 0, cur[P_C1 + 2] | 0], c2 = [cur[P_C2] | 0, cur[P_C2 + 1] | 0, cur[P_C2 + 2] | 0];
+    const core = rgb.map(v => Math.round(v + (255 - v) * coreMix));
+    const mid = rgb.map(Math.round);
     const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, devR);
-    grad.addColorStop(0, `rgba(255,${Math.min(255, c1[1] + 40)},${Math.min(255, c1[2] + 80)},0.35)`);
-    grad.addColorStop(0.25, `rgba(${c1[0]},${c1[1]},${c1[2]},0.28)`);
-    grad.addColorStop(0.6, `rgba(${c2[0]},${c2[1]},${c2[2]},0.10)`);
-    grad.addColorStop(1, `rgba(${c2[0]},${c2[1]},${c2[2]},0)`);
+    grad.addColorStop(0, `rgba(${core[0]},${core[1]},${core[2]},1)`);
+    grad.addColorStop(0.3, `rgba(${mid[0]},${mid[1]},${mid[2]},${edgeAlpha})`);
+    grad.addColorStop(0.6, `rgba(${mid[0]},${mid[1]},${mid[2]},${edgeAlpha * 0.26})`);
+    grad.addColorStop(1, `rgba(${mid[0]},${mid[1]},${mid[2]},0)`);
     g.fillStyle = grad; g.fillRect(0, 0, s, s);
-    coreGlow = {c, w: s / dpr};
+    return {c, w: s / dpr, h: s / (2 * dpr)};
+  }
+  function buildSprites(force) {
+    let changed = force;
+    for (let i = 0; i < 9; i++) {
+      const q = Math.round(cur[P_C1 + i] / 6);       // quantised: rebuild only on visible change
+      if (q !== spriteKey[i]) { spriteKey[i] = q; changed = true; }
+    }
+    if (!changed) return;
+    const radii = [0.95, 1.4, 2.0];
+    for (let k = 0; k < 3; k++) {
+      const rgb = [cur[P_C1 + 3 * k], cur[P_C1 + 3 * k + 1], cur[P_C1 + 3 * k + 2]];
+      for (let s = 0; s < 3; s++) sprites[k][s] = makeSprite(rgb, radii[s] * spriteScale, 0.42, 0.9);
+    }
+    // body glow: the sphere's soft interior, drawn once behind the particles
+    const c2 = [cur[P_C2], cur[P_C2 + 1], cur[P_C2 + 2]];
+    glowSprite = makeSprite(c2, R * 0.95, 0.15, 0.32);
   }
 
-  // ---- HUD frame: faint circle + 48 ticks (static path) and two slow arcs ----
+  // ---- HUD ring: faint circle + ticks (static path) and a slow arc ----
   let ringPath = null;
   function buildRing() {
     ringPath = new Path2D();
@@ -547,16 +422,18 @@
     }
   }
 
-  // Logical canvas size follows the mode (170 full / 64 mini / 512 icon).
+  // Logical canvas size follows the mode (170 full / 64 mini; icon mode keeps
+  // 170 and lets CSS + a high devicePixelRatio scale it up), so sprites stay
+  // 1-2 px on screen in every mode instead of being downsampled.
   function applyMode() {
     const mini = document.body.classList.contains('mini');
     SIZE = ICON_MODE ? ICON_SIZE : (mini ? MINI_SIZE : FULL_SIZE);
     CX = CY = SIZE / 2; R = SIZE * (66 / 170); SCALE = SIZE / FULL_SIZE;
-    LW = Math.max(0.55, SCALE) * (ICON_MODE ? 1.15 : 1);    // line-width scale; icon: thicker traces
+    spriteScale = Math.max(0.55, SCALE) * (ICON_MODE ? 1.2 : 1);
     canvas.width = Math.round(SIZE * dpr); canvas.height = Math.round(SIZE * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ensureGeometry();
-    buildGlow(true);
+    ensureParticles();
+    buildSprites(true);
     buildRing();
   }
 
@@ -564,12 +441,10 @@
   const ripples = [{born: -1}, {born: -1}, {born: -1}, {born: -1}];
   const RIPPLE_MS = 900;
   let lastRipple = 0, prevMic = 0;
-  const N_SPOKES = 24;
+  const N_SPOKES = 36;
   const spokeHist = new Float32Array(N_SPOKES);
   let spokeHead = 0, lastSpoke = 0, vSmooth = 0;
-  let lastState = 'idle', errorAt = -1, animT = 0, ringA = 0, lastDraw = -1e9, marchPhase = 0;
-  const shellA = new Float32Array(3);
-  let coreA = 0;
+  let lastState = 'idle', errorAt = -1, animT = 0, rotA = 0, ringA = 0, lastDraw = -1e9;
 
   let t0 = performance.now(), rafId = 0;
   let rafActive = !(typeof document !== 'undefined' && document.visibilityState === 'hidden');
@@ -590,11 +465,8 @@
 
   function voiceLevel(now) {
     const v = model.voice; if (!v || !v.levels || !v.levels.length) return 0;
-    // rAF timestamps can predate the push's performance.now(): clamp at 0,
-    // and never let a bad level (undefined/NaN) poison the eased parameters.
-    const idx = Math.max(0, Math.floor((now - model.voiceStart) / (v.step_ms || 50)));
-    const lv = idx < v.levels.length ? +v.levels[idx] : 0;
-    return isFinite(lv) ? Math.max(0, Math.min(1, lv)) : 0;
+    const idx = Math.floor((now - model.voiceStart) / (v.step_ms || 50));
+    return idx < v.levels.length ? v.levels[idx] : 0;
   }
 
   // Bench/diagnostics hook (scripts/orb_bench.py): per-frame draw time.
@@ -602,19 +474,10 @@
   window.__hud = stats;
 
   function css(r, g, b, a) { return `rgba(${r | 0},${g | 0},${b | 0},${a})`; }
-  const tiltC = Math.cos(0.38), tiltS = Math.sin(0.38);
-
-  // Stroke the current path twice: a wide faint pass (fake bloom) + the line.
-  // A real ctx.filter blur was benched in WKWebView and is far over budget
-  // (tens of ms per frame), so bloom is faked with width x3 at low alpha.
-  function bloomStroke(width, alpha) {
-    ctx.lineWidth = width * 3; ctx.globalAlpha = Math.min(1, alpha * 0.14); ctx.stroke();
-    ctx.lineWidth = width; ctx.globalAlpha = Math.min(1, alpha); ctx.stroke();
-  }
 
   function frame(now) {
     rafId = 0;
-    // idle: 30 fps is plenty for a slow drift; everything else runs at 60.
+    // idle: 30 fps is plenty for a slow breathe; everything else runs at 60.
     if (model.state === 'idle' && now - lastDraw < 30) {
       if (rafActive) rafId = requestAnimationFrame(frame);
       return;
@@ -632,7 +495,7 @@
     // ease every parameter toward its target: ~95% of the way in 400 ms
     const k = 1 - Math.exp(-dt / 0.13);
     for (let i = 0; i < P_LEN; i++) cur[i] += (targetVec[i] - cur[i]) * k;
-    buildGlow(false);
+    buildSprites(false);
 
     micSmooth += (model.mic - micSmooth) * 0.25;
     statusLevelEl.style.width = (Math.max(0, Math.min(1, micSmooth)) * 100) + '%';
@@ -640,21 +503,15 @@
     const vRaw = state === 'speaking' ? voiceLevel(now) : 0;
     vSmooth += (vRaw - vSmooth) * 0.45;
 
-    if (!reduced) {
-      animT += dt; ringA += 0.25 * dt;
-      for (let s = 0; s < 3; s++) shellA[s] += cur[P_ROT] * SHELL_SPEED[s] * (s === 0 ? cur[P_INNER] : 1) * dt;
-      coreA += cur[P_ROT] * 2.2 * cur[P_INNER] * dt;
-      marchPhase += 1.5 * cur[P_MARCH] * dt;
-    }
+    if (!reduced) { animT += dt; rotA += cur[P_ROT] * dt; ringA += 0.25 * dt; }
 
-    // per-state modulation of radius / brightness / lit fraction
+    // per-state modulation of radius / brightness
     let radius = cur[P_RADIUS] * (1 + cur[P_BREATHE] * Math.sin(animT * Math.PI / 2));   // ~4 s breathe
     let bright = cur[P_BRIGHT];
-    let lit = cur[P_LIT], litOuter = cur[P_LIT];
-    if (listening) { radius *= 1 + 0.10 * micSmooth; bright += 0.35 * micSmooth; litOuter += 0.30 * micSmooth; }
-    if (state === 'speaking') { radius *= 1 + 0.10 * vSmooth; bright += 0.30 * vSmooth; lit += 0.25 * vSmooth; litOuter = lit; }
+    if (listening) { radius *= 1 + 0.12 * micSmooth; bright += 0.4 * micSmooth; }
+    if (state === 'speaking') { radius *= 1 + 0.12 * vSmooth; bright += 0.35 * vSmooth; }
     if (state === 'confirming') bright *= 0.75 + 0.25 * Math.sin(now / 1000 * Math.PI * 2);
-    // error: shatter outward for ~250 ms, return by ~800 ms
+    // error: burst outward for ~250 ms, reassemble by ~800 ms
     let scatter = 0, flash = 0;
     if (state === 'error' && errorAt >= 0) {
       const te = (now - errorAt) / 1000;
@@ -662,94 +519,66 @@
       flash = Math.max(0, 1 - te / 0.3);
     }
     bright *= cfg.intensity;
-    lit = Math.min(0.97, lit * litScale); litOuter = Math.min(0.97, litOuter * litScale);
+    const swirl = reduced ? 0 : cur[P_SWIRL];
     const squeeze = cur[P_SQUEEZE], ring = cur[P_RING];
+    const tiltC = Math.cos(0.38), tiltS = Math.sin(0.38);
     const RR = R * radius;
-    const march = Math.floor(marchPhase);
 
-    // ---- project ring points (hot loop; no allocations) ----
-    for (let s = 0; s < 3; s++) {
-      const cosR = Math.cos(shellA[s]), sinR = Math.sin(shellA[s]), sr = RR * SHELL_R[s];
-      for (const d of rings) {
-        if (d.shell !== s) continue;
-        const end = d.off + d.n;
-        for (let i = d.off; i < end; i++) {
-          const bx = base[3 * i], by = base[3 * i + 1], bz = base[3 * i + 2];
-          let x = bx * cosR + bz * sinR, z = -bx * sinR + bz * cosR, y = by * squeeze;
-          if (ring > 0.001) {
-            const rr = Math.sqrt(x * x + z * z) + 1e-4, want = 0.84 + 0.16 * rr;
-            const g = 1 + ring * (want / rr - 1); x *= g; z *= g;
-          }
-          const r = 1 + scatter * scat[i] * 0.4;
-          const ty = y * tiltC - z * tiltS, tz = y * tiltS + z * tiltC;
-          px[i] = CX + x * sr * r; py[i] = CY + ty * sr * r; pz[i] = tz;
-        }
+    // ---- project particles (hot loop; no allocations) ----
+    for (let b = 0; b < NB; b++) bucketCount[b] = 0;
+    const cosR = Math.cos(rotA), sinR = Math.sin(rotA);
+    for (let i = 0; i < N; i++) {
+      const bx = base[3 * i], by = base[3 * i + 1], bz = base[3 * i + 2];
+      const ph = animT * jw[i] + jp[i];
+      const sJ = Math.sin(ph);
+      let r = 1 + 0.02 * sJ + scatter * scat[i] * 0.55;
+      let x, z;
+      if (swirl !== 0) {
+        // vortex: differential rotation about Y by latitude + a travelling
+        // wave, i.e. a cheap curl-ish flow along the surface
+        const a = rotA + swirl * (0.9 * Math.sin(3 * by + animT * 1.3) + 0.45 * Math.sin(2.5 * bx + animT * 0.8));
+        const c = Math.cos(a), s = Math.sin(a);
+        x = bx * c + bz * s; z = -bx * s + bz * c;
+      } else {
+        x = bx * cosR + bz * sinR; z = -bx * sinR + bz * cosR;
       }
+      let y = by * squeeze + 0.012 * Math.cos(ph * 0.7);   // drifting noise
+      if (ring > 0.001) {
+        // confirming: pull points out toward the equator's rim so the
+        // squeezed sphere reads as a torus/ring rather than a flat blob
+        const rr = Math.sqrt(x * x + z * z) + 1e-4;
+        const want = 0.84 + 0.16 * rr;
+        const g = 1 + ring * (want / rr - 1);
+        x *= g; z *= g;
+      }
+      // tilt the spin axis toward the viewer a little
+      const ty = y * tiltC - z * tiltS, tz = y * tiltS + z * tiltC;
+      px[i] = CX + x * RR * r; py[i] = CY + ty * RR * r; pz[i] = tz;
+      const u = (tz + 1) * 0.5;
+      const b = (u * (NB - 1) + 0.5) | 0;
+      bucketOf[i] = b; bucketCount[b]++;
     }
-    // per-segment code: 0 off, 1 back, 2 front (segment i runs point i -> i+1)
-    for (const d of rings) {
-      const lf = d.shell === nShells - 1 || d.shell === 2 ? litOuter : lit;
-      const off = d.off, n = d.n, thr = d.thr, sh = march * d.dir;
-      for (let i = 0; i < n; i++) {
-        let j = (i + sh) % n; if (j < 0) j += n;
-        segCode[off + i] = thr[j] < lf ? (pz[off + i] > 0 ? 2 : 1) : 0;
-      }
-    }
-    // core rings
-    {
-      const c = Math.cos(coreA), s = Math.sin(coreA);
-      for (let i = 0; i < NC; i++) {
-        const bx = cbase[3 * i], by = cbase[3 * i + 1], bz = cbase[3 * i + 2];
-        const x = bx * c + bz * s, z = -bx * s + bz * c;
-        const ty = by * tiltC - z * tiltS, tz = by * tiltS + z * tiltC;
-        cpx[i] = CX + x * RR; cpy[i] = CY + ty * RR; cpz[i] = tz;
-      }
-    }
-    // specks: rotate with the outer shell, twinkle (alpha noise) on animT
-    {
-      const c = Math.cos(shellA[2] * 0.7), s = Math.sin(shellA[2] * 0.7);
-      for (let i = 0; i < NS; i++) {
-        const bx = sbase[3 * i], by = sbase[3 * i + 1], bz = sbase[3 * i + 2];
-        let x = bx * c + bz * s, z = -bx * s + bz * c, y = by * squeeze;
-        if (ring > 0.001) {
-          const rr = Math.sqrt(x * x + z * z) + 1e-4, want = 0.84 + 0.16 * rr;
-          const g = 1 + ring * (want / rr - 1); x *= g; z *= g;
-        }
-        const r = 1 + scatter * (0.4 + 0.6 * sw[i] / 3) * 0.6;
-        const ty = y * tiltC - z * tiltS, tz = y * tiltS + z * tiltC;
-        spx[i] = CX + x * RR * r; spy[i] = CY + ty * RR * r; spz[i] = tz;
-        const tw = 0.5 + 0.5 * Math.sin(animT * sw[i] + sp[i]);      // 0..1 twinkle
-        // bucket: kind*4 + depth*2 + twinkle-level(0/1); dim twinkle skipped
-        sbucket[i] = tw < 0.25 ? 255 : skind[i] * 4 + (tz > 0 ? 2 : 0) + (tw > 0.7 ? 1 : 0);
-      }
-      const cc = Math.cos(-coreA * 0.6), cs = Math.sin(-coreA * 0.6);
-      for (let i = 0; i < NCS; i++) {
-        const bx = csbase[3 * i] + 0.02 * Math.sin(animT * csw[i] + csp[i]), by = csbase[3 * i + 1] + 0.02 * Math.cos(animT * csw[i] * 0.8 + csp[i]), bz = csbase[3 * i + 2];
-        const x = bx * cc + bz * cs, z = -bx * cs + bz * cc;
-        const ty = by * tiltC - z * tiltS;
-        cspx[i] = CX + x * RR; cspy[i] = CY + ty * RR;
-      }
-    }
+    bucketStart[0] = 0;
+    for (let b = 0; b < NB; b++) { bucketStart[b + 1] = bucketStart[b] + bucketCount[b]; bucketCount[b] = bucketStart[b]; }
+    for (let i = 0; i < N; i++) bucketIdx[bucketCount[bucketOf[i]]++] = i;
 
     // ---- draw ----
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, SIZE, SIZE);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'butt';
 
-    const c1 = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1);
-    const c2 = css(cur[P_C2], cur[P_C2 + 1], cur[P_C2 + 2], 1);
-    const c3 = css(cur[P_C3], cur[P_C3 + 1], cur[P_C3 + 2], 1);
-    const shellCol = [c1, c2, c3];
-    const B = Math.min(1, bright * 1.8);              // idle 0.5 -> 0.9
-    const A_FRONT = 0.9 * B, A_BACK = 0.3 * B;
-    const W_FRONT = 1.4 * LW, W_BACK = 0.85 * LW;
+    // body glow behind everything
+    if (glowSprite) {
+      ctx.globalAlpha = Math.min(1, bright * 0.7);
+      const gw = glowSprite.w * radius;
+      ctx.drawImage(glowSprite.c, CX - gw / 2, CY - gw / 2, gw, gw);
+    }
 
-    // HUD frame: thin, ticked, with two slow arcs; deliberately faint
+    // HUD ring: thin, ticked, with a slow arc; deliberately faint
     if (ringPath) {
+      const c1r = cur[P_C1], c1g = cur[P_C1 + 1], c1b = cur[P_C1 + 2];
       ctx.lineWidth = Math.max(0.5, 0.6 * SCALE);
-      ctx.strokeStyle = c2;
+      ctx.strokeStyle = css(c1r, c1g, c1b, 1);
       ctx.globalAlpha = 0.11 * Math.min(1.4, cfg.intensity);
       ctx.stroke(ringPath);
       ctx.globalAlpha = 0.22 * Math.min(1.4, cfg.intensity);
@@ -758,114 +587,19 @@
       ctx.beginPath(); ctx.arc(CX, CY, R * 1.16, ringA + Math.PI, ringA + Math.PI + 0.35); ctx.stroke();
     }
 
-    // core glow disc (behind everything); the core fades with the torus morph
-    const coreB = B * (1 - 0.85 * ring);
-    if (coreGlow) {
-      ctx.globalAlpha = Math.min(1, coreB * 1.1);
-      const gw = coreGlow.w * radius;
-      ctx.drawImage(coreGlow.c, CX - gw / 2, CY - gw / 2, gw, gw);
-    }
-
-    // shells: back bucket then front bucket; each = one path per shell,
-    // stroked twice (bloom + line). Ticks / chips ride along per bucket.
-    const shellFirst = nShells === 1 ? 2 : 0;
-    for (let bucket = 1; bucket <= 2; bucket++) {
-      const alpha0 = bucket === 2 ? A_FRONT : A_BACK, width = bucket === 2 ? W_FRONT : W_BACK;
-      for (let s = shellFirst; s < 3; s++) {
-        const alpha = s === 0 ? alpha0 * 0.7 : alpha0;    // inner shell: its rings stack additively
-        ctx.strokeStyle = shellCol[s]; ctx.fillStyle = shellCol[s];
-        ctx.beginPath();
-        let any = false;
-        for (const d of rings) {
-          if (d.shell !== s) continue;
-          const off = d.off, n = d.n;
-          let cont = false;
-          for (let i = 0; i < n; i++) {
-            if (segCode[off + i] !== bucket) { cont = false; continue; }
-            const a = off + i, b = off + ((i + 1) % n);
-            if (!cont) { ctx.moveTo(px[a], py[a]); cont = true; }
-            ctx.lineTo(px[b], py[b]); any = true;
-          }
-        }
-        if (any) bloomStroke(width, alpha);
-        // traces: tick marks (radial) + chip blocks (tangent boxes) on lit segments
-        ctx.beginPath();
-        let anyTick = false, anyChip = false;
-        for (const d of rings) {
-          if (d.shell !== s) continue;
-          for (let f = 0; f < d.feat.length; f++) {
-            const i = d.feat[f]; if (segCode[d.off + i] !== bucket) continue;
-            const a = d.off + i, b = d.off + ((i + 1) % d.n);
-            const x = px[a], y = py[a];
-            if (d.ftype[f] === 0) {
-              // tick: short radial line outward from the orb centre
-              let dx = x - CX, dy = y - CY; const l = Math.sqrt(dx * dx + dy * dy) || 1; dx /= l; dy /= l;
-              const len = d.fsize[f] * SCALE;
-              ctx.moveTo(x, y); ctx.lineTo(x + dx * len, y + dy * len); anyTick = true;
-            }
-          }
-        }
-        if (anyTick) { ctx.lineWidth = Math.max(0.6, 0.9 * LW); ctx.globalAlpha = alpha * 0.85; ctx.stroke(); }
-        ctx.beginPath();
-        for (const d of rings) {
-          if (d.shell !== s) continue;
-          for (let f = 0; f < d.feat.length; f++) {
-            const i = d.feat[f]; if (d.ftype[f] !== 1 || segCode[d.off + i] !== bucket) continue;
-            const a = d.off + i, b = d.off + ((i + 1) % d.n);
-            let tx = px[b] - px[a], ty = py[b] - py[a]; const l = Math.sqrt(tx * tx + ty * ty) || 1; tx /= l; ty /= l;
-            const w = d.fsize[f] * SCALE, h = w * 0.5, nx = -ty * h / 2, ny = tx * h / 2;
-            const x = px[a], y = py[a];
-            ctx.moveTo(x + nx, y + ny); ctx.lineTo(x + tx * w + nx, y + ty * w + ny);
-            ctx.lineTo(x + tx * w - nx, y + ty * w - ny); ctx.lineTo(x - nx, y - ny); ctx.closePath();
-            anyChip = true;
-          }
-        }
-        if (anyChip) { ctx.globalAlpha = alpha * 0.6; ctx.fill(); }
-      }
-      // radial connectors from a lit segment on shell s to the same direction on shell s+1
-      if (conns.length) {
-        ctx.beginPath();
-        let anyC = false;
-        for (const cn of conns) {
-          const d = cn.ring, i = d.off + cn.seg;
-          if (segCode[i] !== bucket) continue;
-          const ratio = SHELL_R[d.shell + 1] / SHELL_R[d.shell];
-          ctx.moveTo(px[i], py[i]); ctx.lineTo(CX + (px[i] - CX) * ratio, CY + (py[i] - CY) * ratio); anyC = true;
-        }
-        if (anyC) { ctx.strokeStyle = c2; ctx.lineWidth = Math.max(0.5, 0.7 * LW); ctx.globalAlpha = alpha0 * 0.55; ctx.stroke(); }
-      }
-      // specks in this depth bucket: 2 twinkle levels x 2 kinds, one fill each
-      for (let kind = 0; kind < 2; kind++) {
-        ctx.fillStyle = kind ? css(COOL[0], COOL[1], COOL[2], 1) : c1;
-        for (let lv = 0; lv < 2; lv++) {
-          const want = kind * 4 + (bucket === 2 ? 2 : 0) + lv;
-          ctx.beginPath();
-          let anyS = false;
-          for (let i = 0; i < NS; i++) {
-            if (sbucket[i] !== want) continue;
-            const sz = ssz[i] * Math.max(0.6, SCALE) * (bucket === 2 ? 1 : 0.8);
-            ctx.rect(spx[i] - sz / 2, spy[i] - sz / 2, sz, sz); anyS = true;
-          }
-          if (anyS) { ctx.globalAlpha = Math.min(1, (bucket === 2 ? 0.95 : 0.4) * B * (lv ? 1 : 0.55) * (state === 'speaking' ? 0.7 + 0.6 * vSmooth : 1)); ctx.fill(); }
-        }
-      }
-      // core (between back and front so front rings pass over it)
-      if (bucket === 1) {
-        ctx.strokeStyle = c1;
-        ctx.beginPath();
-        for (const cr of coreRings) {
-          for (let i = 0; i < cr.n; i++) {
-            const a = cr.off + i, b = cr.off + ((i + 1) % cr.n);
-            if (i === 0) ctx.moveTo(cpx[a], cpy[a]);
-            ctx.lineTo(cpx[b], cpy[b]);
-          }
-        }
-        bloomStroke(2.2 * LW, Math.min(1, coreB * 0.85));
-        ctx.fillStyle = c1;
-        ctx.beginPath();
-        const csz = Math.max(0.7, 1.0 * SCALE);
-        for (let i = 0; i < NCS; i++) ctx.rect(cspx[i] - csz / 2, cspy[i] - csz / 2, csz, csz);
-        ctx.globalAlpha = Math.min(1, 0.75 * coreB); ctx.fill();
+    // particles, additive, back (dim) to front (bright)
+    ctx.globalCompositeOperation = 'lighter';
+    for (let b = 0; b < NB; b++) {
+      const a = Math.min(1, bright * bucketAlpha[b]);
+      if (a < 0.045) continue;   // far side at idle: invisible, not worth 10% of the draw calls
+      ctx.globalAlpha = a;
+      const end = bucketStart[b + 1];
+      const back = b < NB / 2 ? 1 : 0;
+      for (let j = bucketStart[b]; j < end; j++) {
+        const i = bucketIdx[j];
+        let s = sz[i] - back; if (s < 0) s = 0;
+        const sp = sprites[kind[i]][s];
+        ctx.drawImage(sp.c, px[i] - sp.h, py[i] - sp.h, sp.w, sp.w);
       }
     }
 
@@ -883,30 +617,29 @@
       const f = (now - rp.born) / RIPPLE_MS;
       if (f >= 1 || reduced) { rp.born = -1; continue; }
       ctx.globalAlpha = 0.4 * (1 - f) * (1 - f) * Math.min(1.5, cfg.intensity);
-      ctx.strokeStyle = css(COOL[0], COOL[1], COOL[2], 1);
+      ctx.strokeStyle = css(cur[P_C3], cur[P_C3 + 1], cur[P_C3 + 2], 1);
       ctx.beginPath(); ctx.arc(CX, CY, Math.min(SIZE / 2 - 1, RR * (1.02 + 0.22 * f)), 0, Math.PI * 2); ctx.stroke();
     }
 
     // speaking: radial spokes whose lengths trace the recent level history
     if (state === 'speaking') {
       if (now - lastSpoke > 45) { spokeHist[spokeHead] = vSmooth; spokeHead = (spokeHead + 1) % N_SPOKES; lastSpoke = now; }
-      if (vSmooth > 0.05) {
-        // one path + one stroke for all spokes (a stroke per spoke is ~2 ms in WebKit)
-        ctx.strokeStyle = c1;
-        ctx.lineWidth = Math.max(0.5, 0.6 * SCALE);
-        const r0 = RR * 1.05;
-        ctx.globalAlpha = Math.min(1, (0.2 + 0.3 * vSmooth) * cfg.intensity);
-        ctx.beginPath();
-        for (let s = 0; s < N_SPOKES; s++) {
-          const lvl = spokeHist[(spokeHead + s) % N_SPOKES];
-          if (lvl < 0.02) continue;
-          const a = ringA * 0.5 + (s / N_SPOKES) * Math.PI * 2;
-          const len = (1.5 + 9 * lvl) * (0.8 + 0.2 * Math.sin(now / 70 + s * 1.7)) * SCALE;
-          ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0);
-          ctx.lineTo(CX + Math.cos(a) * (r0 + len), CY + Math.sin(a) * (r0 + len));
-        }
-        ctx.stroke();
+      // one path + one stroke for all spokes (a stroke per spoke is ~2 ms in
+      // WebKit); flicker is expressed as per-spoke length instead of alpha
+      ctx.strokeStyle = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1);
+      ctx.lineWidth = Math.max(0.5, 0.7 * SCALE);
+      const r0 = RR * 1.05;
+      ctx.globalAlpha = Math.min(1, (0.22 + 0.3 * vSmooth) * cfg.intensity);
+      ctx.beginPath();
+      for (let s = 0; s < N_SPOKES; s++) {
+        const lvl = spokeHist[(spokeHead + s) % N_SPOKES];
+        if (lvl < 0.02) continue;
+        const a = ringA * 0.5 + (s / N_SPOKES) * Math.PI * 2;
+        const len = (1.5 + 9 * lvl) * (0.8 + 0.2 * Math.sin(now / 70 + s * 1.7)) * SCALE;
+        ctx.moveTo(CX + Math.cos(a) * r0, CY + Math.sin(a) * r0);
+        ctx.lineTo(CX + Math.cos(a) * (r0 + len), CY + Math.sin(a) * (r0 + len));
       }
+      ctx.stroke();
     } else if (spokeHist[spokeHead] !== 0) {
       spokeHist.fill(0);
     }
@@ -923,22 +656,21 @@
     // confirming: "?" glyph, always; countdown arc only once the question
     // has actually been spoken and the 'tool' ask event set confirmStart.
     if (state === 'confirming') {
+      const stroke = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1);
       if (model.confirmStart !== null) {
         const frac = Math.max(0, 1 - (now - model.confirmStart) / model.confirmTimeoutMs);
         ctx.beginPath(); ctx.arc(CX, CY, R * 0.88, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-        ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = c1; ctx.stroke();
+        ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = stroke; ctx.stroke();
       }
-      ctx.font = 'bold ' + Math.round(26 * SCALE) + 'px system-ui';
+      ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.round(26 * SCALE) + 'px system-ui';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.lineJoin = 'round'; ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.strokeText('?', CX, CY + 1);
-      ctx.fillStyle = '#fff'; ctx.fillText('?', CX, CY + 1);
+      ctx.fillText('?', CX, CY + 1);
     }
     // warming spinner
     if (state === 'warming') {
       const a0 = animT * 2.4;
       ctx.beginPath(); ctx.arc(CX, CY, R * 0.88, a0, a0 + Math.PI * 0.6);
-      ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = c1; ctx.stroke();
+      ctx.lineWidth = 3 * SCALE; ctx.strokeStyle = css(cur[P_C1], cur[P_C1 + 1], cur[P_C1 + 2], 1); ctx.stroke();
     }
 
     const ms = performance.now() - tStart;

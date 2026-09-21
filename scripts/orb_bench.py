@@ -1,12 +1,12 @@
-"""Benchmark the HUD hologram orb: average canvas draw time per state.
+"""Benchmark the HUD particle orb: average canvas draw time per state.
 
 Loads veronica/ui/hud/index.html in headless Chromium (Playwright), sets the
-speck count (--particles) via window.hud.configure(), drives each state the way the
+particle count via window.hud.configure(), drives each state the way the
 orchestrator would (mic/voice events), and reads the renderer's
 window.__hud hook (frameMs / frames / totalMs) over 300 drawn frames.
 Prints ms/frame per state. A script, not a test.
 
-    uv run python scripts/orb_bench.py [--particles 400] [--frames 300] [--mini]
+    uv run python scripts/orb_bench.py [--particles 4000] [--frames 300] [--mini]
 """
 import argparse
 import pathlib
@@ -20,7 +20,7 @@ VOICE = [0.2, 0.5, 0.8, 1, 0.9, 0.6, 0.3, 0.7, 1, 0.5, 0.2, 0.6, 0.9, 0.4, 0.1] 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--particles", type=int, default=400)
+    ap.add_argument("--particles", type=int, default=4000)
     ap.add_argument("--frames", type=int, default=300)
     ap.add_argument("--mini", action="store_true")
     ap.add_argument("--dpr", type=float, default=2.0)
@@ -40,7 +40,7 @@ def main() -> int:
             page.evaluate("window.hud.setMode('mini')")
         page.evaluate("n => window.hud.configure({particles: n})", args.particles)
         active = page.evaluate("window.hud.state().particles")
-        print(f"orb_bench: {active} specks, dpr={args.dpr}, {'mini' if args.mini else 'full'} mode, "
+        print(f"orb_bench: {active} particles, dpr={args.dpr}, {'mini' if args.mini else 'full'} mode, "
               f"{args.frames} frames per state")
         for state in STATES:
             page.evaluate("s => window.hud.push({kind:'state', payload:s})", state)

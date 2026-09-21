@@ -21,7 +21,7 @@ def fixture_state(**over) -> dict:
     }
     state = {
         "general": {"language": "en", "start_at_login": False, "ptt_enabled": True, "hud_mode": "full",
-                    "hud_hide_after_s": 3.0, "hud_particles": 400, "hud_intensity": 1.0, "hud_detail": 1.0,
+                    "hud_hide_after_s": 3.0, "hud_particles": 4000, "hud_intensity": 1.0,
                     "can_start_at_login": True},
         "voice": {"voice": "af_sarah", "hindi_voice": "hf_alpha", "speed": 1.0,
                   "voices": [{"id": "af_sarah", "name": "Sarah", "hindi": False},

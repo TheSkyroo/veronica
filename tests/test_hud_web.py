@@ -540,52 +540,21 @@ def test_configure_particles_reported_in_state():
         page.goto(HUD.as_uri())
         page.wait_for_function("window.hud !== undefined")
         st = page.evaluate("window.hud.state()")
-        assert st["particles"] == 400 and st["intensity"] == 1.0
+        assert st["particles"] == 4000 and st["intensity"] == 1.0
         page.evaluate("window.hud.configure({particles: 1200, intensity: 1.5})")
         st = page.evaluate("window.hud.state()")
         assert st["particles"] == 1200 and st["intensity"] == 1.5
-        # clamped to the settings range; mini mode keeps 15% of the specks
+        # clamped to the settings range; mini mode quarters the active count
         page.evaluate("window.hud.configure({particles: 99999, intensity: 9})")
         st = page.evaluate("window.hud.state()")
-        assert st["particles"] == 2000 and st["intensity"] == 2.0
+        assert st["particles"] == 8000 and st["intensity"] == 2.0
         page.evaluate("window.hud.setMode('mini')")
-        assert page.evaluate("window.hud.state().particles") == 300
-        page.evaluate("window.hud.setMode('full')")
         assert page.evaluate("window.hud.state().particles") == 2000
+        page.evaluate("window.hud.setMode('full')")
+        assert page.evaluate("window.hud.state().particles") == 8000
         # garbage is ignored, not thrown
         page.evaluate("window.hud.configure(null); window.hud.configure({particles: 'x', intensity: NaN})")
-        assert page.evaluate("window.hud.state().particles") == 2000
-        browser.close()
-
-
-@pytest.mark.live
-def test_configure_detail_reported_in_state():
-    from playwright.sync_api import sync_playwright
-
-    errors = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 540, "height": 300})
-        page.on("pageerror", lambda exc: errors.append(str(exc)))
-        page.goto(HUD.as_uri())
-        page.wait_for_function("window.hud !== undefined")
-        page.wait_for_timeout(200)
-        assert page.evaluate("window.hud.state().detail") == 1.0
-        base = page.evaluate("document.getElementById('orb').toDataURL()")
-        page.evaluate("window.hud.configure({detail: 1.5})")
-        assert page.evaluate("window.hud.state().detail") == 1.5
-        page.wait_for_timeout(200)
-        # more rings / more of each ring lit: the orb changes and still draws
-        assert page.evaluate("document.getElementById('orb').toDataURL()") != base
-        assert page.evaluate("window.__hud.frames") > 0
-        # clamped to the settings range; garbage ignored; other keys untouched
-        page.evaluate("window.hud.configure({detail: 0.01})")
-        assert page.evaluate("window.hud.state().detail") == 0.5
-        page.evaluate("window.hud.configure({detail: 'x'}); window.hud.configure({detail: NaN, particles: 700})")
-        st = page.evaluate("window.hud.state()")
-        assert st["detail"] == 0.5 and st["particles"] == 700 and st["intensity"] == 1.0
-        page.wait_for_timeout(200)
-        assert not errors, f"page errors: {errors}"
+        assert page.evaluate("window.hud.state().particles") == 8000
         browser.close()
 
 

@@ -489,11 +489,11 @@ def test_configure_after_loaded_evaluates_immediately():
 
 
 def test_initial_config_pushed_on_load_from_settings():
-    h, web, _, _ = make(mark_loaded=False, hud_particles=300, hud_intensity=1.25, hud_detail=0.75)
+    h, web, _, _ = make(mark_loaded=False, hud_particles=3000, hud_intensity=1.25)
     h.push({"kind": "mic", "payload": 0.2})
     h.mark_loaded()
     assert web.js[0] == 'window.hud.setMode("full")'
-    assert web.js[1] == 'window.hud.configure({"particles": 300, "intensity": 1.25, "detail": 0.75})'
+    assert web.js[1] == 'window.hud.configure({"particles": 3000, "intensity": 1.25})'
     assert web.js[2].startswith("window.hud.push(")
 
 
