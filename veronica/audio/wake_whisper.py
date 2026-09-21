@@ -60,6 +60,7 @@ class WhisperWake:
         self._frames = frames or self._mic_frames
         self._model = self._model_cls(settings.wake_whisper_model, device="cpu", compute_type="int8")
         self._stop = threading.Event()
+        self._prompt = " ".join(p.strip().capitalize() + "." for p in settings.wake_phrases if p.strip()) or None
         self._window_samples = int(settings.wake_window_s * settings.sample_rate)
         self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
         self._buf = np.zeros(0, dtype=np.int16)
@@ -102,6 +103,9 @@ class WhisperWake:
             vad_filter=False,
             condition_on_previous_text=False,
             word_timestamps=True,
+            # bias the decoder toward the name: slow or low-pitched speech
+            # otherwise comes back as "very nicer" / "for on echo"
+            initial_prompt=self._prompt,
         )
         return list(segments)
 

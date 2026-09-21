@@ -31,7 +31,7 @@ def test_defaults(tmp_home):
     assert s.wake_model == "hey_veronica"
     assert s.wake_engine == "whisper"
     assert s.wake_whisper_model == "tiny.en"
-    assert s.wake_window_s == 1.2
+    assert s.wake_window_s == 2.0
     assert s.wake_hop_s == 0.25
     assert s.wake_min_rms == 0.003
     assert s.wake_phrases == ["veronica", "veronika", "hey veronica", "hi veronica"]
