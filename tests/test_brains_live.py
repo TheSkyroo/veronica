@@ -12,10 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from veronica.brain.backends import BACKENDS, check_backend, make_brain
 from veronica.brain.backends.antigravity import AntigravityBrain
+from veronica.brain.backends.claude import ClaudeBrain
 from veronica.brain.backends.codex import CodexBrain
 from veronica.brain.backends.copilot import CopilotBrain
 from veronica.brain.gate import GateServer, ToolGate
+from veronica.brain.switch import BrainSwitcher
 from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
 
@@ -100,9 +103,10 @@ class RecordingCopilot(_Recording, CopilotBrain):
     pass
 
 
-async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity):
-    """A brain whose gate is served on home/gate.sock and whose confirm
-    pops `answers`."""
+async def _gate_server(home, answers, cards, seen=None):
+    """A ToolGate served on home/gate.sock whose confirm pops `answers`;
+    every tool name that reaches `decide` (from the socket or in-process)
+    is appended to `seen`."""
     s = Settings(home=home)
 
     async def confirm(summary, detail=""):
@@ -111,8 +115,23 @@ async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity)
         return a if isinstance(a, ConfirmResult) else ConfirmResult("approved" if a else "denied")
 
     gate = ToolGate(s, confirm, on_tool=lambda su, d: cards.append((su, d)))
+    if seen is not None:
+        decide = gate.decide
+
+        async def recording_decide(tool, inp):
+            seen.append(tool)
+            return await decide(tool, inp)
+
+        gate.decide = recording_decide
     srv = GateServer(gate, s.gate_socket)
     await srv.start()
+    return s, gate, srv
+
+
+async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity):
+    """A brain whose gate is served on home/gate.sock and whose confirm
+    pops `answers`."""
+    s, gate, srv = await _gate_server(home, answers, cards)
     return brain_cls(s, gate, on_tool=lambda su, d: cards.append((su, d))), srv
 
 
@@ -358,4 +377,77 @@ async def test_copilot_mcp_tool_through_serve(short_home, copilot_hooks_file):
     finally:
         (FIX / "copilot-mcp.jsonl").write_text("\n".join(b.raw) + "\n")
         await b.close()
+        await srv.stop()
+
+
+# -- end to end through the registry (every brain, the shared gate) -----------
+VOLUME_PROMPT = "Use the volume_get tool and tell me the result in one short sentence."
+
+
+@pytest.mark.parametrize("name", list(BACKENDS))
+async def test_every_brain_answers_through_the_gate(name, short_home, agy_hooks_file, copilot_hooks_file):
+    """`make_brain(name)` on a real GateServer: one turn that calls our
+    `volume_get` (auto-allowed) speaks a sentence, and the gate saw exactly
+    one request for it — over the socket from tools.serve for the CLI
+    brains, in-process (can_use_tool) for Claude."""
+    avail = check_backend(name)
+    if not avail.ok:
+        pytest.skip(f"{name}: {avail.reason}")
+    cards, seen = [], []
+    s, gate, srv = await _gate_server(short_home, [True] * 5, cards, seen)
+    b = make_brain(name, s, gate=gate, on_tool=lambda su, d: cards.append((su, d)))
+    assert isinstance(b, BACKENDS[name].cls) and b.name == name
+    try:
+        out = [x async for x in b.ask(VOLUME_PROMPT)]
+        assert out and any(x.strip() for x in out), out                    # a sentence was spoken
+        assert seen.count("mcp__mac__volume_get") == 1, seen              # gated exactly once
+        assert ("volume_get", "auto") in cards, cards
+        assert not any(c[0] == "confirm" for c in cards), cards            # read-only: no question asked
+    finally:
+        await b.close()
+        await srv.stop()
+
+
+async def test_claude_brain_in_process_through_the_gate(short_home):
+    """The Claude backend runs our MCP servers in-process (no tools.serve
+    child, no hook): the same prompt reaches the gate via can_use_tool."""
+    avail = check_backend("claude")
+    if not avail.ok:
+        pytest.skip(f"claude: {avail.reason}")
+    cards, seen = [], []
+    s, gate, srv = await _gate_server(short_home, [True] * 5, cards, seen)
+    b = ClaudeBrain(s, gate=gate, on_tool=lambda su, d: cards.append((su, d)))
+    try:
+        out = [x async for x in b.ask(VOLUME_PROMPT)]
+        assert out and any(x.strip() for x in out), out
+        assert seen == ["mcp__mac__volume_get"], seen
+        assert ("volume_get", "auto") in cards, cards
+        assert s.session_file.read_text().strip()                          # session saved for resume
+        assert not (short_home / "backends" / "claude").exists()           # no CLI workspace / hook log
+    finally:
+        await b.close()
+        await srv.stop()
+
+
+async def test_switcher_starts_on_codex(short_home):
+    """`BrainSwitcher.start()` with the default preference activates Codex
+    on a Mac where it is installed and logged in — no stand-in."""
+    avail = check_backend("codex")
+    if not avail.ok:
+        pytest.skip(f"codex: {avail.reason}")
+    said = []
+
+    async def say(text):
+        said.append(text)
+
+    s, gate, srv = await _gate_server(short_home, [], [])
+    assert s.brain_backend == "codex"
+    sw = BrainSwitcher(s, gate=gate, say=say)
+    try:
+        await sw.start()
+        assert sw.brain.name == "codex" and isinstance(sw.brain, CodexBrain)
+        assert sw.status_label() == "Codex"
+        assert sw.standing_in is False and said == []
+    finally:
+        await sw.brain.close()
         await srv.stop()

@@ -1,19 +1,21 @@
 # Veronica
 
 macOS voice assistant. Say "Hey Veronica" once you have trained the custom model (see scripts/train_wakeword.md); until then say "Hey Jarvis", ask, listen.
-Brain = Claude via your Claude Code login. Speech = local (faster-whisper + Kokoro).
+Brain = Codex, Antigravity, Claude or Copilot, each through its own CLI login (no API keys; see Brains below).
+Speech = local (faster-whisper + Kokoro).
 
 ## Setup
     brew install uv portaudio
     uv venv --python 3.12 && uv pip install -e ".[dev]"
     uv run python scripts/download_models.py
-    claude auth login        # if not already
+    npm i -g @openai/codex && codex login    # the default brain; others under Brains below
 
 Wake word: say "Veronica" or "hey Veronica" (whisper engine, default). To use the lighter openwakeword engine set VERONICA_WAKE_ENGINE=openwakeword (falls back to "hey jarvis" until you train a custom model — see scripts/train_wakeword.md).
 
 Wake word not triggering? Run `uv run python scripts/wake_scores.py`, say the phrase, and (openwakeword engine) set VERONICA_WAKE_THRESHOLD in .env just below the scores you see.
 
-Do not set `ANTHROPIC_API_KEY` — Veronica uses your Claude Code login (it is ignored if set).
+Do not set `ANTHROPIC_API_KEY` (or any other vendor key) — every brain uses the login of its own CLI (`codex login`,
+`agy`, `claude`, `copilot login`); keys are ignored if set.
 
 - macOS will ask for Microphone access for your terminal app on first run (System Settings → Privacy & Security → Microphone).
 - First run downloads the whisper `small.en` model (~470 MB). Hindi mode needs the multilingual `small`/`tiny`
@@ -35,7 +37,7 @@ The HUD's status line under the orb shows what she's doing:
 - **Warming up…** — models are loading (first run only).
 - **Listening…** — she's capturing your voice (also shown during the follow-up window after a reply); the bar
   next to it tracks the live mic level.
-- **Thinking…** — Claude is working on a reply.
+- **Thinking…** — the brain is working on a reply (the line under it says which one: "Brain: Codex").
 - **Speaking** — she's talking.
 - **Say yes or no** — she's asked for confirmation before a risky action and is listening for your answer; the
   question itself appears above, and the mic-level bar is still shown while she listens for it. During a
@@ -95,6 +97,90 @@ A few more phrases are also handled locally:
   ignored silently.
 - **Quit** — "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely": asks for
   confirmation; say "yes" and she says "Goodbye." and quits the app.
+
+## Brains
+
+The "brain" is whichever coding-agent CLI does the thinking. Veronica runs it as a subprocess (or, for Claude, via
+the Agent SDK) and hands it her own tools; the speech, the HUD and the confirmation gate are the same whichever
+one is active. Every brain uses the vendor CLI's own login — there are no API keys anywhere.
+
+| Brain | What it is | Install | Log in |
+| --- | --- | --- | --- |
+| **Codex** (default) | OpenAI's `codex` CLI, on your ChatGPT plan | `npm i -g @openai/codex` | `codex login` |
+| **Antigravity** | Google's `agy` CLI (Gemini), on your Google account | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` |
+| **Claude** | Anthropic's `claude` CLI (Claude Code), on your Claude plan | `npm i -g @anthropic-ai/claude-code` | `claude` |
+| **Copilot** | GitHub's `copilot` CLI, on your Copilot plan | `npm i -g @github/copilot` | `copilot login` |
+
+Only the brains that are installed *and* logged in are offered; the check is local and cheap (the binary on
+`PATH` plus the file the login writes — `~/.codex/auth.json`, `~/.copilot/config.json`, Antigravity's
+`~/.gemini/antigravity-cli/conversations` or its Keychain item; Claude reports a missing login itself). An
+unavailable one is spoken as "Codex isn't installed — run npm i -g @openai/codex, then codex login." or "Codex
+isn't logged in — run codex login in a terminal."
+
+**Choosing one.** The preferred brain is **Settings → Brain → Brain** (`brain_backend`, default `codex`, live — no
+restart). The menu bar has a **Brain: Codex** submenu with one radio item per brain (unavailable ones read
+"Copilot (not installed)" / "(not logged in)" and are disabled). By voice, without a brain round-trip: "switch to
+codex", "use antigravity", "use copilot", "back to claude" / "go back to claude", "switch brain to codex",
+"codex pe switch karo", "copilot use karo"; she answers "Switched to Codex." or "Already on Codex." (or the
+install/login hint above). "Which brain are you on" / "which model is this" / "who am I talking to" / "kaunsa
+brain hai" answers "I'm on Codex." A switch interrupts whatever the current brain was doing and clears any
+screen-control trust window; each brain keeps its own resumable session, so switching back picks up where it
+left off. The HUD's status area shows "Brain: Codex" and the settings page's Brain tab shows the same label.
+
+**The confirm gate applies to every brain.** Two paths, one gate:
+
+- *Veronica's tools* (`mac`, `pim` for calendar/mail/reminders/timers, `memory`, `screen`, `music`, `browser`,
+  `computer`) are served to an external brain as MCP servers over stdio (`python -m veronica.tools.serve <name>`,
+  registered as `veronica-<name>`). Each call asks the app's gate socket (`~/.veronica/gate.sock`) the same
+  question the in-process gate asks Claude — policy, trust window, pre-approval, voice confirm — so "Run …?"
+  sounds and behaves exactly the same.
+- *The CLI's own shell and file edits* (Codex's `Bash`/`apply_patch`, Antigravity's `run_command`, Copilot's `bash`)
+  run with the vendor's own approvals turned off and Veronica's **pre-tool hook** as the only gate: the hook logs
+  the call to `~/.veronica/backends/<brain>/hook.log`, asks the same gate socket, and a "no" blocks the command
+  with her reason. Because a hook that silently stops firing would leave the shell ungated, every native call is
+  a **canary**: a shell/edit call that finishes without a matching `hook.log` line kills the child, she says
+  "Hooks aren't running on Codex, so I've turned off its shell. Tools still work.", the brain's shell is switched
+  off (persisted) and the request is retried tools-off.
+- Whether a brain may use its own shell at all is **Settings → Brain → Codex / Antigravity / Copilot: allow its
+  own shell** (`codex_native_tools`, `antigravity_native_tools`, `copilot_native_tools`, default on, live). Off =
+  only Veronica's tools: Codex runs in a read-only sandbox, headless Antigravity denies its own shell/file tools
+  itself, and Copilot's shell/edit/agent tools are hidden from the model.
+
+**Failover on usage limits.** When a turn ends with a limit error (usage limit, rate limit, 429, quota, out of
+credits, overloaded …) and **Settings → Brain → Switch brains on usage limits** (`brain_failover`, default on) is
+on, she says "Codex hit its usage limit — switching to Antigravity.", puts the failed brain in a cooldown of
+**Limit cooldown (minutes)** (`brain_limit_cooldown_min`, default 60) and re-runs the same request once on the
+next brain in **Failover order** (`brain_failover_order`, default `codex,antigravity,claude,copilot`; the
+preferred brain is implicitly first) that is installed, logged in and not cooling down. If none is: "Codex hit
+its usage limit and no other brain is ready." With failover off she just says "Codex hit its usage limit." A
+stand-in that hits its own limit fails over again down the order, each with its own cooldown, and a brain
+already cooling down is never retried in the same chain. The preference is not changed by failover: the HUD
+shows "Brain: Antigravity (for Codex)", the menu item reads "Antigravity — standing in for Codex", "which brain
+are you on" answers "I'm on Antigravity — Codex hit its limit, I'll try it again in 42 minutes.", and once the
+cooldown passes she returns to the preferred brain **silently** before the next turn (the label updates; the
+next reply just comes from it). A manual "switch to …" clears that brain's cooldown. At startup, if the
+preferred brain isn't installed or logged in, she starts on the first available one and says once "Codex isn't
+logged in, so I'm on Claude for now." (re-checking the preferred one every minute); with nothing ready she
+says "No brain is ready — log into Codex, Antigravity or Claude."
+
+**Known limits.**
+
+- **Timers set while on an external brain don't announce.** The `pim` server runs in a child process where
+  nobody can speak, so a "set a timer for 5 minutes" is recorded but never spoken or shown. Memory, calendar,
+  mail and the rest work normally. Claude runs the tools in-process, so timers set on Claude are unaffected.
+- **Antigravity edits user-level files.** Only the user-level `~/.gemini/config/hooks.json` is loaded by `agy`,
+  so Veronica merges her PreToolUse entry into it, scoped to her own conversation id (your own interactive `agy`
+  sessions are never gated). The first Antigravity turn also runs `agy mcp add` for each of her servers, which
+  adds `veronica-*` entries to `~/.gemini/config/mcp_config.json`; they stay there (harmless outside Veronica —
+  they need her gate socket to do anything). With its shell on, `agy` runs with `--dangerously-skip-permissions`;
+  the hook and the canary are what keep it honest.
+- **Codex** keeps its hook project-level (`~/.veronica/backends/codex/.codex/hooks.json`) and its MCP servers
+  per-call, so nothing of yours is touched; with its shell off it falls back to a read-only sandbox, so it can
+  read files but not write or run anything except through Veronica's tools.
+- **Copilot** writes `~/.copilot/hooks/veronica.json` before every turn (scoped to her workspace) and removes it
+  on close; each turn costs a **premium request** on your Copilot plan.
+- Each brain's session id, hook log and workspace live under `~/.veronica/backends/<brain>/` (Claude keeps its
+  session file where it always was).
 
 ## Calendar, mail, reminders, timers
 
@@ -384,7 +470,7 @@ same launcher keeps the grant, but a rebuilt or updated launcher needs Accessibi
 Veronica in System Settings → Privacy & Security → Accessibility).
 
 The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
-`.venv` (and `.env`, models, `claude auth login`) you set up for `uv run` — there's no separate install step.
+`.venv` (and `.env`, models, the brain CLI logins) you set up for `uv run` — there's no separate install step.
 `VERONICA_HOME` (default `~/.veronica`) is unchanged when running as a bundle.
 
 **Start at Login** — the menu bar's "Start at Login" item writes a `LaunchAgent` at
@@ -419,4 +505,5 @@ shows on the HUD; every fix is an `input volume 33 → 85 (...)` line in the log
 ## Test
     uv run pytest            # unit
     uv run pytest -m live    # needs mic/speaker/models/login
+    uv run pytest -m live tests/test_brains_live.py   # the real brain CLIs; each skips unless installed + logged in
     uv run playwright install chromium   # once, for the live HUD tests
