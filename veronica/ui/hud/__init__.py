@@ -11,6 +11,8 @@ from veronica.config import Settings
 log = logging.getLogger("veronica.ui.hud")
 
 NON_IDLE = frozenset({"listening", "thinking", "speaking", "followup", "confirming", "error", "warming"})
+SCREEN_CHANGE_SETTLE_S = 0.3   # quiet time after the last display-change notification before repositioning
+
 MODES = frozenset({"full", "mini"})
 
 
@@ -208,6 +210,10 @@ class HudWindow:
         self._screen_observer = None
         self._unsubscribe_screens: Callable[[], None] | None = None
         self._hide_at: float | None = None
+        # Display-change notifications arrive in bursts (dozens per second
+        # while a monitor connects); they're coalesced into one reposition
+        # once they've been quiet for SCREEN_CHANGE_SETTLE_S (see tick()).
+        self._reposition_at: float | None = None
         self._closed = False
         self._fade_gen = 0
         self.available = False
@@ -487,8 +493,7 @@ class HudWindow:
         on a screen that exists. Runs on the main thread via _apply_geometry."""
         if self._closed or not self.available:
             return
-        log.info("display change: repositioning HUD")
-        self._apply_geometry()
+        self._reposition_at = self._clock() + SCREEN_CHANGE_SETTLE_S
 
     # -- menu -------------------------------------------------------------------
     def _on_webview_menu(self, event) -> None:
@@ -517,8 +522,7 @@ class HudWindow:
         self._main(lambda: self._js(js))
 
     def _initial_config(self) -> dict:
-        return {"particles": int(self.s.hud_particles), "intensity": float(self.s.hud_intensity),
-                "detail": float(self.s.hud_detail)}
+        return {"particles": int(self.s.hud_particles), "intensity": float(self.s.hud_intensity)}
 
     @staticmethod
     def _configure_js(cfg: dict) -> str:
@@ -542,9 +546,15 @@ class HudWindow:
             self._hide_at = self._clock() + self.s.hud_hide_after_s
 
     def tick(self) -> None:
-        if self._hide_at is not None and self._clock() >= self._hide_at:
+        now = self._clock()
+        if self._hide_at is not None and now >= self._hide_at:
             self._hide_at = None
             self.hide()
+        if self._reposition_at is not None and now >= self._reposition_at:
+            self._reposition_at = None
+            if not self._closed and self.available:
+                log.info("display change: repositioning HUD")
+                self._apply_geometry()
 
     # -- visibility -----------------------------------------------------------
     def _fade(self, alpha: float, then=None) -> None:

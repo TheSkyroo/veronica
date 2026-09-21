@@ -1,3 +1,4 @@
+import time
 import json
 import sys
 import types
@@ -488,11 +489,11 @@ def test_configure_after_loaded_evaluates_immediately():
 
 
 def test_initial_config_pushed_on_load_from_settings():
-    h, web, _, _ = make(mark_loaded=False, hud_particles=300, hud_intensity=1.25, hud_detail=0.75)
+    h, web, _, _ = make(mark_loaded=False, hud_particles=3000, hud_intensity=1.25)
     h.push({"kind": "mic", "payload": 0.2})
     h.mark_loaded()
     assert web.js[0] == 'window.hud.setMode("full")'
-    assert web.js[1] == 'window.hud.configure({"particles": 300, "intensity": 1.25, "detail": 0.75})'
+    assert web.js[1] == 'window.hud.configure({"particles": 3000, "intensity": 1.25})'
     assert web.js[2].startswith("window.hud.push(")
 
 
@@ -722,10 +723,20 @@ def test_screen_change_callback_repositions_hud(caplog):
     assert panel.setFrame_calls[-1][:2] == (2000.0, 1100.0)
     # The big display goes away; only the laptop panel is left.
     frames[:] = [MAIN_SCREEN]
+    before = len(panel.setFrame_calls)
     with caplog.at_level("INFO", logger="veronica.ui.hud"):
-        handlers[0]()
+        # A burst of notifications (a monitor connecting fires dozens) is
+        # coalesced: nothing moves until they've been quiet for a moment.
+        for _ in range(50):
+            handlers[0]()
+        h.tick()
+        assert len(panel.setFrame_calls) == before
+        h._clock = lambda: time.monotonic() + 1.0
+        h.tick()
+        h.tick()
+    assert len(panel.setFrame_calls) == before + 1
     assert panel.setFrame_calls[-1][:2] == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
-    assert "display change: repositioning HUD" in caplog.text
+    assert caplog.text.count("display change: repositioning HUD") == 1
 
 
 def test_screen_change_subscription_unsubscribes_on_close():
@@ -741,6 +752,8 @@ def test_screen_change_subscription_unsubscribes_on_close():
     calls_before = len(h._panel.setFrame_calls)
     unsubscribed[0]()
     h._on_screens_changed()
+    h._clock = lambda: time.monotonic() + 1.0
+    h.tick()
     assert len(h._panel.setFrame_calls) == calls_before
 
 
@@ -835,6 +848,8 @@ def test_real_screen_change_subscription_uses_notification_center(monkeypatch):
     assert (selector, name, obj) == ("onScreens:", "NSApplicationDidChangeScreenParametersNotification", None)
     assert h._screen_observer is observer   # strong ref kept on the window
     observer.callback()
+    h._clock = lambda: time.monotonic() + 1.0
+    h.tick()
     assert panel.setFrame_calls[-1][:2] == (1440 - 540 - h.s.hud_margin, 900 - 300 - h.s.hud_margin)
     h.close()
     assert removals == [observer]

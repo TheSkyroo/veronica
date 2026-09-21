@@ -119,9 +119,8 @@ class Settings(BaseSettings):
     hud_mode: str = "full"    # "full" | "mini"; runtime pref, see veronica.prefs
     hud_mini_width: int = 400
     hud_mini_height: int = 72
-    hud_particles: int = 400    # orb speck count (live-editable)
+    hud_particles: int = 4000   # orb particle count (live-editable)
     hud_intensity: float = 1.0  # orb glow/brightness multiplier (live-editable)
-    hud_detail: float = 1.0     # orb rings-per-shell / lit-fraction multiplier (live-editable)
 
     @field_validator("brain_backend")
     @classmethod
@@ -199,13 +198,10 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "float", "Hide HUD after (seconds)", "", min=1, max=30, restart=False,
     ),
     "hud_particles": EditableField(
-        "int", "HUD specks", "Bright points drifting between the orb's shells.", min=100, max=2000, restart=False,
+        "int", "HUD particles", "More looks richer, costs CPU.", min=500, max=8000, restart=False,
     ),
     "hud_intensity": EditableField(
         "float", "HUD intensity", "Glow/brightness multiplier.", min=0.2, max=2.0, restart=False,
-    ),
-    "hud_detail": EditableField(
-        "float", "HUD detail", "Ring density and how much of each ring is lit.", min=0.5, max=1.5, restart=False,
     ),
     "wake_min_rms": EditableField(
         "float", "Wake sensitivity (min level)",

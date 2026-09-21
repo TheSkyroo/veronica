@@ -52,14 +52,14 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 # Which Settings fields each section exposes. Anything in EDITABLE_SETTINGS
 # not listed here is unreachable from the window (deliberately).
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
-    "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity", "hud_detail"),
+    "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
     "listening": ("followup_window_s", "confirm_listen_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
     "brain": ("effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
               "codex_native_tools", "antigravity_native_tools", "copilot_native_tools"),
 }
-HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity", "hud_detail")
+HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
 
 
@@ -238,7 +238,6 @@ class SettingsBridge:
                 "hud_hide_after_s": setting("hud_hide_after_s"),
                 "hud_particles": setting("hud_particles"),
                 "hud_intensity": setting("hud_intensity"),
-                "hud_detail": setting("hud_detail"),
                 "can_start_at_login": self._bundle_path is not None,
             },
             "voice": {
@@ -455,8 +454,7 @@ class SettingsBridge:
             # The orb applies these live: the menubar's _drain maps a "hud"
             # event carrying "config" to HudWindow.configure().
             orch._emit("hud", {"config": {"particles": int(orch.s.hud_particles),
-                                          "intensity": float(orch.s.hud_intensity),
-                                          "detail": float(orch.s.hud_detail)}})
+                                          "intensity": float(orch.s.hud_intensity)}})
         return _ok()
 
     # -- voice test -----------------------------------------------------------------

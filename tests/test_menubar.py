@@ -485,9 +485,9 @@ def test_drain_hud_config_event_calls_configure(fake_env):
     menubar, fake_rumps, orch_holder = fake_env
     app, orch = _make_app(menubar, orch_holder)
     try:
-        app._events.put(("hud", {"config": {"particles": 1200, "intensity": 0.5, "detail": 1.2}}))
+        app._events.put(("hud", {"config": {"particles": 1200, "intensity": 0.5}}))
         app._drain(None)
-        assert app._hud.configure_calls == [{"particles": 1200, "intensity": 0.5, "detail": 1.2}]
+        assert app._hud.configure_calls == [{"particles": 1200, "intensity": 0.5}]
         assert app._hud.mode_calls == [] and app._hud.hide_calls == 0
         assert "hud" not in [e["kind"] for e in app._hud.pushed]
     finally:
