@@ -25,10 +25,30 @@ class _FakeBrain:
         self.memory = memory
 
 
+class _FakeSwitcher:
+    """Stands in for BrainSwitcher: exposes the gate it was given and a
+    `_FakeBrain` built on that gate's confirm, the way make_brain would."""
+    def __init__(self, settings, *, gate, on_tool=None, memory=None, say=None, on_backend=None):
+        self.s = settings
+        self.gate = gate
+        self.say = say
+        self.on_backend = on_backend
+        self.brain = _FakeBrain(settings, gate._confirm, on_tool=on_tool, memory=memory)
+        self.started = 0
+
+    async def start(self):
+        self.started += 1
+        if self.on_backend is not None:
+            self.on_backend("Claude", False)
+
+    def status_label(self):
+        return "Claude"
+
+
 async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
 
     orch = main_mod.build_orchestrator(Settings(), audio=False)
 
@@ -54,10 +74,38 @@ async def test_build_orchestrator_text_mode(monkeypatch, tmp_home):
     assert calls == ["Bash: ls"]
 
 
+async def test_build_orchestrator_wires_the_switcher(monkeypatch, tmp_home):
+    monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
+    monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
+    seen = []
+
+    orch = main_mod.build_orchestrator(Settings(), on_event=lambda k, p: seen.append((k, p)), audio=False)
+    try:
+        sw = orch.switcher
+        assert isinstance(sw, _FakeSwitcher)
+        assert orch.brain is sw.brain and orch.gate is sw.gate
+        assert isinstance(sw.gate, main_mod.ToolGate) and sw.gate.s is orch.s
+        # the switcher's spoken lines and label changes go through the orchestrator
+        said = []
+
+        async def fake_say(text, *, lang=None):
+            said.append(text)
+
+        monkeypatch.setattr(orch, "say", fake_say)
+        await sw.say("Codex hit its usage limit — switching to Claude.")
+        assert said == ["Codex hit its usage limit — switching to Claude."]
+        sw.on_backend("Claude (for Codex)", True)
+        assert ("hud", {"backend": "Claude (for Codex)"}) in seen
+    finally:
+        orch.store.close()
+        memory_tools.bind(None)
+
+
 async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
 
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
 
@@ -68,7 +116,7 @@ async def test_build_orchestrator_no_store_when_memory_disabled(monkeypatch, tmp
 
 async def test_build_orchestrator_applies_saved_voice_prefs(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "am_adam", "tts_speed": 9})
 
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
@@ -79,7 +127,7 @@ async def test_build_orchestrator_applies_saved_voice_prefs(monkeypatch, tmp_hom
 
 async def test_build_orchestrator_defaults_without_voice_prefs(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
 
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
@@ -90,7 +138,7 @@ async def test_build_orchestrator_defaults_without_voice_prefs(monkeypatch, tmp_
 
 async def test_build_orchestrator_ignores_unknown_voice_pref(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_voice": "zz_nobody"})
 
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
@@ -100,7 +148,7 @@ async def test_build_orchestrator_ignores_unknown_voice_pref(monkeypatch, tmp_ho
 
 async def test_build_orchestrator_ignores_bad_speed_pref(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {"tts_speed": "fast"})
 
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
@@ -130,18 +178,10 @@ class _FakeRecorder:
         self.on_level = on_level
 
 
-class _FakeBrainWithOnTool:
-    def __init__(self, settings, confirm, on_tool=None, memory=None):
-        self.s = settings
-        self._confirm = confirm
-        self.on_tool = on_tool
-        self.memory = memory
-
-
 async def test_build_orchestrator_emits_mic_and_tool_events(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
@@ -165,7 +205,7 @@ async def test_build_orchestrator_wires_proactive(monkeypatch, tmp_home):
     saved = {"proactive": {"briefing_enabled": True, "briefing_time": "07:45", "nudge_minutes": 12}}
     monkeypatch.setattr(main_mod.prefs, "load", lambda: saved)
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
@@ -180,7 +220,7 @@ async def test_build_orchestrator_wires_proactive(monkeypatch, tmp_home):
 async def test_build_orchestrator_no_proactive_in_text_mode(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
     assert orch.proactive is None
     memory_tools.bind(None)
@@ -189,7 +229,7 @@ async def test_build_orchestrator_no_proactive_in_text_mode(monkeypatch, tmp_hom
 async def _build_audio_orch(monkeypatch):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
@@ -309,11 +349,24 @@ class _StubPlayer:
         self.closed = True
 
 
+class _StubGate:
+    def __init__(self):
+        self._confirm = None
+
+
 class _StubOrchestrator:
     def __init__(self, handle_text):
         self.brain = _StubBrain()
+        self.gate = _StubGate()
         self.player = _StubPlayer()
         self._handle_text = handle_text
+        self.brain_started = self.brain_stopped = 0
+
+    async def start_brain(self):
+        self.brain_started += 1
+
+    async def stop_brain(self):
+        self.brain_stopped += 1
 
     async def handle_text(self, text):
         return await self._handle_text(self, text)
@@ -339,7 +392,7 @@ def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
     monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: "y")
 
     async def handle_text(orch, text):
-        await orch.brain._confirm("Bash: ls")
+        await orch.gate._confirm("Bash: ls")
         return ["Hi."]
 
     stub = _StubOrchestrator(handle_text)
@@ -349,6 +402,9 @@ def test_text_mode_prints_sentences_and_tools(monkeypatch, tmp_home, capsys):
 
     assert stub.brain.closed is True
     assert stub.player.closed is True
+    # the brain is activated (and the gate socket opened) before the ask,
+    # and the socket closed after it
+    assert stub.brain_started == 1 and stub.brain_stopped == 1
     out = capsys.readouterr().out
     assert "[text mode] safe tools run automatically; risky tools ask y/N on this terminal" in out
     assert "[tool] Bash: ls -> allowed" in out
@@ -367,13 +423,13 @@ def test_text_mode_prompts_for_confirm_class(monkeypatch, tmp_home, capsys):
 
     asyncio.run(main_mod._text_mode("x"))
 
-    ok = asyncio.run(stub.brain._confirm("Bash: rm x", "Bash: rm -rf x"))
+    ok = asyncio.run(stub.gate._confirm("Bash: rm x", "Bash: rm -rf x"))
     assert ok is True
     assert prompts == ["Run Bash: rm x? [Bash: rm -rf x] [y/N] "]
 
     prompts.clear()
     monkeypatch.setattr(main_mod, "_ask_stdin", lambda prompt: (prompts.append(prompt), "n")[1])
-    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    ok = asyncio.run(stub.gate._confirm("Bash: rm x"))
     assert ok is False
     assert prompts == ["Run Bash: rm x? [] [y/N] "]
 
@@ -392,7 +448,7 @@ def test_ask_stdin_closed_stdin_declines(monkeypatch, tmp_home, capsys):
 
     asyncio.run(main_mod._text_mode("x"))
 
-    ok = asyncio.run(stub.brain._confirm("Bash: rm x"))
+    ok = asyncio.run(stub.gate._confirm("Bash: rm x"))
     assert ok is False
     out = capsys.readouterr().out
     assert "[tool] Bash: rm x -> declined" in out
@@ -431,7 +487,7 @@ async def test_proactive_adapters_raise_on_pim_error(monkeypatch, tmp_home):
 def _patch_audio_fakes(monkeypatch, saved):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: saved)
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
@@ -532,7 +588,7 @@ async def test_build_orchestrator_ignores_bad_hindi_voice(monkeypatch, tmp_home)
 async def test_build_orchestrator_passes_updater_hooks(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     check, update, relaunch = dict, (lambda st: ""), (lambda: True)
 
     orch = main_mod.build_orchestrator(
@@ -559,7 +615,7 @@ async def test_build_orchestrator_wires_input_guard(monkeypatch, tmp_home):
 async def test_build_orchestrator_input_guard_hint_reaches_hud_once(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrainWithOnTool)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     monkeypatch.setattr(main_mod, "make_wake", _fake_make_wake)
     monkeypatch.setattr(main_mod, "Transcriber", _FakeTranscriber)
     monkeypatch.setattr(main_mod, "Recorder", _FakeRecorder)
@@ -577,7 +633,7 @@ async def test_build_orchestrator_input_guard_hint_reaches_hud_once(monkeypatch,
 async def test_build_orchestrator_no_input_guard_in_text_mode(monkeypatch, tmp_home):
     monkeypatch.setattr(main_mod.prefs, "load", lambda: {})
     monkeypatch.setattr(main_mod, "Synthesizer", _FakeSynthesizer)
-    monkeypatch.setattr(main_mod, "Brain", _FakeBrain)
+    monkeypatch.setattr(main_mod, "BrainSwitcher", _FakeSwitcher)
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
     assert orch.input_guard is None
     memory_tools.bind(None)

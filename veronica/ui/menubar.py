@@ -4,12 +4,14 @@ import logging
 import queue
 import subprocess
 import threading
+import time
 
 import rumps
 
 from veronica import updater, version
 from veronica.__main__ import build_orchestrator
 from veronica.audio.hotkey import HotkeyMonitor
+from veronica.brain.backends import BACKENDS, check_backend
 from veronica.config import settings
 from veronica.speech import voices
 from veronica.ui import login_item
@@ -41,6 +43,11 @@ ICONS = {"idle": "◯", "listening": "◉", "thinking": "…", "speaking": "♪"
 
 # Voice submenu speed entries: menu title -> Orchestrator._voice_turn("speed", arg).
 SPEED_TITLES = {"Faster": "faster", "Slower": "slower", "Normal speed": "normal"}
+
+# Brain submenu: how often the "(not installed)" / "(not logged in)" titles
+# re-check the backends (PATH + marker files, cheap but not free on the
+# 0.25 s refresh timer).
+BRAIN_CHECK_INTERVAL_S = 60
 
 
 def _make_menu_handler_class():
@@ -93,6 +100,9 @@ def _make_menu_handler_class():
 
         def onSpeed_(self, sender):
             self._app._speed(self._app._speed_items[sender.representedObject()])
+
+        def onPickBrain_(self, sender):
+            self._app._pick_brain(self._app._brain_items[sender.representedObject()])
 
         def onQuit_(self, _sender):
             self._app.quit(None)
@@ -190,9 +200,22 @@ class VeronicaApp(rumps.App):
             self._speed_items[title] = item
             voice_menu.add(item)
         self._voice_menu = voice_menu
+        # Brain submenu: one item per backend; the parent's title doubles
+        # as the "Brain: Codex" label (from the orchestrator's hud events).
+        # Items for brains that aren't installed / logged in are disabled
+        # with the reason in the title (_refresh_brain_menu).
+        self._brain_items: dict[str, rumps.MenuItem] = {}
+        self._brain_avail: dict[str, object] = {}
+        self._brain_checked_at = -BRAIN_CHECK_INTERVAL_S
+        brain_menu = rumps.MenuItem("Brain")
+        for name, info in BACKENDS.items():
+            item = rumps.MenuItem(info.label, callback=self._pick_brain)
+            self._brain_items[name] = item
+            brain_menu.add(item)
+        self._brain_menu = self._brain_item = brain_menu
         menu_items = [
             about_item, settings_item, check_item, self._update_item, None,
-            self._mute_item, hud_mode_item, voice_menu, login_item_item, None,
+            self._mute_item, hud_mode_item, voice_menu, brain_menu, login_item_item, None,
         ]
         self._hud_mode_item = hud_mode_item
         self._login_item_item = login_item_item
@@ -277,6 +300,7 @@ class VeronicaApp(rumps.App):
         else:
             self.title = f"V {ICONS.get(self._state, '?')}"
         self._refresh_voice_menu()
+        self._refresh_brain_menu()
 
     def _drain(self, _timer) -> None:
         # If the backlog has grown past 1000 (the HUD/UI thread falling
@@ -307,6 +331,12 @@ class VeronicaApp(rumps.App):
                     self._hud.reset_position()
                 elif isinstance(payload, dict) and isinstance(payload.get("config"), dict):
                     self._hud.configure(payload["config"])
+                elif isinstance(payload, dict) and isinstance(payload.get("backend"), str):
+                    # Which brain is answering: the submenu title and the
+                    # HUD's own "Brain: …" line (the other hud payloads are
+                    # window-level and never reach the page).
+                    self._brain_item.title = f"Brain: {payload['backend']}"
+                    self._hud.push({"kind": kind, "payload": payload})
                 continue
             if kind == "settings":
                 # "open settings" / "show history" voice intents: the window
@@ -525,6 +555,43 @@ class VeronicaApp(rumps.App):
     def _speed(self, item: rumps.MenuItem) -> None:
         self._voice_action(("speed", SPEED_TITLES[item.title]))
 
+    def _pick_brain(self, item: rumps.MenuItem) -> None:
+        orch = getattr(self, "_orch", None)
+        name = next((n for n, i in self._brain_items.items() if i is item), None)
+        if orch is None or name is None:
+            return
+        # The orchestrator runs it as the "switch to codex" turn on its own
+        # loop (thread-safe from here); it says "Switched to Codex." or why not.
+        orch.request_brain_switch(name)
+        self._refresh_brain_menu()
+
+    def _refresh_brain_menu(self) -> None:
+        # On the 0.25 s _refresh timer: cheap, and fine before the
+        # orchestrator (or its switcher) exists. The availability check
+        # itself runs at most every BRAIN_CHECK_INTERVAL_S.
+        now = time.monotonic()
+        if now - self._brain_checked_at >= BRAIN_CHECK_INTERVAL_S:
+            self._brain_checked_at = now
+            self._brain_avail = {name: check_backend(name) for name in BACKENDS}
+        switcher = getattr(getattr(self, "_orch", None), "switcher", None)
+        active = getattr(getattr(switcher, "brain", None), "name", None)
+        preferred = getattr(switcher, "preferred", None)
+        standing_in = bool(getattr(switcher, "standing_in", False)) and preferred in BACKENDS
+        for name, item in self._brain_items.items():
+            label = BACKENDS[name].label
+            avail = self._brain_avail.get(name)
+            if avail is not None and not avail.ok:
+                title, callback = f"{label} ({avail.reason})", None
+            elif standing_in and name == active and name != preferred:
+                title, callback = f"{label} — standing in for {BACKENDS[preferred].label}", self._pick_brain
+            else:
+                title, callback = label, self._pick_brain
+            if item.title != title:
+                item.title = title
+            if item.callback is not callback:
+                item.set_callback(callback)
+            item.state = 1 if name == active else 0
+
     def _refresh_voice_menu(self) -> None:
         # Runs on the 0.25 s _refresh timer too, so it must stay cheap and
         # tolerate no orchestrator (startup) or no tts on it.
@@ -540,7 +607,7 @@ class VeronicaApp(rumps.App):
     # -- HUD orb click -> menu ---------------------------------------------
     def _build_popup_menu(self):
         """Return an NSMenu mirroring the menu bar items (About, Settings…,
-        Mute, HUD Mini/Full, Voice submenu, Start at Login, Quit). Prefers rumps' own live NSMenu
+        Mute, HUD Mini/Full, Voice and Brain submenus, Start at Login, Quit). Prefers rumps' own live NSMenu
         (`self.menu._menu`, already wired and kept in sync by rumps) so the
         popup always matches the real menu bar exactly; falls back to
         building a fresh one (with its own tiny target/action handler) when
@@ -596,6 +663,20 @@ class VeronicaApp(rumps.App):
         voice_parent = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Voice", None, "")
         voice_parent.setSubmenu_(voice_menu)
         menu.addItem_(voice_parent)
+
+        self._refresh_brain_menu()
+        brain_menu = AppKit.NSMenu.alloc().initWithTitle_("Brain")
+        for name, rumps_item in self._brain_items.items():
+            brain_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                rumps_item.title, "onPickBrain:", "")
+            brain_item.setTarget_(handler)
+            brain_item.setRepresentedObject_(name)
+            brain_item.setEnabled_(rumps_item.callback is not None)
+            brain_item.setState_(1 if rumps_item.state else 0)
+            brain_menu.addItem_(brain_item)
+        brain_parent = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(self._brain_item.title, None, "")
+        brain_parent.setSubmenu_(brain_menu)
+        menu.addItem_(brain_parent)
 
         login_item_ = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             self._login_item_item.title, "onToggleLogin:", "")

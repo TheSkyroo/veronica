@@ -720,3 +720,65 @@ def test_confirm_preapproved_pill():
         assert page.evaluate("getComputedStyle(document.querySelector('#tool .badge')).boxShadow") == "none"
 
         browser.close()
+
+
+@pytest.mark.live
+def test_brain_label_from_hud_backend_event():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        # empty until the first backend event: no blank line under the status row
+        assert page.inner_text("#brain") == ""
+        assert page.is_hidden("#brain")
+
+        page.evaluate("window.hud.push({kind:'hud', payload:{backend:'Codex'}})")
+        assert page.inner_text("#brain") == "Brain: Codex"
+        assert page.is_visible("#brain")
+
+        # a stand-in reads the same way the menu bar shows it
+        page.evaluate("window.hud.push({kind:'hud', payload:{backend:'Claude (for Codex)'}})")
+        assert page.inner_text("#brain") == "Brain: Claude (for Codex)"
+
+        # the window-level hud payloads (mode/config) and junk leave it alone
+        page.evaluate("window.hud.push({kind:'hud', payload:{mode:'mini'}})")
+        page.evaluate("window.hud.push({kind:'hud', payload:null})")
+        page.evaluate("window.hud.push({kind:'hud'})")
+        assert page.inner_text("#brain") == "Brain: Claude (for Codex)"
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_limit_decision_shows_as_a_tool_card():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Codex: usage limit — on Claude', decision:'limit'}})"
+        )
+        assert page.is_visible("#action")
+        assert page.inner_text("#tool-title") == "Codex: usage limit — on Claude"
+        assert page.inner_text("#tool .badge") == "⏳"
+        assert page.inner_text("#tool .pill").lower() == "limit"
+        assert "limit" in page.get_attribute("#tool .badge", "class")
+        assert page.is_hidden(".countdown")
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()

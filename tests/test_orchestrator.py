@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -4084,3 +4085,278 @@ async def test_just_do_it_as_a_confirm_answer_is_still_an_answer():
     r = await o.confirm("Open Chrome")
     assert r.outcome == "approved"
     assert Orchestrator.detect_preapproval("just do it") is False
+
+
+# -- brains: switch/which intents, usage-limit failover, gate server ------------
+
+from veronica.brain.backends import Availability
+from veronica.brain.backends.cli import LimitError
+
+
+class NamedBrain(Brain):
+    """The plain test Brain plus the `name` every real backend has, and the
+    interrupt/clear_trust calls a switch makes."""
+    def __init__(self, name="claude", replies=("Sure.", "Done.")):
+        super().__init__()
+        self.name = name
+        self.replies = list(replies)
+        self.interrupts = 0
+        self.trust_cleared = 0
+
+    async def ask(self, text):
+        self.asked.append(text)
+        for r in self.replies:
+            yield r
+
+    async def interrupt(self):
+        self.interrupts += 1
+
+    def clear_trust(self):
+        self.trust_cleared += 1
+
+
+class LimitBrain(NamedBrain):
+    """ask() reports a usage limit after saying nothing."""
+    async def ask(self, text):
+        self.asked.append(text)
+        raise LimitError("usage limit")
+        yield  # noqa: unreachable — makes this an async generator
+
+
+class FakeSwitcher:
+    def __init__(self, brain, avail=True, fail_to=None, clock=lambda: 1000.0):
+        self.brain, self.avail, self.fail_to = brain, avail, fail_to
+        self.switched, self.returned, self.failovers = [], 0, []
+        self.preferred = "claude"
+        self.standing_in = False
+        self.limited_until = {}
+        self._clock = clock
+        self.gate = None
+
+    async def switch(self, name, *, manual=True):
+        self.switched.append(name)
+        if not self.avail:
+            return Availability(False, "not installed",
+                                "Codex isn't installed — run npm i -g @openai/codex, then codex login.")
+        self.brain.name = name
+        return Availability(True, "ok", "")
+
+    async def maybe_return(self):
+        self.returned += 1
+
+    async def failover(self, reason):
+        self.failovers.append(reason)
+        if self.fail_to is not None:
+            self.brain = self.fail_to
+            self.standing_in = True
+            return self.fail_to.name
+        return None
+
+    def status_label(self):
+        from veronica.brain.switch import NO_BRAIN_LABEL
+        if self.brain.name == "none":
+            return NO_BRAIN_LABEL
+        label = self.brain.name.title()
+        return f"{label} (for {self.preferred.title()})" if self.standing_in else label
+
+
+def build_brain(stt_texts, **sw):
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=stt_texts)
+    o.brain = NamedBrain()
+    o.switcher = FakeSwitcher(o.brain, **sw)
+    return o, ev
+
+
+async def test_switch_intent_speaks_and_switches():
+    o, ev = build_brain(["switch to codex"])
+    await o.one_turn()
+    assert o.switcher.switched == ["codex"]
+    assert o.tts.said == ["Switched to Codex."]
+    assert o.brain.asked == []            # no brain round trip
+    # the running turn is cut and screen trust dropped before the switch
+    assert o.brain.interrupts == 1 and o.brain.trust_cleared == 1
+
+
+async def test_switch_intent_unavailable_speaks_hint_and_keeps_brain():
+    o, _ = build_brain(["use codex"], avail=False)
+    await o.one_turn()
+    assert o.tts.said == ["Codex isn't installed — run npm i -g @openai/codex, then codex login."]
+    assert o.brain.name == "claude"
+
+
+async def test_switch_intent_already_on_it():
+    o, _ = build_brain(["switch to claude"])
+    await o.one_turn()
+    assert o.switcher.switched == [] and o.tts.said == ["Already on Claude."]
+
+
+async def test_switch_to_preferred_while_standing_in_is_a_real_switch():
+    o, _ = build_brain(["back to claude"])
+    o.brain.name = "codex"
+    o.switcher.standing_in = True
+    await o.one_turn()
+    assert o.switcher.switched == ["claude"] and o.tts.said == ["Switched to Claude."]
+
+
+async def test_which_brain():
+    o, _ = build_brain(["which brain are you on"])
+    await o.one_turn()
+    assert o.tts.said == ["I'm on Claude."]
+
+
+async def test_which_brain_while_standing_in_says_when_it_returns():
+    o, _ = build_brain(["which brain are you on"])
+    o.brain.name = "codex"
+    o.switcher.standing_in = True
+    o.switcher.limited_until = {"claude": 1000.0 + 25 * 60}
+    await o.one_turn()
+    assert o.tts.said == ["I'm on Codex — Claude hit its limit, I'll try it again in 25 minutes."]
+
+
+async def test_which_brain_without_switcher():
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["which brain is this"])
+    await o.one_turn()
+    assert o.tts.said == ["I can only use Claude right now."]
+
+
+async def test_brain_turn_checks_for_return_first():
+    o, _ = build_brain(["tell me a joke"])
+    await o.one_turn()
+    assert o.switcher.returned == 1 and o.brain.asked == ["tell me a joke"]
+
+
+async def test_limit_error_fails_over_and_reruns_once():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it in tokyo"])
+    limited = LimitBrain("claude")
+    standin = NamedBrain("codex", replies=["It's 9 pm in Tokyo."])
+    o.brain = limited
+    o.switcher = FakeSwitcher(limited, fail_to=standin)
+    await o.one_turn()
+    assert o.switcher.failovers == ["usage limit"]
+    assert limited.asked == ["what time is it in tokyo"]
+    assert standin.asked == ["what time is it in tokyo"]
+    assert "It's 9 pm in Tokyo." in o.tts.said
+    assert ("tool", {"summary": "Claude: usage limit — on Codex", "decision": "limit"}) in ev
+
+
+async def test_limit_error_without_standin_stops_quietly():
+    """The switcher speaks the "no other brain is ready" line itself."""
+    o, _ = build_brain(["tell me a joke"])
+    o.brain = LimitBrain("claude")
+    o.switcher.brain = o.brain
+    await o.one_turn()
+    assert o.switcher.failovers == ["usage limit"]
+    assert o.tts.said == []
+
+
+async def test_limit_error_without_switcher_speaks_error():
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+    o.brain = LimitBrain("claude")
+    await o.one_turn()
+    assert o.tts.said == ["Claude hit its usage limit."]
+
+
+async def test_limit_chain_ends_after_the_backends_run_out():
+    """Every stand-in also hits its limit: one re-run per hop, then stop."""
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+    brains = [LimitBrain(n) for n in ("claude", "codex", "antigravity", "copilot")]
+
+    class ChainSwitcher(FakeSwitcher):
+        async def failover(self, reason):
+            self.failovers.append(reason)
+            i = brains.index(self.brain)
+            if i + 1 < len(brains):
+                self.brain = brains[i + 1]
+                return self.brain.name
+            return None
+
+    o.brain = brains[0]
+    o.switcher = ChainSwitcher(brains[0])
+    await o.one_turn()
+    assert [b.asked for b in brains] == [["tell me a joke"]] * 4
+    assert len(o.switcher.failovers) == 4
+    assert [p["summary"] for k, p in ev if k == "tool"] == [
+        "Claude: usage limit — on Codex", "Codex: usage limit — on Antigravity", "Antigravity: usage limit — on Copilot",
+    ]
+
+
+async def test_backend_changed_emits_hud_label():
+    o, _, ev = build3()
+    o.backend_changed("Codex (for Claude)", True)
+    assert ("hud", {"backend": "Codex (for Claude)"}) in ev
+
+
+async def test_brain_property_reads_through_the_switcher():
+    o, _, _ = build3()
+    a, b = NamedBrain("claude"), NamedBrain("codex")
+    o.switcher = FakeSwitcher(a)
+    assert o.brain is a
+    o.switcher.brain = b
+    assert o.brain is b
+    o.brain = a              # the setter keeps tests' `o.brain = ...` working
+    assert o.switcher.brain is a and o.brain is a
+
+
+async def test_request_brain_switch_runs_the_switch_turn():
+    o, _ = build_brain([])
+    o.request_brain_switch("codex")
+    await asyncio.sleep(0)
+    assert o.switcher.switched == ["codex"] and o.tts.said == ["Switched to Codex."]
+    assert o.player.resets == 1
+
+
+def _short_home(tmp_path, monkeypatch):
+    """AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path on macOS
+    is longer than that, so serve the gate socket from a relative home."""
+    monkeypatch.chdir(tmp_path)
+    return Settings(followup_window_s=0, confirm_listen_s=0, home=Path("home"))
+
+
+async def test_start_brain_starts_switcher_and_gate_server(tmp_path, monkeypatch):
+    from veronica.brain.gate import ToolGate
+
+    class StartingSwitcher(FakeSwitcher):
+        started = 0
+
+        async def start(self):
+            self.started += 1
+
+    o, _, ev = build3()
+    o.s = _short_home(tmp_path, monkeypatch)
+    brain = NamedBrain("claude")
+    o.switcher = StartingSwitcher(brain)
+    o.switcher.gate = ToolGate(o.s, o.confirm)
+    assert o.gate is o.switcher.gate
+    await o.start_brain()
+    try:
+        assert o.switcher.started == 1
+        assert o.s.gate_socket.exists()
+        assert ("hud", {"backend": "Claude"}) in ev
+    finally:
+        await o.stop_brain()
+    assert not o.s.gate_socket.exists()
+
+
+async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
+    from veronica.brain.gate import ToolGate
+
+    seen = {}
+
+    class W:
+        async def wait(self, threshold=None, suppress=None):
+            seen["socket_during_run"] = o.s.gate_socket.exists()
+            raise asyncio.CancelledError
+
+        def stop(self):
+            pass
+
+    o, _, ev = build3()
+    o.s = _short_home(tmp_path, monkeypatch)
+    o.wake = W()
+    o.brain = NamedBrain("claude")
+    o.brain.gate = ToolGate(o.s, o.confirm)   # no switcher: the brain's own gate is served
+    with pytest.raises(asyncio.CancelledError):
+        await o.run_forever()
+    assert seen["socket_during_run"] is True
+    assert not o.s.gate_socket.exists()
+    assert ("hud", {"backend": "Claude"}) in ev

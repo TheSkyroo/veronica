@@ -258,15 +258,30 @@
       ];
     },
     brain() {
-      return [
+      const b = section('brain');
+      const frag = [
         el('h2', {text: 'Brain'}),
-        el('p', {class: 'lead', text: 'Claude Code does the thinking; these shape how.'}),
-        settingRow('brain', 'effort'),
-        settingRow('brain', 'memory_enabled'),
-        settingRow('brain', 'brain_cwd', {wide: true}),
-        settingRow('brain', 'computer_trust_s'),
-        settingRow('brain', 'preapprove_by_wording'),
+        el('p', {class: 'lead', text: 'Which assistant does the thinking, and how. Each uses its own login.'}),
       ];
+      // What's answering right now: "Codex", or "Claude (for Codex)" while
+      // the preferred brain is out (usage limit / not logged in).
+      if (b.brain_label) frag.push(el('p', {class: 'lead', id: 'brain-label', text: 'Now on ' + b.brain_label + '.'}));
+      const brains = ((fields().brain_backend || {}).choices || []).map(c => [c, c.charAt(0).toUpperCase() + c.slice(1)]);
+      frag.push(settingRow('brain', 'brain_backend', {options: brains}));
+      frag.push(settingRow('brain', 'brain_failover'));
+      frag.push(settingRow('brain', 'brain_failover_order', {wide: true}));
+      frag.push(settingRow('brain', 'brain_limit_cooldown_min'));
+      frag.push(el('h3', {text: 'Their own tools'}));
+      frag.push(settingRow('brain', 'codex_native_tools'));
+      frag.push(settingRow('brain', 'antigravity_native_tools'));
+      frag.push(settingRow('brain', 'copilot_native_tools'));
+      frag.push(el('h3', {text: 'Thinking'}));
+      frag.push(settingRow('brain', 'effort'));
+      frag.push(settingRow('brain', 'memory_enabled'));
+      frag.push(settingRow('brain', 'brain_cwd', {wide: true}));
+      frag.push(settingRow('brain', 'computer_trust_s'));
+      frag.push(settingRow('brain', 'preapprove_by_wording'));
+      return frag;
     },
     history() {
       return [history.view()];

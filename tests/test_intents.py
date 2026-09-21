@@ -428,3 +428,30 @@ def test_hinglish_settings_phrases_count_as_hinglish():
 def test_hud_reset_hinglish_phrases_count_as_hinglish():
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES
     assert {"kahan ho", "wapas aao"} <= HINGLISH_INTENT_PHRASES
+
+
+# -- brains: "switch to codex" / "which brain are you on" ------------------------
+from veronica.brain.intents import match_brain_intent
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("switch to codex", ("switch", "codex")), ("use copilot", ("switch", "copilot")),
+    ("switch brain to antigravity", ("switch", "antigravity")), ("change to claude", ("switch", "claude")),
+    ("switch to the codex brain", ("switch", "codex")), ("Veronica, switch to Codex please.", ("switch", "codex")),
+    ("back to claude", ("switch", "claude")), ("go back to claude", ("switch", "claude")),
+    ("codex pe switch karo", ("switch", "codex")), ("copilot use karo", ("switch", "copilot")),
+    ("claude pe wapas jao", ("switch", "claude")), ("antigravity chalao", ("switch", "antigravity")),
+    ("which brain are you on", ("which", None)), ("which model are you using", ("which", None)),
+    ("who am i talking to", ("which", None)), ("which brain is this", ("which", None)),
+    ("kaunsa brain hai", ("which", None)),
+    ("use qwen please", None), ("use gemini", None), ("switch to spanish", None),
+    ("use a british voice", None), ("open codex", None), ("use codex to write a poem", None),
+    ("", None),
+])
+def test_match_brain_intent(text, expected):
+    assert match_brain_intent(text) == expected
+
+
+def test_hinglish_which_brain_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"kaunsa brain hai", "kaun sa model hai"} <= HINGLISH_INTENT_PHRASES

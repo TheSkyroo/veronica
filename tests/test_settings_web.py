@@ -32,7 +32,10 @@ def fixture_state(**over) -> dict:
                       "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
         "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
-                  "preapprove_by_wording": True},
+                  "preapprove_by_wording": True, "brain_backend": "codex", "brain_failover": True,
+                  "brain_failover_order": "codex,antigravity,claude,copilot", "brain_limit_cooldown_min": 60,
+                  "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
+                  "brain_label": "Claude (for Codex)"},
         "about": {"version": "0.1.0", "build": "a517483", "built_at": "2026-09-17T10:00:00+05:30", "dirty": True,
                   "describe": "Veronica 0.1.0 (a517483, 17 Sep)", "update": {"available": False, "detail": ""},
                   "updating": False, "log_path": "/tmp/veronica.log", "can_restart": True},
@@ -351,4 +354,37 @@ def test_forget_error_is_shown_and_about_status_resets():
         page.evaluate("s => window.settings.state(s)",
                       fixture_state(about={"update": {"available": True, "detail": "The update failed, check the log."}}))
         assert page.inner_text("#pane .about .status") == "Checking…"  # unchanged detail: reply text stays
+        browser.close()
+
+
+@pytest.mark.live
+def test_brain_tab_renders_backend_rows_and_label():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('brain')")
+        assert page.inner_text("#brain-label") == "Now on Claude (for Codex)."
+        keys = page.evaluate("Array.from(document.querySelectorAll('#pane .row')).map(r => r.dataset.key)")
+        assert keys[:4] == ["brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min"]
+        assert {"codex_native_tools", "antigravity_native_tools", "copilot_native_tools", "effort"} <= set(keys)
+        # the choice shows capitalised labels for the backend names
+        assert page.input_value("#pane select[data-key=brain_backend]") == "codex"
+        labels = page.evaluate("Array.from(document.querySelectorAll('#pane select[data-key=brain_backend] option')).map(o => o.textContent)")
+        assert labels == ["Codex", "Antigravity", "Claude", "Copilot"]
+        assert page.is_checked("#pane input[data-key=codex_native_tools]")
+        assert not page.is_checked("#pane input[data-key=copilot_native_tools]")
+
+        page.select_option("#pane select[data-key=brain_backend]", "claude")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "set" and msg["args"] == {"section": "brain", "key": "brain_backend", "value": "claude"}
+        # refused (not logged in): the hint shows and the control reverts
+        reply(page, msg["id"], {"ok": False, "message": "Claude isn't installed — run npm i -g @anthropic-ai/claude-code, then claude.", "restart_required": False})
+        assert page.inner_text("#pane .row[data-key=brain_backend] .status").startswith("Claude isn't installed")
+        assert page.input_value("#pane select[data-key=brain_backend]") == "codex"
+
+        # no label line when the orchestrator hasn't reported one yet
+        page.evaluate("s => window.settings.state(s)", fixture_state(brain={"brain_label": ""}))
+        page.evaluate("window.settings.select('brain')")
+        assert page.locator("#brain-label").count() == 0
         browser.close()
