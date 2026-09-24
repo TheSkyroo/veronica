@@ -861,21 +861,233 @@ class ConfirmDuringBargeBrain:
         pass
 
 
-async def test_barge_during_confirm_stops_capture():
-    o, states, ev = build3(rec_pcms=[], stt_texts=["first"])
-    rec = StoppableRec([np.zeros(1, np.int16), StoppableRec.BLOCK, None])
-    o.recorder = rec
-    o.wake = BargeWake(barge_on_call=1)
-    o.brain = ConfirmDuringBargeBrain(o)
-    await o.one_turn()
-    assert rec.stops == 1                              # in-flight confirm capture was stopped
-    # confirm() (awaited inside the turn's own producer task here) is torn
-    # down with the turn — "declined", never left orphaned in capture(),
-    # and the brain never gets to continue past it ("Second." unreached).
-    assert o.brain.results == []
-    assert ("tool", {"summary": "Bash: rm x", "decision": "declined"}) in ev
+# -- speech during a pending confirmation answers it ---------------------------
+#
+# The confirm answer window is the one stretch of a turn where a barge must
+# NOT tear the turn down: the user speaking there is answering "Run X?", and
+# the same words are already going into confirm()'s own capture. These
+# fixtures land a wake barge (or a PTT press) exactly inside that window.
+
+
+class ConfirmAnswerRec:
+    """capture() #`confirm_call` is confirm()'s answer window: it fires
+    `trigger` (a wake barge or a PTT press) and only then returns the answer
+    PCM, so the trigger is guaranteed to land while the capture is in flight.
+    stop() mirrors the real recorder — a teardown unblocks it with None, which
+    is how the buggy behaviour shows up as a lost answer."""
+
+    def __init__(self, pcms, trigger, confirm_call=2):
+        self.pcms = list(pcms)
+        self.trigger = trigger
+        self.confirm_call = confirm_call
+        self.calls = 0
+        self.stops = 0
+        self.hold_calls = []
+        self._stopped = asyncio.Event()
+
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+        self.calls += 1
+        self.hold_calls.append(hold)
+        if self.calls == self.confirm_call:
+            self.trigger()
+            # Let the orchestrator act on the trigger. If it tears the turn
+            # down, stop() lands here and we return nothing (the real
+            # recorder's behaviour); if it routes the trigger to this
+            # capture, the wait times out and the answer comes back.
+            try:
+                await asyncio.wait_for(self._stopped.wait(), 0.2)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+            else:
+                return None
+        return self.pcms.pop(0) if self.pcms else None
+
+    def has_speech(self, pcm):
+        return False
+
+    def stop(self):
+        self.stops += 1
+        self._stopped.set()
+
+    def finish(self):
+        pass
+
+
+class ConfirmWindowWake:
+    """wait() parks on a queue: fire() hands it one True, stop() one False.
+    A listener re-armed after a routed barge therefore parks on an empty
+    queue instead of picking up a stale result."""
+
+    def __init__(self):
+        self.calls = 0
+        self.stops = 0
+        self._q = asyncio.Queue()
+
+    def fire(self):
+        self._q.put_nowait(True)
+
+    async def wait(self, threshold=None, suppress=None):
+        self.calls += 1
+        return await self._q.get()
+
+    def stop(self):
+        self.stops += 1
+        self._q.put_nowait(False)
+
+    def take_preroll(self):
+        return np.zeros(0, dtype=np.int16)
+
+
+class ConfirmOutcomeBrain:
+    """Awaits orch.confirm() mid-stream (as the SDK's can_use_tool callback
+    would) and keeps the full ConfirmResult, not just its truthiness."""
+
+    def __init__(self, orch):
+        self.orch = orch
+        self.results = []
+        self.interrupts = 0
+        self.trust_clears = 0
+        self.pending_redirect = None
+
+    async def ask(self, text):
+        yield "First."
+        self.results.append(await self.orch.confirm("Bash: rm x"))
+        yield "Second."
+
+    async def interrupt(self):
+        self.interrupts += 1
+
+    def clear_trust(self):
+        self.trust_clears += 1
+
+
+def _confirm_window_setup(answer, *, ptt=False):
+    """A turn whose brain confirms mid-stream, with the barge/PTT trigger
+    wired to fire from inside confirm()'s answer capture."""
+    o, states, ev = build3(rec_pcms=[], stt_texts=["do the thing", answer])
+    wake = ConfirmWindowWake()
+    o.wake = wake
+    o.ready = True   # ptt_start() is ignored before warmup
+    o.recorder = ConfirmAnswerRec(
+        [np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        trigger=o.ptt_start if ptt else wake.fire,
+    )
+    o.brain = ConfirmOutcomeBrain(o)
+    return o, states, ev
+
+
+async def test_barge_during_confirm_answers_it_instead_of_cancelling():
+    """The reported bug: the user's "yes" tripped the barge listener, the
+    turn was torn down and the confirm came back declined. It must now be
+    classified as the answer it is, with the turn running on."""
+    o, states, ev = _confirm_window_setup("yes")
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert [r.outcome for r in o.brain.results] == ["approved"]
+    assert o.brain.results[0].heard == "yes"
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "allowed"]
+    # the turn was never cancelled: the brain ran on past the confirm, and
+    # nothing interrupted it or dropped its screen-control trust.
+    assert o.tts.said == ["First.", "Run Bash: rm x?", "Second."]
+    assert o.brain.interrupts == 0 and o.brain.trust_clears == 0
+    assert o.recorder.stops == 0
+
+
+async def test_barge_during_confirm_with_new_request_redirects():
+    o, _, ev = _confirm_window_setup("open it in Safari instead")
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert [r.outcome for r in o.brain.results] == ["other"]
+    assert o.brain.results[0].heard == "open it in Safari instead"
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "redirected"]
+
+
+async def test_barge_during_confirm_with_no_denies():
+    o, _, ev = _confirm_window_setup("no")
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert [r.outcome for r in o.brain.results] == ["denied"]
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "declined"]
+
+
+async def test_ptt_during_confirm_answers_it_and_does_not_leak():
+    """Pressing push-to-talk while the confirmation is listening answers the
+    confirmation; it must not start a hold capture or a new turn, and the
+    press must not survive into the follow-up window."""
+    o, states, ev = _confirm_window_setup("yes", ptt=True)
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert [r.outcome for r in o.brain.results] == ["approved"]
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["ask", "allowed"]
+    assert not o._ptt_event.is_set()          # consumed, so the follow-up is a normal one
+    assert not any(o.recorder.hold_calls)     # no hold-mode (PTT) capture was ever opened
+    assert o.recorder.calls == 3              # listen, confirm answer, follow-up — no extra turn
+    assert o.brain.interrupts == 0
+
+
+async def test_barge_after_a_routed_confirm_still_tears_the_turn_down():
+    """The listener re-armed after a routed barge must be a live one: a
+    second barge, once the answer window has closed, interrupts the turn as
+    usual (and the re-armed wait() must not resolve off a stale result)."""
+    release = asyncio.Event()
+    o, states, ev = _confirm_window_setup("yes")
+    wake = o.wake
+
+    class SecondBargePlayer(Player):
+        async def play(self, s):
+            await super().play(s)
+            if self.played == 4:   # chime, "First.", "Run Bash: rm x?", "Second."
+                wake.fire()
+                await release.wait()
+
+        def stop(self):
+            super().stop()
+            release.set()
+
+    o.player = SecondBargePlayer()
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert [r.outcome for r in o.brain.results] == ["approved"]   # first barge was the answer
+    assert wake.calls == 2                                        # listener was re-armed
+    assert o.brain.interrupts == 1                                # second barge tore the turn down
+    assert "listening" in states[states.index("confirming") + 1:]
+
+
+async def test_barge_before_confirm_window_still_tears_the_turn_down():
+    """The escape hatch must keep working: a barge that lands while the reply
+    is still being spoken — before confirm() opens its answer window — still
+    cancels the turn, interrupts the brain and re-listens. (The other two
+    pre-window moments, waiting on _speech_lock and speaking the prompt
+    itself, have their own tests above.)"""
+    release = asyncio.Event()
+    wake = ConfirmWindowWake()
+
+    class BargingPlayer:
+        """Fires the barge while the turn's first sentence is playing, and
+        unblocks that play() when the teardown stops it."""
+        def __init__(self):
+            self.played = 0
+            self.stops = 0
+
+        async def play(self, s):
+            self.played += 1
+            if self.played == 2:   # 1 = the wake chime, 2 = "First."
+                wake.fire()
+                await release.wait()
+
+        def stop(self):
+            self.stops += 1
+            release.set()
+
+        def reset(self):
+            pass
+
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["do the thing"])
+    o.wake = wake
+    o.player = BargingPlayer()
+    o.brain = ConfirmOutcomeBrain(o)
+    await asyncio.wait_for(o.one_turn(), 5)
+    assert o.brain.results == []                       # confirm() never got to ask
+    # confirm() bailed on the barge before speaking its prompt, so the card
+    # never went to "ask" — only the closing "declined".
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["declined"]
+    assert o.brain.interrupts == 1 and o.brain.trust_clears == 1
     assert "listening" in states[states.index("speaking") + 1:]     # re-listened after barge
-    assert o.tts.said == ["First.", "Run Bash: rm x?"]
 
 
 async def test_barge_during_confirm_prompt_aborts_confirm():
@@ -2212,11 +2424,12 @@ async def test_ptt_during_initial_listen_switches_to_hold_capture():
     await t
 
 
-async def test_ptt_while_confirming_declines_confirm_then_runs_ptt_turn():
-    """PTT during a confirmation prompt is a barge (confirm -> declined),
-    never the answer to the question."""
-    o, states = build_ptt(stt_texts=["do the thing", "ptt text"])
-    o.recorder = SlowRec([np.zeros(1, np.int16), None, np.zeros(1, np.int16), None])
+async def test_ptt_while_confirming_answers_the_confirm():
+    """PTT during a confirmation is the user answering the question (key
+    down, then "yes"), not a barge: the press is consumed, the yes/no
+    capture is left open to hear the answer, and no second turn starts."""
+    o, states = build_ptt(stt_texts=["do the thing", "yes"])
+    o.recorder = SlowRec([np.zeros(1, np.int16), np.zeros(1, np.int16), None])
     results = []
     interrupts = []
 
@@ -2243,21 +2456,21 @@ async def test_ptt_while_confirming_declines_confirm_then_runs_ptt_turn():
     assert o.recorder.active == 1 and o.recorder.hold_calls == [False, False]
     o.ptt_start()
     await _settle()
-    assert o.recorder.stop_calls == 1              # the yes/no capture was unblocked, not orphaned
-    # confirm() is torn down with the turn: declined, and the brain never
-    # continues past it (results stays empty — "Okay." for "do the thing"
-    # is never reached)
-    assert results == []
-    assert ("tool", {"summary": "Bash: rm x", "decision": "declined"}) in o.events
-    assert interrupts == [True]
-    assert o.recorder.hold_calls == [False, False, True]
-    assert o.recorder.max_active == 1
+    assert o.recorder.stop_calls == 0              # the yes/no capture was left listening
+    assert not o._ptt_event.is_set()               # press consumed: it can't leak onwards
+    assert o.recorder.hold_calls == [False, False]  # no hold-mode capture was opened
+    assert interrupts == []                        # the turn was never torn down
     o.ptt_end()
+    o.recorder.finish()                            # the answer capture returns
     await _settle()
-    assert o.brain.asked == ["do the thing", "ptt text"]
-    o.recorder.stop()
+    assert [r.outcome for r in results] == ["approved"]
+    assert ("tool", {"summary": "Bash: rm x", "decision": "allowed"}) in o.events
+    assert o.brain.asked == ["do the thing"]       # no second (PTT) turn
+    assert o.recorder.max_active == 1
+    o.recorder.stop()                              # end the follow-up window
     await t
     assert o.state == "idle"
+    assert not o._ptt_event.is_set() and not o._ptt_held
 
 
 async def test_ptt_quick_tap_released_during_chime_leaves_nothing_stuck():

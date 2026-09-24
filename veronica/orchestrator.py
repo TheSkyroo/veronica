@@ -343,6 +343,11 @@ class Orchestrator:
         # the follow-up window, or anything else.
         self._capture_in_flight = False
         self._barged = False
+        # True only while confirm() has the mic open for its yes/no. Inside
+        # that window the user speaking IS the answer, so _run_with_barge
+        # must route a wake barge / PTT press to the capture instead of
+        # tearing the turn down (which used to turn "yes" into a decline).
+        self._confirm_listening = False
         self._now_speaking = ""
         # Brain turns are numbered per handle_text call; the brain gets the
         # id (begin_turn) so a pre-approval can be pinned to one turn.
@@ -1301,7 +1306,17 @@ class Orchestrator:
                     "summary": summary, "detail": detail, "decision": "ask",
                     "timeout_ms": self.s.confirm_listen_s * 1000,
                 })
-                pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
+                # From here until the capture returns, whatever the user says
+                # belongs to this question: _run_with_barge stops treating
+                # speech (or a PTT press) as a barge and lets it land in the
+                # capture below, so classify_answer — still the only thing
+                # that decides — sees it. Cleared in finally so an error
+                # here can't leave barge-in disabled for the rest of the turn.
+                self._confirm_listening = True
+                try:
+                    pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
+                finally:
+                    self._confirm_listening = False
                 heard = await self.stt.atranscribe(pcm) if pcm is not None else None
                 if self._barged:
                     # barged while we were listening for / transcribing the
@@ -1359,7 +1374,13 @@ class Orchestrator:
         talk signal. Returns None if the turn ran to completion, "wake" if
         the wake word interrupted it, or "ptt" if the push-to-talk key did
         (in which case the caller should do a hold-mode capture instead of
-        listening for a follow-up)."""
+        listening for a follow-up).
+
+        One exception to all of that: while confirm() has the mic open for
+        its yes/no (_confirm_listening), neither trigger is a barge — the
+        user is answering "Run X?", and the answer is already going into
+        that capture. Such a trigger is dropped, a fresh listener/waiter is
+        armed in its place, and the turn keeps running."""
         turn = asyncio.ensure_future(coro)
         listener = asyncio.create_task(
             self.wake.wait(threshold=self.s.barge_threshold, suppress=self._suppress_text)
@@ -1370,9 +1391,24 @@ class Orchestrator:
             while True:
                 done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                 if ptt in done:
-                    log.info("ptt barge-in")
-                    await self._barge_teardown(turn)
-                    return "ptt"
+                    if self._confirm_listening:
+                        # The key went down to answer "Run X?", not to start a
+                        # new turn: tearing down here would cancel the turn and
+                        # throw the spoken answer away. Consume the press (clear
+                        # the event, so it can't leak into the follow-up window
+                        # or the next turn's _capture_or_ptt) and let the confirm
+                        # capture — already open and recording — take the words
+                        # that follow it. Then re-arm the waiter for the rest of
+                        # the turn.
+                        log.info("barge during confirm: routed to the answer")
+                        self._ptt_event.clear()
+                        pending.discard(ptt)
+                        ptt = asyncio.ensure_future(self._ptt_event.wait())
+                        pending.add(ptt)
+                    else:
+                        log.info("ptt barge-in")
+                        await self._barge_teardown(turn)
+                        return "ptt"
                 if listener in done:
                     pending.discard(listener)
                     if listener.exception() is not None:
@@ -1385,11 +1421,28 @@ class Orchestrator:
                         except Exception:
                             log.exception("barge listener failed")
                     elif listener.result():
-                        log.info("barge-in")
-                        await self._barge_teardown(turn)
-                        return "wake"
-                    # listener resolved False (a stop() consumed) — keep
-                    # waiting on the turn (and PTT).
+                        if self._confirm_listening:
+                            # The wake engine heard the user answering the
+                            # confirmation. The very same speech is going into
+                            # confirm()'s capture, so drop this trigger and let
+                            # classify_answer decide instead of cancelling the
+                            # turn. Re-arm a fresh listener so a barge *after*
+                            # the answer window still works — deliberately
+                            # without stop()ing the resolved-True one, which
+                            # would poison the next wait() with a spurious
+                            # immediate False.
+                            log.info("barge during confirm: routed to the answer")
+                            listener = asyncio.create_task(
+                                self.wake.wait(threshold=self.s.barge_threshold, suppress=self._suppress_text)
+                            )
+                            pending.add(listener)
+                        else:
+                            log.info("barge-in")
+                            await self._barge_teardown(turn)
+                            return "wake"
+                    # listener resolved False (a stop() consumed), or its True
+                    # was routed to a pending confirm — keep waiting on the
+                    # turn (and PTT).
                     if turn not in done:
                         continue
                 if turn in done:
