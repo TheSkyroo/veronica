@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     # memory
     memory_enabled: bool = True
     memory_recent_turns: int = 6
+    # How many remembered facts the system prompt carries, most-recently-used
+    # first; the block is still byte-capped on top of this (brain/prompts.py).
+    memory_facts_max: int = 40
 
     # push-to-talk
     ptt_enabled: bool = True
@@ -251,6 +254,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
+    "memory_facts_max": EditableField(
+        "int", "Facts she carries into a new conversation",
+        "The most recently used facts go first; the rest stay in memory and still come back "
+        "via her memory tools. 0 = none.",
+        min=0, max=200, restart=False,
+    ),
     "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
     "brain_session_max_age_h": EditableField(
         "int", "Start a fresh conversation after (hours)",

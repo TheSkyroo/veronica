@@ -266,7 +266,7 @@ class LocalBrain:
         facts: list[str] = []
         recent: list[tuple[str, str]] = []
         if self._memory is not None and self.s.memory_enabled:
-            facts = [text for _id, _ts, text in self._memory.facts()]
+            facts = self._memory.facts_for_prompt(self.s.memory_facts_max)
             recent = [(heard, reply) for _ts, heard, reply in self._memory.recent(self.s.memory_recent_turns)]
         return system_prompt(dt.date.today(), facts, recent) + (
             " You are running offline on this Mac, so you cannot search the web or open "

@@ -291,6 +291,7 @@
       frag.push(el('h3', {text: 'Thinking'}));
       frag.push(settingRow('brain', 'effort'));
       frag.push(settingRow('brain', 'memory_enabled'));
+      frag.push(settingRow('brain', 'memory_facts_max'));
       frag.push(settingRow('brain', 'brain_cwd', {wide: true}));
       frag.push(settingRow('brain', 'brain_session_max_age_h'));
       frag.push(settingRow('brain', 'computer_trust_s'));

@@ -1,5 +1,6 @@
 import pytest
 
+from veronica.memory.store import infer_kind
 from veronica.tools import memory_tools
 
 
@@ -14,12 +15,24 @@ class FakeStore:
         self._next_id = 1
 
     def add_fact(self, t):
+        return self.remember(t)[0]
+
+    def remember(self, t):
+        replaced = any(f[2] == t for f in self._facts)
+        if replaced:
+            return next(f[0] for f in self._facts if f[2] == t), True
         self._facts.append((self._next_id, "2026-09-16T00:00:00", t))
         self._next_id += 1
-        return self._next_id - 1
+        return self._next_id - 1, False
 
     def facts(self):
         return list(self._facts)
+
+    def facts_by_kind(self):
+        grouped = {}
+        for _id, _ts, t in self._facts:
+            grouped.setdefault(infer_kind(t), []).append(t)
+        return grouped
 
     def delete_fact_matching(self, text_):
         before = len(self._facts)
@@ -56,7 +69,7 @@ async def test_fact_add_and_list():
     assert not res.get("is_error")
     assert "likes tea" in text(res)
     res = await memory_tools.facts_list.handler({})
-    assert text(res) == "likes tea"
+    assert text(res) == "Preferences:\n- likes tea"
 
 
 async def test_fact_add_requires_text():
@@ -121,3 +134,19 @@ def test_server_and_names():
     assert set(memory_tools.MEMORY_TOOL_NAMES) == {
         "recall", "facts_list", "fact_add", "fact_delete",
     }
+
+
+async def test_facts_list_groups_by_kind():
+    memory_tools.bind(FakeStore())
+    await memory_tools.fact_add.handler({"text": "likes tea"})
+    await memory_tools.fact_add.handler({"text": "the office is in Bandra"})
+    assert text(await memory_tools.facts_list.handler({})) == (
+        "Preferences:\n- likes tea\nPlaces:\n- the office is in Bandra"
+    )
+
+
+async def test_fact_add_says_when_it_replaced_one():
+    memory_tools.bind(FakeStore())
+    await memory_tools.fact_add.handler({"text": "likes tea"})
+    res = await memory_tools.fact_add.handler({"text": "likes tea"})
+    assert text(res) == "Updated: likes tea"

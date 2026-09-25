@@ -12,21 +12,22 @@ def _truncate_chars(s: str, max_chars: int) -> str:
 
 
 def _select_facts(facts: list[str], max_bytes: int, header_bytes: int) -> list[str]:
-    """Keep the newest facts (from the end of `facts`, which is oldest-
-    first) whose formatted "- fact" lines fit within `max_bytes` after
-    `header_bytes`, at whole-fact granularity — never cuts a fact mid-line.
-    The newest fact is always kept even if it alone exceeds the budget."""
+    """Keep the facts from the front of `facts` — which arrives most-
+    recently-used first (MemoryStore.facts_for_prompt) — whose formatted
+    "- fact" lines fit within `max_bytes` after `header_bytes`, at whole-
+    fact granularity: never cuts a fact mid-line, and what falls off the end
+    is what she has gone longest without using. The first fact is always
+    kept even if it alone exceeds the budget."""
     budget = max(0, max_bytes - header_bytes)
     selected: list[str] = []
     total = 0
-    for f in reversed(list(facts)):
+    for f in facts:
         line_bytes = len(f"- {f}".encode("utf-8"))
         sep_bytes = 1 if selected else 0  # the "\n" joining this line in
         if selected and total + sep_bytes + line_bytes > budget:
             break
         total += sep_bytes + line_bytes
         selected.append(f)
-    selected.reverse()  # oldest-first among the kept facts
     return selected
 
 
@@ -59,7 +60,7 @@ def _select_recent(
 
 def system_prompt(
     today: dt.date,
-    facts: list[str] = (),
+    facts: list[str] = (),   # most-recently-used first
     recent: list[tuple[str, str]] = (),
 ) -> str:
     base = (

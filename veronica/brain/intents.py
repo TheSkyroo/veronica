@@ -279,6 +279,13 @@ _FORGET_RE = re.compile(r"^forget\s+(?:that\s+)?(.+)$", re.IGNORECASE)
 # instead of stashing the literal question text as a fact.
 _REMEMBER_QUESTION_LEADS = frozenset({"when", "what", "how", "if", "why"})
 
+# "forget everything about the office" is a sweep, not one fact: it gets its
+# own kind so the orchestrator deletes by topic and says how many went.
+_FORGET_TOPIC_RE = re.compile(
+    r"^(?:everything|anything|all)\s+(?:about|to do with|related to|regarding)\s+(.+)$",
+    re.IGNORECASE,
+)
+
 
 def match_memory_intent(text: str) -> tuple[str, str] | None:
     """Match "remember (that) X" / "forget (that) X" against a heard
@@ -286,8 +293,9 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
     normalized string), this carries a payload, so it preserves the
     original casing/punctuation of X rather than normalizing it — only an
     optional leading "veronica"/"hey veronica" and a trailing sentence-ending
-    period are stripped. Returns ("remember", X) or ("forget", X), or None
-    if the utterance doesn't start with "remember"/"forget"."""
+    period are stripped. Returns ("remember", X), ("forget", X) or —
+    for "forget everything about X" — ("forget_topic", X), or None if the
+    utterance doesn't start with "remember"/"forget"."""
     raw = (text or "").strip()
     raw = _MEMORY_LEAD_RE.sub("", raw, count=1).strip()
     for kind, pattern in (("remember", _REMEMBER_RE), ("forget", _FORGET_RE)):
@@ -298,6 +306,10 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
                 return None
             if kind == "remember" and arg.split()[0].lower() in _REMEMBER_QUESTION_LEADS:
                 return None
+            if kind == "forget":
+                topic = _FORGET_TOPIC_RE.match(arg)
+                if topic:
+                    return ("forget_topic", topic.group(1).strip())
             return (kind, arg)
     return None
 

@@ -64,6 +64,16 @@ _TRAILING_STOP_DICTATION_RE = re.compile(
     r"[\s,.;!?]*\b(?:stop|end)\s+dictat(?:ion|ing)\b[\s.!?]*$", re.IGNORECASE
 )
 
+# Small counts read better spoken as words ("Forgot three things") than as
+# digits; past ten the digits are fine.
+_COUNT_WORDS = ("no", "one", "two", "three", "four", "five",
+                "six", "seven", "eight", "nine", "ten")
+
+
+def _count_word(n: int) -> str:
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else str(n)
+
+
 @dataclass(frozen=True)
 class ConfirmResult:
     """What confirm() heard: "approved" (a yes), "denied" (a no, or
@@ -855,7 +865,14 @@ class Orchestrator:
             if not getattr(self.brain, "pending_redirect", None):
                 await self.say("I have nothing to say to that.")
         elif self.store is not None and self.s.memory_enabled:
-            self.store.add_turn(text, " ".join(spoken))
+            reply = " ".join(spoken)
+            self.store.add_turn(text, reply)
+            # The brain never says which facts it leaned on, so infer it from
+            # the words that came out (MemoryStore.touch_facts_used) and let
+            # that order the facts block. Done here, after the last sentence
+            # is spoken, so the scan can never sit between a sentence and the
+            # speaker.
+            self.store.touch_facts_used(reply)
         return spoken
 
     # Deliberately tiny: the acknowledgement must read as "heard you, still
@@ -2042,9 +2059,19 @@ class Orchestrator:
                 kind, arg = mem
                 self.player.reset()
                 if kind == "remember":
+                    # A rewording of something she already has replaces it
+                    # (MemoryStore.remember); say which happened, so "no,
+                    # the OTHER thing" is obviously not what she heard.
+                    replaced = False
                     if self.store is not None:
-                        self.store.add_fact(arg)
-                    await self.say("Got it.")
+                        _id, replaced = self.store.remember(arg)
+                    await self.say("Updated that." if replaced else "Got it.")
+                elif kind == "forget_topic":
+                    n = self.store.delete_facts_about(arg) if self.store is not None else 0
+                    await self.say(
+                        f"Forgot {_count_word(n)} {'thing' if n == 1 else 'things'} about {arg}."
+                        if n else f"I didn't have anything about {arg}."
+                    )
                 else:
                     n = self.store.delete_fact_matching(arg) if self.store is not None else 0
                     await self.say("Forgotten." if n else "I didn't have that.")

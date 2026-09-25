@@ -54,7 +54,7 @@ def test_system_prompt_injection_is_wrapped_and_labeled():
     assert p.index("<recent_turns>") < p.index("Recent conversation:") < p.index("</recent_turns>")
 
 
-def test_system_prompt_facts_capped_keeps_newest_whole_facts():
+def test_system_prompt_facts_capped_keeps_most_recently_used_whole_facts():
     facts = [f"fact number {i} " + "x" * 50 for i in range(200)]
     p = system_prompt(dt.date(2026, 9, 15), facts=facts)
     start = p.index("<user_facts>")
@@ -63,8 +63,8 @@ def test_system_prompt_facts_capped_keeps_newest_whole_facts():
     # small, fixed wrapper overhead beyond the capped body is fine; the
     # capped body itself must respect the budget.
     assert len(block.encode("utf-8")) <= FACTS_CAP_BYTES + 200
-    assert facts[-1] in p          # newest kept
-    assert facts[0] not in p       # oldest dropped
+    assert facts[0] in p           # most recently used kept
+    assert facts[-1] not in p      # longest unused dropped
     # nothing was cut mid-line: every fact line present is the full,
     # untruncated original fact text
     for line in block.splitlines():
@@ -283,6 +283,9 @@ class FakeMemory:
 
     def facts(self):
         return self._facts
+
+    def facts_for_prompt(self, limit):
+        return [text for _id, _ts, text in self._facts][:limit]
 
     def recent(self, n):
         return self._recent[-n:]

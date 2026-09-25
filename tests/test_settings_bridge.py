@@ -213,7 +213,7 @@ def test_state_has_every_section_and_key(h):
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                                     "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                                     "unread_enabled", "unread_time"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
+    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",

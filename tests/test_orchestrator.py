@@ -1902,18 +1902,34 @@ class FakeStore:
     def __init__(self):
         self.turns = []
         self.facts = []
+        self.used = []
 
     def add_turn(self, heard, reply):
         self.turns.append((heard, reply))
 
     def add_fact(self, text):
-        self.facts.append(text)
-        return len(self.facts)
+        return self.remember(text)[0]
+
+    def remember(self, text):
+        replaced = text in self.facts
+        if not replaced:
+            self.facts.append(text)
+        return (self.facts.index(text) + 1, replaced)
 
     def delete_fact_matching(self, text):
         before = len(self.facts)
         self.facts = [f for f in self.facts if text.lower() not in f.lower()]
         return before - len(self.facts)
+
+    def delete_facts_about(self, topic):
+        words = set(topic.lower().split())
+        before = len(self.facts)
+        self.facts = [f for f in self.facts if not (words & set(f.lower().split()))]
+        return before - len(self.facts)
+
+    def touch_facts_used(self, spoken):
+        self.used.append(spoken)
+        return 0
 
 
 async def test_handle_text_logs_turn_when_store_present():
@@ -1987,6 +2003,44 @@ async def test_forget_intent_no_match_says_didnt_have_that():
     o.store = store
     await o.one_turn()
     assert "I didn't have that." in o.tts.said
+
+
+async def test_remember_intent_says_updated_when_it_replaced_a_fact():
+    store = FakeStore()
+    store.facts = ["I like tea"]
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == ["I like tea"]
+    assert "Updated that." in o.tts.said
+
+
+async def test_forget_topic_intent_deletes_by_topic_and_counts():
+    store = FakeStore()
+    store.facts = ["the office wifi is slow", "office lunch is at one", "I like tea"]
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None],
+                 stt_texts=["forget everything about the office"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == ["I like tea"]
+    assert "Forgot two things about the office." in o.tts.said
+
+
+async def test_forget_topic_intent_with_nothing_to_forget():
+    store = FakeStore()
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None],
+                 stt_texts=["forget everything about the office"])
+    o.store = store
+    await o.one_turn()
+    assert "I didn't have anything about the office." in o.tts.said
+
+
+async def test_handle_text_bumps_facts_used_in_the_reply():
+    store = FakeStore()
+    o, _ = build()
+    o.store = store
+    await o.handle_text("hello")
+    assert store.used == ["Sure. Done."]
 
 
 # -- commit: voice mute/unmute/quit intents -----------------------------------
