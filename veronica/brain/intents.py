@@ -192,6 +192,7 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
     "kahan ho", "wapas aao",
     "quit karo", "band ho jao",
+    "offline ho jao", "local model use karo", "online ho jao", "online wapas jao",
 }) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH \
     | _WHICH_BRAIN_PHRASES_HINGLISH
 
@@ -520,9 +521,9 @@ def match_proactive_intent(text: str) -> ProactiveAction | None:
 # the orchestrator's BrainSwitcher does the actual switch (and says why it
 # can't). Names are the BACKENDS keys — kept literal here so this module
 # stays import-light.
-BrainAction = tuple[Literal["switch", "which"], str | None]
+BrainAction = tuple[Literal["switch", "which", "online"], str | None]
 
-_BRAIN_NAMES = r"(claude|codex|antigravity|copilot)"
+_BRAIN_NAMES = r"(claude|codex|antigravity|copilot|local)"
 _BRAIN_SWITCH_RE = re.compile(
     rf"^(?:switch(?: brains?)? to|use|change(?: brains?)? to|switch(?: the)? brain to)\s+(?:the )?{_BRAIN_NAMES}(?: brain)?$"
 )
@@ -540,10 +541,30 @@ _WHICH_BRAIN_PHRASES = frozenset({
     "who am i talking to", "which ai is this", "which ai are you",
 })
 
+# Offline / online by voice (F1). "go offline" means the local model, not
+# an airplane-mode toggle; "go online" hands the next turn back to whichever
+# vendor brain is ready (the switcher picks — see online_candidate).
+_OFFLINE_PHRASES = frozenset({
+    "go offline", "offline mode", "offline", "use the local model", "use local model",
+    "use the local brain", "switch to the local model", "run locally", "work offline",
+    # Hinglish
+    "offline ho jao", "local model use karo",
+})
+_ONLINE_PHRASES = frozenset({
+    "go online", "back online", "go back online", "online mode", "online",
+    "stop using the local model", "use the internet again",
+    # Hinglish
+    "online ho jao", "online wapas jao",
+})
+
 
 def _match_brain_candidate(candidate: str) -> BrainAction | None:
     if candidate in _WHICH_BRAIN_PHRASES or candidate in _WHICH_BRAIN_PHRASES_HINGLISH:
         return ("which", None)
+    if candidate in _OFFLINE_PHRASES:
+        return ("switch", "local")
+    if candidate in _ONLINE_PHRASES:
+        return ("online", None)
     for pattern in (_BRAIN_SWITCH_RE, _BRAIN_BACK_RE, _BRAIN_SWITCH_HINGLISH_RE):
         m = pattern.match(candidate)
         if m:
@@ -553,7 +574,9 @@ def _match_brain_candidate(candidate: str) -> BrainAction | None:
 
 def match_brain_intent(text: str) -> BrainAction | None:
     """"switch to codex" / "use copilot" / "go back to claude" -> ("switch",
-    name); "which brain are you on" -> ("which", None). Same candidate
+    name); "go offline" / "use the local model" -> ("switch", "local");
+    "go online" / "back online" -> ("online", None); "which brain are you
+    on" -> ("which", None). Same candidate
     strategy as match_intent: whole normalized utterance, then each clause.
     Unknown names ("use gemini") don't match, so they reach the brain."""
     for candidate in _candidates_for(normalize(text)):

@@ -4388,11 +4388,16 @@ class FakeSwitcher:
     def __init__(self, brain, avail=True, fail_to=None, clock=lambda: 1000.0):
         self.brain, self.avail, self.fail_to = brain, avail, fail_to
         self.switched, self.returned, self.failovers = [], 0, []
+        self.offline_checks = 0
         self.preferred = "claude"
         self.standing_in = False
         self.limited_until = {}
         self._clock = clock
         self.gate = None
+        self._standin_reason = None
+
+    def online_candidate(self):
+        return "codex"
 
     async def switch(self, name, *, manual=True):
         self.switched.append(name)
@@ -4404,6 +4409,9 @@ class FakeSwitcher:
 
     async def maybe_return(self):
         self.returned += 1
+
+    async def maybe_offline(self):
+        self.offline_checks += 1
 
     async def failover(self, reason):
         self.failovers.append(reason)
@@ -4484,6 +4492,42 @@ async def test_brain_turn_checks_for_return_first():
     o, _ = build_brain(["tell me a joke"])
     await o.one_turn()
     assert o.switcher.returned == 1 and o.brain.asked == ["tell me a joke"]
+
+
+async def test_brain_turn_also_checks_the_wire():
+    o, _ = build_brain(["tell me a joke"])
+    await o.one_turn()
+    assert o.switcher.offline_checks == 1
+
+
+async def test_go_offline_switches_to_the_local_model():
+    o, _ = build_brain(["go offline"])
+    await o.one_turn()
+    assert o.switcher.switched == ["local"] and o.tts.said == ["Switched to Local."]
+
+
+async def test_go_online_picks_the_first_ready_vendor_brain():
+    o, _ = build_brain(["back online"])
+    o.brain.name = "local"
+    o.switcher.online_candidate = lambda: "codex"
+    await o.one_turn()
+    assert o.switcher.switched == ["codex"] and o.tts.said == ["Switched to Codex."]
+
+
+async def test_go_online_with_nothing_ready_says_so():
+    o, _ = build_brain(["go online"])
+    o.switcher.online_candidate = lambda: None
+    await o.one_turn()
+    assert o.switcher.switched == [] and o.tts.said == ["No online brain is ready."]
+
+
+async def test_which_brain_while_offline_says_why():
+    o, _ = build_brain(["which brain are you on"])
+    o.brain.name = "local"
+    o.switcher.standing_in = True
+    o.switcher._standin_reason = "offline"
+    await o.one_turn()
+    assert o.tts.said == ["I'm on the local model — there's no internet."]
 
 
 async def test_limit_error_fails_over_and_reruns_once():

@@ -446,6 +446,15 @@ from veronica.brain.intents import match_brain_intent
     # not a which-brain phrase: it is usually about a photo, a caller or a name
     ("who is this", None), ("who is this?", None),
     ("kaunsa brain hai", ("which", None)),
+    # offline / online (F1)
+    ("go offline", ("switch", "local")), ("offline mode", ("switch", "local")),
+    ("use the local model", ("switch", "local")), ("switch to local", ("switch", "local")),
+    ("Veronica, go offline please.", ("switch", "local")), ("work offline", ("switch", "local")),
+    ("offline ho jao", ("switch", "local")), ("local model use karo", ("switch", "local")),
+    ("go online", ("online", None)), ("back online", ("online", None)),
+    ("go back online", ("online", None)), ("online ho jao", ("online", None)),
+    # near misses that belong to the brain
+    ("is the printer offline", None), ("put my phone offline", None), ("order a local pizza", None),
     ("use qwen please", None), ("use gemini", None), ("switch to spanish", None),
     ("use a british voice", None), ("open codex", None), ("use codex to write a poem", None),
     ("", None),
@@ -457,3 +466,8 @@ def test_match_brain_intent(text, expected):
 def test_hinglish_which_brain_phrases_count_as_hinglish():
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES
     assert {"kaunsa brain hai", "kaun sa model hai"} <= HINGLISH_INTENT_PHRASES
+
+
+def test_hinglish_offline_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"offline ho jao", "online ho jao"} <= HINGLISH_INTENT_PHRASES

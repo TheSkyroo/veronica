@@ -732,6 +732,9 @@ class Orchestrator:
         through the same path — a limit there is a limit like any other."""
         if self.switcher is not None:
             await self.switcher.maybe_return()
+            # ...and, the other way round, drop to the local model when the
+            # brain that's up needs a vendor host and the wire is dead.
+            await self.switcher.maybe_offline()
         spoken = await self._ask_with_failover(text, images, lang=lang)
         if spoken is None:
             return []
@@ -769,8 +772,9 @@ class Orchestrator:
 
     # -- brains -----------------------------------------------------------------
     async def _brain_switch_turn(self, action: tuple[str, str | None]) -> None:
-        """Local fast path for "switch to codex" / "which brain are you on":
-        the switcher does the switch (or says why it can't); a switch first
+        """Local fast path for "switch to codex" / "go offline" / "which
+        brain are you on": the switcher does the switch (or says why it
+        can't — "go online" asks it which brain to go back to); a switch first
         interrupts whatever the current brain is doing and drops any
         screen-control trust. Also run by the menu bar's Brain submenu and
         the settings page."""
@@ -779,8 +783,17 @@ class Orchestrator:
         if sw is None:
             await self.say("I can only use Claude right now.")
             return
+        if kind == "online":
+            name = sw.online_candidate()
+            if name is None:
+                await self.say("No online brain is ready.")
+                return
+            kind, name = "switch", name
         if kind == "which":
             label = self._brain_label()
+            if sw.standing_in and sw.brain.name == "local" and sw._standin_reason == "offline":
+                await self.say("I'm on the local model — there's no internet.")
+                return
             if sw.standing_in and sw.brain.name in BACKENDS:
                 until = sw.limited_until.get(sw.preferred, 0.0)
                 mins = max(1, round((until - sw._clock()) / 60))
