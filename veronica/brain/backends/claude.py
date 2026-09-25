@@ -237,7 +237,14 @@ class ClaudeBrain:
                         msg = await anext(it, None)
                 except TimeoutError:
                     log.warning("brain timeout after %ss", self.s.brain_timeout_s)
-                    await self.close()
+                    # interrupt(), not close(): dropping the client leaves the
+                    # turn unanswered in the session, and the next ask()
+                    # resumes that session — the CLI replays the abandoned
+                    # turn ("Continue from where you left off.") and has to
+                    # answer it before our new request, so one slow turn
+                    # latches into a timeout on every turn after it.
+                    # interrupt() closes the client itself if it can't drain.
+                    await self.interrupt()
                     yield "Taking too long, cancelled."
                     return
 

@@ -363,6 +363,38 @@ async def test_timeout_yields_message(brain, monkeypatch):
     assert FakeClient.instances[0].disconnect_calls == 1
 
 
+async def test_timeout_interrupts_the_turn_and_keeps_the_client(brain, monkeypatch):
+    """A timed-out turn is interrupted, not dropped. Disconnecting leaves it
+    unanswered in the saved session, so the next ask() — which resumes that
+    session — makes the CLI replay the abandoned turn before our new
+    request; one slow turn then times out every turn after it."""
+    class TimingOutClient(FakeClient):
+        def __init__(self, options=None):
+            super().__init__(options)
+            self.interrupts = 0
+            self.streams = 0
+
+        async def interrupt(self):
+            self.interrupts += 1
+
+        async def receive_response(self):
+            self.streams += 1
+            if self.streams == 1:
+                await asyncio.Event().wait()   # the turn that never answers
+            yield _Result("sess-1")            # the drain after interrupt()
+
+    monkeypatch.setattr(Brain, "_client_cls", TimingOutClient)
+    brain.s = Settings(brain_timeout_s=0)
+    out = [s async for s in brain.ask("x")]
+
+    client = FakeClient.instances[0]
+    assert out == ["Taking too long, cancelled."]
+    assert client.interrupts == 1
+    assert client.disconnect_calls == 0
+    assert brain._client is client
+    assert brain._in_flight is False
+
+
 async def test_connect_failure_resets_client(brain, monkeypatch):
     class BadClient(FakeClient):
         async def connect(self):
