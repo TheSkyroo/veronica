@@ -274,6 +274,12 @@
       frag.push(settingRow('brain', 'codex_native_tools'));
       frag.push(settingRow('brain', 'antigravity_native_tools'));
       frag.push(settingRow('brain', 'copilot_native_tools'));
+      frag.push(el('h3', {text: 'Offline'}));
+      frag.push(settingRow('brain', 'brain_offline_fallback'));
+      frag.push(settingRow('brain', 'local_model', {wide: true}));
+      frag.push(settingRow('brain', 'local_server_bin', {wide: true}));
+      frag.push(settingRow('brain', 'local_ctx'));
+      frag.push(settingRow('brain', 'local_port'));
       frag.push(el('h3', {text: 'Thinking'}));
       frag.push(settingRow('brain', 'effort'));
       frag.push(settingRow('brain', 'memory_enabled'));

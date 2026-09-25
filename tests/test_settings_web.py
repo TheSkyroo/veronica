@@ -35,6 +35,8 @@ def fixture_state(**over) -> dict:
                   "preapprove_by_wording": True, "brain_backend": "codex", "brain_failover": True,
                   "brain_failover_order": "codex,antigravity,claude,copilot", "brain_limit_cooldown_min": 60,
                   "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
+                  "brain_offline_fallback": True, "local_server_bin": "/opt/llama-server",
+                  "local_model": "/models/granite.gguf", "local_ctx": 8192, "local_port": 8749,
                   "brain_label": "Claude (for Codex)"},
         "about": {"version": "0.1.0", "build": "a517483", "built_at": "2026-09-17T10:00:00+05:30", "dirty": True,
                   "describe": "Veronica 0.1.0 (a517483, 17 Sep)", "update": {"available": False, "detail": ""},

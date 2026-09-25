@@ -110,6 +110,7 @@ one is active. Every brain uses the vendor CLI's own login — there are no API 
 | **Antigravity** | Google's `agy` CLI (Gemini), on your Google account | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` |
 | **Claude** | Anthropic's `claude` CLI (Claude Code), on your Claude plan | `npm i -g @anthropic-ai/claude-code` | `claude` |
 | **Copilot** | GitHub's `copilot` CLI, on your Copilot plan | `npm i -g @github/copilot` | `copilot login` |
+| **Local** | llama.cpp on this Mac — no account, no network | a `llama-server` binary and a `.gguf` | — |
 
 Only the brains that are installed *and* logged in are offered; the check is local and cheap (the binary on
 `PATH` plus the file the login writes — `~/.codex/auth.json`, `~/.copilot/config.json`, Antigravity's
@@ -162,6 +163,44 @@ next reply just comes from it). A manual "switch to …" clears that brain's coo
 preferred brain isn't installed or logged in, she starts on the first available one and says once "Codex isn't
 logged in, so I'm on Claude for now." (re-checking the preferred one every minute); with nothing ready she
 says "No brain is ready — log into Codex, Antigravity or Claude."
+
+### Offline
+
+The **Local** brain is a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` running on this Mac,
+with a quantised model file. Nothing leaves the machine: no account, no login, no network call, not even to
+check for one.
+
+She starts the server herself on the first local turn (`llama-server --model <gguf> --ctx-size 8192 --host
+127.0.0.1 --port 8749 --jinja --no-webui`), waits for `/health`, and leaves it running until she is closed or
+ten minutes pass without a turn — a model load costs seconds, so it is worth keeping warm. A server already
+listening on that port is used as-is rather than replaced.
+
+**Settings → Brain → Offline:** *Use the local model when offline* (`brain_offline_fallback`, default on),
+*Local model* (`local_model`, default `~/Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf` — small, fast and
+instruction-tuned), *Local server* (`local_server_bin`, default `~/Github/sih/manas/runtime/bin/llama-server`),
+*Local context (tokens)* (`local_ctx`, default 8192) and *Local port* (`local_port`, default 8749). All live, no
+restart. To think with different weights, point *Local model* at any other `.gguf` — a bigger one is slower to
+load and to speak, a smaller one forgets more; the next local turn restarts the server on it.
+
+**When it takes over.** Before each turn she checks whether the active brain's vendor host is reachable (one TCP
+connect, cached for 20 seconds). If it isn't, she says "No internet — switching to the local model." and answers
+locally, exactly like a usage-limit stand-in: the preference doesn't change, "which brain are you on" answers
+"I'm on the local model — there's no internet.", and she goes back to the preferred brain **silently** as soon
+as the wire returns. Turn it off with `brain_offline_fallback`. By voice, any time: "go offline" / "offline
+mode" / "use the local model" / "offline ho jao" switches to it, and "go online" / "back online" / "online ho
+jao" hands the next turn back to the first ready vendor brain.
+
+**What it can and cannot do.** Tools: **yes** — Veronica's own tools (mac, calendar/mail/reminders/timers,
+memory, music, browser, screen control) are offered to the model as function schemas and run in-process, each
+call through the same confirm gate, with the same HUD cards and the same trust window. The web: **no** — there
+is no search and no fetch, and she is told to say so rather than guess. Screenshots: **no** — the default model
+is text-only, so she says she can't see. A small model that ignores the tool schema simply answers in words;
+that is normal and not an error. Expect a short answer in a handful of seconds, and expect it to be less sharp
+than the hosted brains — it is a three-billion-parameter model on a laptop.
+
+If the server won't start she says "The local model wouldn't start — check the Local settings." The Local brain
+is offered only when both the binary and the model file exist ("The local model server isn't there — set its
+path in Settings.").
 
 **Known limits.**
 

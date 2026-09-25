@@ -213,7 +213,9 @@ def test_state_has_every_section_and_key(h):
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
     assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
-                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools", "brain_label"}
+                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
+                                "brain_offline_fallback", "local_server_bin", "local_model",
+                                "local_ctx", "local_port", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -489,6 +491,18 @@ def test_set_preapprove_by_wording_is_live(h):
     assert h.bridge.set("brain", "preapprove_by_wording", "on")["ok"]
     assert h.orch.s.preapprove_by_wording is True
     assert h.bridge.get_state()["brain"]["preapprove_by_wording"] is True
+
+
+def test_set_offline_fallback_and_local_paths_are_live(h):
+    assert h.bridge.set("brain", "brain_offline_fallback", False)["ok"]
+    assert h.orch.s.brain_offline_fallback is False
+    assert ("brain_offline_fallback", False) in h.prefs.overrides
+    assert h.bridge.set("brain", "local_model", "/models/other.gguf")["ok"]
+    assert str(h.orch.s.local_model) == "/models/other.gguf"
+    assert h.bridge.set("brain", "local_ctx", 4096)["ok"] and h.orch.s.local_ctx == 4096
+    assert h.bridge.set("brain", "local_port", 9000)["ok"] and h.orch.s.local_port == 9000
+    st = h.bridge.get_state()["brain"]
+    assert st["local_model"] == "/models/other.gguf" and st["local_ctx"] == 4096
 
 
 def test_set_restart_class_saves_while_warming():
@@ -891,7 +905,7 @@ def test_state_brain_label_comes_from_the_switcher():
     assert st["brain"]["brain_label"] == "Claude (for Codex)"
     assert st["brain"]["brain_backend"] == "codex"
     assert st["brain"]["brain_failover"] is True and st["brain"]["codex_native_tools"] is True
-    assert st["meta"]["fields"]["brain_backend"]["choices"] == ["codex", "antigravity", "claude", "copilot"]
+    assert st["meta"]["fields"]["brain_backend"]["choices"] == ["codex", "antigravity", "claude", "copilot", "local"]
 
 
 def test_state_brain_label_empty_without_switcher(h):
