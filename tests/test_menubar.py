@@ -1605,11 +1605,11 @@ def test_popup_menu_brain_submenu_mirrors_menu_bar(fake_env, monkeypatch):
         assert brain_item.title == "Brain: Claude"
         sub = brain_item.submenu
         assert sub.title == "Brain"
-        assert [i.title for i in sub.items] == ["Codex", "Antigravity", "Claude", "Copilot (not installed)"]
-        assert [i.action for i in sub.items] == ["onPickBrain:"] * 4
+        assert [i.title for i in sub.items] == ["Codex", "Antigravity", "Claude", "Copilot (not installed)", "Local"]
+        assert [i.action for i in sub.items] == ["onPickBrain:"] * 5
         assert [i.representedObject() for i in sub.items] == list(BACKENDS)
-        assert [i.state for i in sub.items] == [0, 0, 1, 0]
-        assert [i.enabled for i in sub.items] == [True, True, True, False]
+        assert [i.state for i in sub.items] == [0, 0, 1, 0, 0]
+        assert [i.enabled for i in sub.items] == [True, True, True, False, True]
         assert all(i.target is not None for i in sub.items)
     finally:
         _quit_and_join(app)

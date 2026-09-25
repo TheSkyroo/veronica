@@ -5,14 +5,18 @@ from veronica.brain.backends.antigravity import AntigravityBrain
 from veronica.brain.backends.claude import ClaudeBrain
 from veronica.brain.backends.codex import CodexBrain
 from veronica.brain.backends.copilot import CopilotBrain
+from veronica.brain.backends.local import LocalBrain
 from veronica.brain.gate import ToolGate
 from veronica.config import BRAIN_BACKENDS, Settings
 
 
 def test_registry_order_and_commands():
-    assert tuple(BACKENDS) == ("codex", "antigravity", "claude", "copilot") == BRAIN_BACKENDS
-    assert [b.label for b in BACKENDS.values()] == ["Codex", "Antigravity", "Claude", "Copilot"]
-    assert [b.binary for b in BACKENDS.values()] == ["codex", "agy", "claude", "copilot"]
+    assert tuple(BACKENDS) == ("codex", "antigravity", "claude", "copilot", "local") == BRAIN_BACKENDS
+    assert [b.label for b in BACKENDS.values()] == ["Codex", "Antigravity", "Claude", "Copilot", "Local"]
+    assert [b.binary for b in BACKENDS.values()] == ["codex", "agy", "claude", "copilot", "llama-server"]
+    # the local brain has nothing to install or log into
+    assert BACKENDS["local"].install_cmd == "" and BACKENDS["local"].login_cmd == ""
+    assert BACKENDS["local"].cls is LocalBrain
     assert BACKENDS["codex"].install_cmd == "npm i -g @openai/codex" and BACKENDS["codex"].login_cmd == "codex login"
     assert BACKENDS["copilot"].install_cmd == "npm i -g @github/copilot"
     assert BACKENDS["claude"].install_cmd == "npm i -g @anthropic-ai/claude-code"

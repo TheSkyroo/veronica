@@ -2,7 +2,10 @@
 
 Every backend uses the vendor CLI's own login — no API keys. `check_backend`
 only looks at cheap local markers (binary on PATH, a file the login writes)
-so the menu bar and the switcher can poll it; nothing here spawns a CLI."""
+so the menu bar and the switcher can poll it; nothing here spawns a CLI.
+
+`local` is the odd one out: no vendor, no login, just a llama.cpp server and
+a .gguf on this Mac, so its availability is "are those two files there"."""
 import logging
 import shutil
 import subprocess
@@ -15,6 +18,7 @@ from veronica.brain.backends.antigravity import AntigravityBrain
 from veronica.brain.backends.claude import ClaudeBrain
 from veronica.brain.backends.codex import CodexBrain
 from veronica.brain.backends.copilot import CopilotBrain
+from veronica.brain.backends.local import LocalBrain
 from veronica.brain.base import Brain
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
@@ -56,6 +60,9 @@ BACKENDS: dict[str, BackendInfo] = {b.name: b for b in (
                 (), ClaudeBrain),
     BackendInfo("copilot", "Copilot", "copilot", "npm i -g @github/copilot", "copilot login",
                 (".copilot/config.json",), CopilotBrain),
+    # Offline: `binary` is a path from Settings, not a name on PATH, and
+    # there is nothing to log into — see `_check_local`.
+    BackendInfo("local", "Local", "llama-server", "", "", (), LocalBrain),
 )}
 
 # Antigravity keeps its Google credentials in the macOS Keychain; the
@@ -72,6 +79,18 @@ def _keychain_has(run: Callable, argv: list[str]) -> bool:
         return False
 
 
+def _check_local(settings: Settings, exists: Callable[[Path], bool]) -> Availability:
+    """The local brain is ready when both its files are on disk. No PATH
+    lookup (the binary is an absolute path) and no login at all."""
+    if not exists(Path(settings.local_server_bin)):
+        return Availability(False, "not installed",
+                            "The local model server isn't there — set its path in Settings.")
+    if not exists(Path(settings.local_model)):
+        return Availability(False, "not installed",
+                            "The local model file isn't there — pick one in Settings.")
+    return Availability(True, "ok")
+
+
 def check_backend(
     name: str,
     *,
@@ -79,17 +98,21 @@ def check_backend(
     exists: Callable[[Path], bool] | None = None,
     home: Path | None = None,
     run: Callable = subprocess.run,
+    settings: Settings | None = None,
 ) -> Availability:
     """Is `name` installed and logged in? Cheap and local: PATH + marker
     files (+ the Keychain for Antigravity). `hint` reads naturally aloud."""
     info = BACKENDS.get(name)
     if info is None:
         return Availability(False, "not installed", f"I don't know a brain called {name}.")
+    exists = Path.exists if exists is None else exists
+    if name == "local":
+        from veronica import config       # late: config imports nothing from here
+        return _check_local(settings or config.settings, exists)
     if not which(info.binary):
         return Availability(False, "not installed",
                             f"{info.label} isn't installed — run {info.install_cmd}, then {info.login_cmd}.")
     home = Path.home() if home is None else home
-    exists = Path.exists if exists is None else exists
     logged_in = (not info.login_markers or any(exists(home / m) for m in info.login_markers)
                  or (name == "antigravity" and _keychain_has(run, _ANTIGRAVITY_KEYCHAIN)))
     if not logged_in:

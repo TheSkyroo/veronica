@@ -295,7 +295,7 @@ def test_brain_backend_default_and_choices():
     assert s.brain_limit_cooldown_min == 60
     f = EDITABLE_SETTINGS["brain_backend"]
     assert f.kind == "choice" and f.restart is False and f.label == "Brain"
-    assert f.choices == ("codex", "antigravity", "claude", "copilot")
+    assert f.choices == ("codex", "antigravity", "claude", "copilot", "local")
     for name in f.choices:
         assert Settings(brain_backend=name).brain_backend == name
     assert coerce_setting("brain_backend", "claude") == "claude"

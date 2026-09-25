@@ -16,7 +16,12 @@ log = logging.getLogger("veronica.config")
 
 # The brains Veronica can run on, in the user's default order. The registry
 # in veronica.brain.backends is the source of truth for everything else.
-BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot")
+BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot", "local")
+
+# The offline brain's defaults: the llama.cpp server and weights the user
+# already keeps on this Mac. Both are plain paths, editable in Settings.
+LOCAL_SERVER_BIN = Path.home() / "Github/sih/manas/runtime/bin/llama-server"
+LOCAL_MODEL = Path.home() / "Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf"
 
 
 class Settings(BaseSettings):
@@ -97,6 +102,16 @@ class Settings(BaseSettings):
     codex_native_tools: bool = True
     antigravity_native_tools: bool = True
     copilot_native_tools: bool = True
+    # Offline brain (veronica.brain.backends.local): a llama.cpp server on
+    # this Mac. Started lazily, on a port of ours, and never asked to reach
+    # the network.
+    local_server_bin: Path = Field(default_factory=lambda: LOCAL_SERVER_BIN)
+    local_model: Path = Field(default_factory=lambda: LOCAL_MODEL)
+    local_ctx: int = 8192
+    local_port: int = 8749
+    # Stand the local brain in when the active brain needs the network and
+    # there isn't any (see veronica.net / BrainSwitcher.maybe_offline).
+    brain_offline_fallback: bool = True
 
     # memory
     memory_enabled: bool = True
@@ -269,6 +284,25 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", "Copilot: allow its own shell",
         "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
+    ),
+    "brain_offline_fallback": EditableField(
+        "bool", "Use the local model when offline",
+        "No internet? Answer on the model running on this Mac, and go back when it returns.",
+        restart=False,
+    ),
+    "local_server_bin": EditableField(
+        "str", "Local server", "Path to llama-server.", restart=False,
+    ),
+    "local_model": EditableField(
+        "str", "Local model", "Path to the .gguf weights she thinks with offline.", restart=False,
+    ),
+    "local_ctx": EditableField(
+        "int", "Local context (tokens)", "Bigger remembers more and loads slower.",
+        min=1024, max=131072, restart=False,
+    ),
+    "local_port": EditableField(
+        "int", "Local port", "Where the local server listens, on this Mac only.",
+        min=1024, max=65535, restart=False,
     ),
 }
 
