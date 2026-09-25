@@ -30,7 +30,10 @@ class Synthesizer:
         )
 
     def synth(self, text: str, lang: str | None = None) -> tuple[np.ndarray, int]:
-        hindi = lang == "hi" or (lang is None and has_devanagari(text))
+        # Script wins over the turn's language: an English voice reading
+        # Devanagari produces noise, so a reply that came back in Hindi is
+        # spoken in the Hindi voice even when the question was English.
+        hindi = lang == "hi" or has_devanagari(text)
         voice, kl = (self.hindi_voice, "hi") if hindi else (self.voice, "en-us")
         samples, sr = self._engine.create(text, voice=voice, speed=self.speed, lang=kl)
         return np.asarray(samples, dtype=np.float32), sr

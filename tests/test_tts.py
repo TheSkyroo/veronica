@@ -81,3 +81,20 @@ def test_synth_picks_hindi_voice_for_devanagari_or_lang(monkeypatch, tmp_path):
     s.hindi_voice = "hm_omega"
     s.synth("ठीक है")
     assert calls[-1] == ("hm_omega", "hi")
+
+
+def test_devanagari_reply_uses_the_hindi_voice_even_on_an_english_turn(monkeypatch):
+    """A brain that answers in Hindi to an English question must still be
+    spoken by the Hindi voice — the English one just mangles the script."""
+    from veronica.speech.tts import Synthesizer
+    used = {}
+
+    s = Synthesizer.__new__(Synthesizer)
+    s.voice, s.hindi_voice, s.speed = "af_bella", "hf_alpha", 1.0
+    s._engine = type("E", (), {
+        "create": lambda self, text, voice, speed, lang: (used.update(voice=voice, lang=lang), ([0.0], 24000))[1]
+    })()
+    s.synth("समझ गया।", lang="en")
+    assert used == {"voice": "hf_alpha", "lang": "hi"}
+    s.synth("Got it.", lang="en")
+    assert used == {"voice": "af_bella", "lang": "en-us"}
