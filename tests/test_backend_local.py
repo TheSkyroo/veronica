@@ -86,6 +86,7 @@ class FakeProc:
     def __init__(self):
         self.returncode = None
         self.terminated = False
+        self.waited = 0
 
     def terminate(self):
         self.terminated = True
@@ -95,6 +96,7 @@ class FakeProc:
         self.returncode = -9
 
     async def wait(self):
+        self.waited += 1
         return self.returncode
 
 
@@ -276,6 +278,19 @@ async def test_history_is_trimmed_to_the_context_window(tmp_path):
     await brain.close()
 
 
+async def test_one_oversized_question_is_truncated_not_thrown_away(tmp_path):
+    """The budget is small at the default context; a long paste must not
+    empty the history and leave the POST with no user turn at all."""
+    huge = "x" * 20000
+    brain, client, _ = make_brain(tmp_path, local_ctx=1024, rounds=[[sse(content="Ok.")]])
+    assert await drain(brain, huge) == ["Ok."]
+    sent = client.posts[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user"]
+    budget = int(1024 * local_mod.HISTORY_SHARE * local_mod.CHARS_PER_TOKEN)
+    assert 0 < len(sent[1]["content"]) <= budget
+    await brain.close()
+
+
 async def test_the_system_prompt_says_it_is_offline(tmp_path):
     brain, client, _ = make_brain(tmp_path, rounds=[[sse(content="Ok.")]])
     await drain(brain)
@@ -403,6 +418,46 @@ async def test_the_server_is_stopped_after_an_idle_stretch(tmp_path):
             break
     assert proc.terminated and brain._proc is None
     await brain.close()
+
+
+async def test_the_idle_watch_never_stops_a_server_a_turn_just_claimed(tmp_path):
+    """The watcher and a starting turn can wake in the same tick. The turn
+    takes the server first; the watcher has to notice and back off, or the
+    model dies under the answer."""
+    brain, client, _ = make_brain(
+        tmp_path, rounds=[[sse(content="Hi.")]], health=[False, True])
+    brain.idle_shutdown_s = 0.01
+    await drain(brain)
+    proc = brain._proc
+    async with brain._server_lock:          # a turn is starting right now
+        await asyncio.sleep(0.05)           # the idle deadline passes in here
+        brain._touch()                      # ... and claims the server
+    for _ in range(5):                      # let the watcher take the lock
+        await asyncio.sleep(0)
+    assert not proc.terminated and brain._proc is proc
+    await brain.close()
+
+
+async def test_a_dead_child_is_reaped_before_a_listening_server_is_adopted(tmp_path):
+    brain, client, spawned = make_brain(
+        tmp_path, rounds=[[sse(content="Hi.")], [sse(content="Again.")]],
+        health=[False, True])
+    await drain(brain)
+    proc = brain._proc
+    proc.returncode = 1                     # llama-server fell over on its own
+    assert await drain(brain) == ["Again."]  # something is listening: adopt it
+    assert brain._adopted and brain._proc is None and proc.waited == 1
+    assert len(spawned) == 1
+    await brain.close()
+    assert brain._adopted is False
+
+
+async def test_close_waits_for_the_idle_watch_to_stop(tmp_path):
+    brain, *_ = make_brain(tmp_path, rounds=[[sse(content="Hi.")]], health=[False, True])
+    await drain(brain)
+    watch = brain._idle_task
+    await brain.close()
+    assert watch.done() and brain._idle_task is None
 
 
 async def test_close_stops_the_server_and_the_client(tmp_path):

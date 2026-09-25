@@ -15,6 +15,7 @@ first, exactly like Claude's. A model that ignores the tool schema and
 answers in words is fine — that is the normal outcome for the smaller
 weights and must never be an error."""
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import logging
@@ -154,6 +155,9 @@ class LocalBrain:
         self._interrupted = False
         self._last_used = clock()
         self._idle_task: asyncio.Task | None = None
+        # Held across a start and across the idle shutdown, so the two can
+        # never decide about the server at the same time.
+        self._server_lock = asyncio.Lock()
 
     # -- gate proxies (the orchestrator keeps calling brain.<x>) ---------------
     def clear_trust(self) -> None:
@@ -206,11 +210,26 @@ class LocalBrain:
             return False
 
     async def _ensure_server(self) -> None:
-        """Start `llama-server` and wait for /health. A server already
-        listening on our port (the user's own, or one we left running
-        across a reload) is adopted rather than fought with."""
-        if self._proc is not None and self._proc.returncode is None:
-            return
+        """Start `llama-server` and wait for /health, then mark it used.
+
+        Under `_server_lock`, and the touch is inside it: the idle watcher
+        takes the same lock before terminating, so a turn starting as the
+        watcher fires can't have the model pulled out from under it."""
+        async with self._server_lock:
+            self._touch()
+            await self._start_server()
+
+    async def _start_server(self) -> None:
+        """The start itself. A server already listening on our port (the
+        user's own, or one we left running across a reload) is adopted
+        rather than fought with. Caller holds `_server_lock`."""
+        if self._proc is not None:
+            if self._proc.returncode is None:
+                return
+            # Our child died on its own: reap it before adopting anything,
+            # or it is left behind unwaited with _proc still pointing at it.
+            await self._proc.wait()
+            self._proc = None
         if await self._healthy(1.0):
             self._adopted = True
             return
@@ -231,8 +250,11 @@ class LocalBrain:
             await asyncio.sleep(HEALTH_POLL_S)
 
     async def _stop_server(self) -> None:
+        """Stop the server we spawned. An adopted one is somebody else's and
+        is only let go of. Caller holds `_server_lock`."""
         proc, self._proc = self._proc, None
-        if proc is None or self._adopted:
+        adopted, self._adopted = self._adopted, False
+        if proc is None or adopted:
             return
         try:
             if proc.returncode is None:
@@ -255,11 +277,18 @@ class LocalBrain:
         — a loaded model holds gigabytes, and the next turn just reloads."""
         while True:
             left = self.idle_shutdown_s - (self._clock() - self._last_used)
-            if left <= 0:
-                break
-            await asyncio.sleep(left)
-        log.info("local: idle for %.0fs, stopping the server", self.idle_shutdown_s)
-        await self._stop_server()
+            if left > 0:
+                await asyncio.sleep(left)
+                continue
+            async with self._server_lock:
+                # A turn may have claimed the server while we waited for the
+                # lock; only stop one that is still idle, and go round again
+                # otherwise so the window re-arms from its touch.
+                if self._clock() - self._last_used < self.idle_shutdown_s:
+                    continue
+                log.info("local: idle for %.0fs, stopping the server", self.idle_shutdown_s)
+                await self._stop_server()
+                return
 
     # -- history ----------------------------------------------------------------
     def _system_prompt(self) -> str:
@@ -278,12 +307,23 @@ class LocalBrain:
         """Drop the oldest messages until the history fits its share of the
         context window. Always cuts back to a `user` message: an assistant
         turn's tool calls and their results have to stay together or the
-        chat template breaks."""
+        chat template breaks.
+
+        The last message is never dropped. The budget is only a few thousand
+        characters at the default context, so one long paste would otherwise
+        empty the history and leave the POST with a system prompt and no
+        question in it; it is truncated instead."""
         budget = int(self.s.local_ctx * HISTORY_SHARE * CHARS_PER_TOKEN)
-        while self._history and sum(len(json.dumps(m)) for m in self._history) > budget:
+        size = lambda: sum(len(json.dumps(m)) for m in self._history)   # noqa: E731
+        while len(self._history) > 1 and size() > budget:
             del self._history[0]
-            while self._history and self._history[0].get("role") != "user":
+            while len(self._history) > 1 and self._history[0].get("role") != "user":
                 del self._history[0]
+        if len(self._history) == 1 and size() > budget:
+            last = self._history[0]
+            content = str(last.get("content") or "")
+            overhead = len(json.dumps(last)) - len(content)
+            last["content"] = content[:max(1, budget - overhead)]
 
     # -- one streamed completion ------------------------------------------------
     async def _round(self, messages: list[dict], tools: list[dict],
@@ -440,9 +480,15 @@ class LocalBrain:
     async def close(self) -> None:
         await self.interrupt()
         if self._idle_task is not None:
-            self._idle_task.cancel()
-            self._idle_task = None
-        await self._stop_server()
+            # Awaited, not just cancelled: it may be holding _server_lock,
+            # and a watcher still running past close() could stop a server
+            # a later turn has already started.
+            task, self._idle_task = self._idle_task, None
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        async with self._server_lock:
+            await self._stop_server()
         try:
             await self._client.aclose()
         except Exception:
