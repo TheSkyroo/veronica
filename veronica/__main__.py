@@ -231,8 +231,31 @@ def main(argv: list[str] | None = None) -> None:
     if args.text:
         asyncio.run(_text_mode(args.text))
         return
+    lock = acquire_instance_lock(Settings().home / "veronica.lock")
+    if lock is None:
+        logging.getLogger("veronica").error("another Veronica is already running; exiting")
+        return
     from veronica.ui.menubar import run_app
     run_app()
+
+
+def acquire_instance_lock(path):
+    """Hold an exclusive advisory lock on `path` for the life of the
+    process so two Veronicas can't fight over the microphone (the second
+    one would hear nothing and the wake word would look broken). Returns
+    the open file (keep it referenced) or None when another instance holds
+    it."""
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
 
 
 if __name__ == "__main__":

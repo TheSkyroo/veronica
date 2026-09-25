@@ -25,13 +25,20 @@ def _normalize(text: str) -> str:
     return text.lower().translate(_PUNCT_TABLE).strip()
 
 
-def _matches(text: str, phrases: list[str]) -> bool:
+def _matches(text: str, phrases: list[str], *, strict: bool = False) -> bool:
+    """`strict` (used while barging in on a turn that is already running)
+    drops the fuzzy near-miss rule: mid-turn the mic is full of the user's
+    own request and Veronica's speech, and a word that merely *sounds*
+    like the name would throw the answer away and start listening again.
+    At idle the fuzzy bar is what makes the wake word forgiving."""
     norm = _normalize(text)
     if not norm:
         return False
     for phrase in phrases:
         if _normalize(phrase) in norm:
             return True
+    if strict:
+        return False
     words = norm.split()
     for word in words:
         # Length-gated so short unrelated words (e.g. "verona", ratio ~0.86)
@@ -60,6 +67,8 @@ class WhisperWake:
         self._frames = frames or self._mic_frames
         self._model = self._model_cls(settings.wake_whisper_model, device="cpu", compute_type="int8")
         self._stop = threading.Event()
+        self._strict = False
+        self._prompt = " ".join(p.strip().capitalize() + "." for p in settings.wake_phrases if p.strip()) or None
         self._window_samples = int(settings.wake_window_s * settings.sample_rate)
         self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
         self._buf = np.zeros(0, dtype=np.int16)
@@ -81,7 +90,8 @@ class WhisperWake:
         pending stop is consumed by the next wait() even if issued before it starts."""
         self._stop.set()
 
-    async def wait(self, threshold: float | None = None, suppress: Callable[[], str] | None = None) -> bool:
+    async def wait(self, threshold: float | None = None, suppress: Callable[[], str] | None = None,
+                   strict: bool | None = None) -> bool:
         """Block until the wake phrase is detected (True) or stop() is called (False).
         Only one wait() should be in flight per WhisperWake instance at a time.
         `suppress`, if given, is called on every phrase match; if the text it
@@ -91,7 +101,12 @@ class WhisperWake:
         if threshold is not None and not WhisperWake._warned_threshold:
             log.debug("WhisperWake.wait: threshold=%s ignored (phrase match used instead)", threshold)
             WhisperWake._warned_threshold = True
-        return await asyncio.to_thread(self._wait, suppress)
+        # A threshold is only ever passed by the barge listener (the idle
+        # wake call takes no arguments), and mid-turn audio must match the
+        # name exactly — see _matches.
+        if strict is None:
+            strict = threshold is not None
+        return await asyncio.to_thread(self._wait, suppress, strict)
 
     def _transcribe(self, window: np.ndarray) -> list:
         audio = window.astype(np.float32) / 32768.0
@@ -102,6 +117,11 @@ class WhisperWake:
             vad_filter=False,
             condition_on_previous_text=False,
             word_timestamps=True,
+            # Bias the decoder toward the name so slow or low-pitched
+            # speech doesn't come back as "very nicer". Not while barging:
+            # priming mid-turn audio with the name makes ordinary words
+            # decode as it, which cancels the answer the user is waiting for.
+            initial_prompt=None if self._strict else self._prompt,
         )
         return list(segments)
 
@@ -135,7 +155,10 @@ class WhisperWake:
         self.preroll = np.zeros(0, dtype=np.int16)
         return p
 
-    def _wait(self, suppress: Callable[[], str] | None = None) -> bool:
+    def _wait(self, suppress: Callable[[], str] | None = None, strict: bool = False) -> bool:
+        # read by _transcribe (kept out of its signature so tests can patch
+        # it with a plain one-argument stub)
+        self._strict = strict
         self._buf = np.zeros(0, dtype=np.int16)
         since_hop = 0
         for frame in self._frames():
@@ -157,7 +180,7 @@ class WhisperWake:
                 continue
             segments = self._transcribe(self._buf)
             text = self._segments_text(segments)
-            if _matches(text, self.s.wake_phrases):
+            if _matches(text, self.s.wake_phrases, strict=strict):
                 window_dur_s = self._buf.size / self.s.sample_rate
                 end_s = self._last_wake_word_end(segments, window_dur_s)
                 self.preroll = self._buf[int(end_s * self.s.sample_rate):].copy()

@@ -358,3 +358,31 @@ async def test_wait_raises_when_frames_raise(monkeypatch):
     w = WhisperWake(Settings(), frames=broken_frames)
     with pytest.raises(OSError, match="no input device"):
         await _wait_for(w.wait(), 2)
+
+
+def test_strict_match_drops_fuzzy_near_misses():
+    from veronica.audio.wake_whisper import _matches
+    phrases = ["veronica"]
+    # idle: a near miss still wakes her
+    assert _matches("veronika are you there", phrases) is True
+    # mid-turn: only the real name counts, so a mis-heard word can't cancel
+    # the answer the user is waiting for
+    assert _matches("veronika are you there", phrases, strict=True) is False
+    assert _matches("hey veronica stop", phrases, strict=True) is True
+
+
+def test_barge_wait_is_strict_and_unprimed():
+    """The barge listener (the only caller that passes a threshold) must not
+    prime the decoder with the name, and _matches must reject near misses."""
+    from veronica.audio.wake_whisper import WhisperWake
+    seen = {}
+
+    w = WhisperWake.__new__(WhisperWake)
+    w._prompt = "Veronica."
+    w._model = type("M", (), {"transcribe": lambda self, audio, **kw: (seen.update(kw), ([], None))[1]})()
+    w._strict = False
+    w._transcribe(np.zeros(16000, dtype=np.int16))
+    assert seen["initial_prompt"] == "Veronica."
+    w._strict = True
+    w._transcribe(np.zeros(16000, dtype=np.int16))
+    assert seen["initial_prompt"] is None

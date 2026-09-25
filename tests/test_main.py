@@ -637,3 +637,14 @@ async def test_build_orchestrator_no_input_guard_in_text_mode(monkeypatch, tmp_h
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
     assert orch.input_guard is None
     memory_tools.bind(None)
+
+
+def test_instance_lock_is_exclusive(tmp_path):
+    from veronica.__main__ import acquire_instance_lock
+    first = acquire_instance_lock(tmp_path / "veronica.lock")
+    assert first is not None
+    assert acquire_instance_lock(tmp_path / "veronica.lock") is None
+    first.close()
+    again = acquire_instance_lock(tmp_path / "veronica.lock")
+    assert again is not None
+    again.close()

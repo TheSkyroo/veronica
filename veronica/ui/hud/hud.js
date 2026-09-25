@@ -447,6 +447,49 @@
     buildRing();
   }
 
+  // ---- orbit rings (faint great circles, drawn as polylines) ----
+  const ORBITS = [
+    // [tilt about X, spin multiplier, phase]
+    [0.55, 1.0, 0.0],
+    [-0.9, 0.6, 1.9],
+    [1.25, -0.8, 3.7],
+  ];
+  const ORB_SEG = 72;
+  const orbX = new Float32Array(ORB_SEG + 1), orbY = new Float32Array(ORB_SEG + 1), orbZ = new Float32Array(ORB_SEG + 1);
+  function drawOrbitRings(rr, rot, tiltC, tiltS, squeeze, bright) {
+    const c2r = cur[P_C2], c2g = cur[P_C2 + 1], c2b = cur[P_C2 + 2];
+    ctx.strokeStyle = css(c2r, c2g, c2b, 1);
+    ctx.lineWidth = Math.max(0.6, 1.0 * SCALE);
+    const gain = Math.min(1.4, cfg.intensity) * Math.min(1, 0.55 + bright * 0.6);
+    for (let k = 0; k < ORBITS.length; k++) {
+      const tilt = ORBITS[k][0], a0 = rot * ORBITS[k][1] + ORBITS[k][2];
+      const tc = Math.cos(tilt), ts = Math.sin(tilt), ca = Math.cos(a0), sa = Math.sin(a0);
+      for (let i = 0; i <= ORB_SEG; i++) {
+        const t = (i / ORB_SEG) * Math.PI * 2;
+        // circle in the XZ plane, tilted about X, then spun about Y
+        let x = Math.cos(t), y = 0, z = Math.sin(t);
+        const y1 = y * tc - z * ts, z1 = y * ts + z * tc;
+        const x2 = x * ca + z1 * sa, z2 = -x * sa + z1 * ca;
+        const y2 = y1 * squeeze;
+        const ty = y2 * tiltC - z2 * tiltS, tz = y2 * tiltS + z2 * tiltC;
+        orbX[i] = CX + x2 * rr; orbY[i] = CY + ty * rr; orbZ[i] = tz;
+      }
+      // two passes: back half (dim) then front half (brighter), split by depth
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.globalAlpha = (pass === 0 ? 0.16 : 0.5) * gain;
+        ctx.beginPath();
+        let open = false;
+        for (let i = 0; i <= ORB_SEG; i++) {
+          const front = orbZ[i] >= 0;
+          if (front === (pass === 1)) {
+            if (!open) { ctx.moveTo(orbX[i], orbY[i]); open = true; } else ctx.lineTo(orbX[i], orbY[i]);
+          } else open = false;
+        }
+        ctx.stroke();
+      }
+    }
+  }
+
   // ---- transient effects ----
   const ripples = [{born: -1}, {born: -1}, {born: -1}, {born: -1}];
   const RIPPLE_MS = 900;
@@ -597,8 +640,13 @@
       ctx.beginPath(); ctx.arc(CX, CY, R * 1.16, ringA + Math.PI, ringA + Math.PI + 0.35); ctx.stroke();
     }
 
-    // particles, additive, back (dim) to front (bright)
+    // orbit rings: a few faint great circles on the sphere, each tilted its
+    // own way and spinning with (or against) the particles — structure
+    // behind the dust. Back halves are dimmer so they read as 3D.
     ctx.globalCompositeOperation = 'lighter';
+    drawOrbitRings(RR * 1.1, rotA, tiltC, tiltS, squeeze, bright);
+
+    // particles, additive, back (dim) to front (bright)
     for (let b = 0; b < NB; b++) {
       const a = Math.min(1, bright * bucketAlpha[b]);
       if (a < 0.045) continue;   // far side at idle: invisible, not worth 10% of the draw calls

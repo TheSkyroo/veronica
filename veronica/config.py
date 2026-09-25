@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     wake_retry_s: int = 10
     barge_threshold: float = 0.8  # openwakeword engine only; the whisper engine uses own-speech suppression instead
     wake_whisper_model: str = "tiny.en"
-    wake_window_s: float = 1.2
+    wake_window_s: float = 2.0   # long enough to hold a slowly spoken "Ve-ro-ni-ca"
     wake_hop_s: float = 0.25
     wake_min_rms: float = 0.003   # far-field speech sits around 0.003-0.01; near-field 0.012-0.05
     wake_phrases: list[str] = Field(
