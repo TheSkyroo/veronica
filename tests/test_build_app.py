@@ -205,3 +205,35 @@ def test_bundle_bytes_are_identical_across_rebuilds(tmp_path):
     later = FakeRun({**GIT_SCRIPT, "git log -1 --format=%cI": (0, "2027-01-01T00:00:00+00:00\n", "")})
     b = build_app.build_app(dist_dir=tmp_path, run=later, **kw)   # same dist dir, new build stamp
     assert digest(b) == first
+
+
+def test_brain_dirs_follow_per_shell_symlinks(tmp_path):
+    """A version manager's per-shell bin (fnm/nvm "multishell") disappears
+    with the shell that created it, so the baked-in PATH must also carry the
+    node installation the shim resolves to."""
+    from scripts.build_app import _brain_dirs
+
+    install = tmp_path / "node-versions" / "v26" / "installation"
+    (install / "bin").mkdir(parents=True)
+    pkg_bin = install / "lib" / "node_modules" / "@openai" / "codex" / "bin"
+    pkg_bin.mkdir(parents=True)
+    (pkg_bin / "codex.js").write_text("#!/usr/bin/env node\n")
+    shell_bin = tmp_path / "fnm_multishells" / "123" / "bin"
+    shell_bin.mkdir(parents=True)
+    (shell_bin / "codex").symlink_to(pkg_bin / "codex.js")
+
+    dirs = _brain_dirs(which=lambda n: str(shell_bin / "codex") if n == "codex" else None)
+    assert str(install / "bin") in dirs      # survives the shell
+    assert str(shell_bin) in dirs            # still first choice while it exists
+
+
+def test_launcher_path_starts_with_the_brain_dirs():
+    from scripts.build_app import _launcher_defines
+    from pathlib import Path
+
+    defines = _launcher_defines(Path("/repo"), Path("/py"), "/claude/bin", Path("/b.json"),
+                                Path("/A.app"), Path("/libpython"), brain_dirs=["/node/bin", "/claude/bin"])
+    parts = defines["PATH_PREFIX"].split(":")
+    assert parts[0] == "/claude/bin" and "/node/bin" in parts
+    assert len(parts) == len(set(parts))     # no duplicates
+    assert parts[-4:] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]

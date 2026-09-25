@@ -99,14 +99,56 @@ def _libpython_for(venv_python: Path) -> Path:
     return hits[0]
 
 
+# The brain CLIs (see veronica/brain/backends): each may live anywhere the
+# user's shell happens to find it — a version manager's per-shell directory,
+# Homebrew, ~/.local/bin — and the .app starts with launchd's minimal PATH.
+# Their real directories are resolved here, at build time, and baked in.
+BRAIN_BINARIES = ("claude", "codex", "agy", "copilot")
+
+
+def _brain_dirs(which=shutil.which) -> list[str]:
+    """Directories holding the brain CLIs, deduplicated, in BRAIN_BINARIES
+    order. A per-shell path (fnm/nvm "multishell" dirs vanish with the shell
+    that made them) is followed to the real install directory first, so the
+    baked-in PATH still works tomorrow."""
+    dirs: list[str] = []
+    for name in BRAIN_BINARIES:
+        found = which(name)
+        if not found:
+            continue
+        # resolve() follows the symlink chain: .../fnm_multishells/<pid>/bin/codex
+        # -> .../node-versions/vX/installation/lib/node_modules/@openai/codex/bin/codex.js
+        real = Path(found).resolve()
+        for candidate in ({str(real.parent)} if real.suffix != ".js" else _js_bin_dirs(real)) | {str(Path(found).parent)}:
+            if candidate not in dirs:
+                dirs.append(candidate)
+    return dirs
+
+
+def _js_bin_dirs(real: Path) -> set[str]:
+    """For a node CLI shim (…/lib/node_modules/<pkg>/bin/x.js) the directory
+    that matters is the node installation's own bin/, not the package's."""
+    out = {str(real.parent)}
+    for parent in real.parents:
+        if parent.name == "node_modules" and parent.parent.name == "lib":
+            out.add(str(parent.parent.parent / "bin"))
+            break
+    return out
+
+
 def _launcher_defines(repo: Path, python: Path, claude_dir: str, build_json: Path, app: Path,
-                      libpython: Path) -> dict[str, str]:
+                      libpython: Path, brain_dirs: list[str] | None = None) -> dict[str, str]:
+    prefix = [claude_dir, *(brain_dirs or []), str(Path.home() / ".local" / "bin"),
+              "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    seen: list[str] = []
+    for part in prefix:
+        if part and part not in seen:
+            seen.append(part)
     return {
         "LIBPYTHON": str(libpython),
         "VENV_PYTHON": str(python),
         "REPO_DIR": str(repo),
-        "PATH_PREFIX": f"{claude_dir}:{Path.home() / '.local' / 'bin'}:/opt/homebrew/bin:/usr/local/bin:"
-                       "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH_PREFIX": ":".join(seen),
         "BUILD_JSON": str(build_json),
         "APP_BUNDLE": str(app),
     }
@@ -218,7 +260,8 @@ def build_app(
     # launcher: a native stub that embeds CPython (see STUB_SOURCE)
     launcher = macos_dir / APP_NAME
     libpython = libpython or _libpython_for(venv_python)
-    defines = _launcher_defines(repo, venv_python, claude_dir, build_json, app.resolve(), libpython)
+    defines = _launcher_defines(repo, venv_python, claude_dir, build_json, app.resolve(), libpython,
+                                brain_dirs=_brain_dirs())
     (compiler or _compile_with_clang)(STUB_SOURCE, launcher, defines)
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
