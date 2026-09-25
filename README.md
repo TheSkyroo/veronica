@@ -253,15 +253,26 @@ search when the local Python's sqlite3 build has it, otherwise a plain substring
   recent context into a fresh Claude session.
 - **Remember a fact** — "remember that I take my coffee black" / "remember I'm allergic to peanuts": stored as a
   fact and said back as "Got it." This is a local intent (matched before the brain runs), so it works even offline
-  and doesn't cost a Claude turn.
+  and doesn't cost a Claude turn. Say roughly the same thing again and the old wording is *replaced* rather than
+  kept twice — she says "Updated that." when that happened.
+- Every fact is filed under a kind — preference, person, place, routine or other — worked out from its wording when
+  it is written (cue words, no model call). `facts_list` reads them back grouped under those headings.
 - **Forget a fact** — "forget that I take my coffee black" / "forget the peanut thing": removes any matching fact
   and says "Forgotten." (or "I didn't have that." if nothing matched).
+- **Forget a whole topic** — "forget everything about the office" / "forget anything related to Priya": removes
+  every fact that topic turns up in and says how many went ("Forgot three things about the office."). Generic
+  sweeps ("forget everything", "forget it") still delete nothing.
 - Claude can also manage memory itself mid-conversation via MCP tools: `recall` (search past turns) and `facts_list`
   run automatically; `fact_add` and `fact_delete` both ask "Run …?" first — a fact persists across every future
   session, so it gets the same confirmation as anything else that changes standing state.
 - On every new Claude session, Veronica injects a short "Facts about the user" list and the last few turns
   ("Recent conversation") into the system prompt, capped small (2 KB / 1 KB) so it stays cheap — an existing session
   already carries its own context, so this only matters right after a fresh one starts.
+- The facts block holds at most `memory_facts_max` facts (40 by default, editable under Settings > Brain), most
+  recently used first. "Used" is worked out from the words of her reply — after each turn, the facts whose
+  distinctive words show up in what she just said are bumped to the front — so a long memory keeps the facts that
+  actually come up and quietly drops the ones that never do (they stay in the database and her memory tools still
+  find them).
 
 Disable memory entirely (no DB, no injection, no remember/forget intents) with:
 
@@ -435,7 +446,8 @@ used to need an environment variable or a voice command.
   it straight on the History tab.
 - **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
   spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
-  utterance limits, briefing/nudge schedule, start at login, push-to-talk.
+  utterance limits, briefing/nudge schedule, facts carried into a new conversation, start at login,
+  push-to-talk.
 - **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
   brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
   Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a
