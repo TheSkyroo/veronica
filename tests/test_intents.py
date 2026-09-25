@@ -142,6 +142,10 @@ def test_normalize_strips_punctuation_and_case():
         ("remember if I locked the door", None),
         ("remember why I called", None),
         ("forget when we went to Paris", ("forget", "when we went to Paris")),
+        ("forget everything about the office", ("forget_topic", "the office")),
+        ("Forget anything related to Priya.", ("forget_topic", "Priya")),
+        ("forget all about the office", ("forget_topic", "the office")),
+        ("forget everything", ("forget", "everything")),
         ("what time is it", None),
         ("", None),
         (None, None),
@@ -337,6 +341,39 @@ def test_match_proactive_intent(text, expected):
     assert match_proactive_intent(text) == expected
 
 
+@pytest.mark.parametrize("s,expected", [
+    ("an hour", 60), ("1 hour", 60), ("2 hours", 120), ("30 minutes", 30), ("45 mins", 45),
+    ("half an hour", 30), ("ek ghanta", 60), ("do ghante", 120), ("aadhe ghante", 30),
+    ("20 minute", 20), ("", None), ("a while", None), ("5 days", None),
+])
+def test_parse_duration_minutes(s, expected):
+    from veronica.brain.intents import parse_duration_minutes
+    assert parse_duration_minutes(s) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("snooze notifications for an hour", ("snooze", 60)),
+    ("snooze notifications", ("snooze", None)),
+    ("snooze for 30 minutes", ("snooze", 30)),
+    ("mute nudges until 5", ("snooze", "05:00?")),
+    ("mute notifications until 5 pm", ("snooze", "17:00")),
+    ("pause notifications for 2 hours", ("snooze", 120)),
+    ("silence notifications till midnight", ("snooze", "00:00")),
+    ("ek ghante ke liye notifications band karo", ("snooze", 60)),
+    ("notifications rok do", ("snooze", None)),
+    ("5 baje tak nudges band karo", ("snooze", "05:00?")),
+    ("resume notifications", ("resume", None)),
+    ("unsnooze", ("resume", None)),
+    ("turn notifications back on", ("resume", None)),
+    ("notifications shuru karo", ("resume", None)),
+    ("snooze the alarm", None),
+    ("mute", None),
+    ("snooze notifications for a while", None),
+])
+def test_match_snooze_intent(text, expected):
+    assert match_proactive_intent(text) == expected
+
+
 @pytest.mark.parametrize("text,expected", [
     ("bas karo", "end"), ("theek hai bas", "end"), ("chup", "end"), ("chup raho", "end"),
     ("band karo", "end"), ("ruko", "end"), ("ruk jao", "end"),
@@ -446,6 +483,15 @@ from veronica.brain.intents import match_brain_intent
     # not a which-brain phrase: it is usually about a photo, a caller or a name
     ("who is this", None), ("who is this?", None),
     ("kaunsa brain hai", ("which", None)),
+    # offline / online (F1)
+    ("go offline", ("switch", "local")), ("offline mode", ("switch", "local")),
+    ("use the local model", ("switch", "local")), ("switch to local", ("switch", "local")),
+    ("Veronica, go offline please.", ("switch", "local")), ("work offline", ("switch", "local")),
+    ("offline ho jao", ("switch", "local")), ("local model use karo", ("switch", "local")),
+    ("go online", ("online", None)), ("back online", ("online", None)),
+    ("go back online", ("online", None)), ("online ho jao", ("online", None)),
+    # near misses that belong to the brain
+    ("is the printer offline", None), ("put my phone offline", None), ("order a local pizza", None),
     ("use qwen please", None), ("use gemini", None), ("switch to spanish", None),
     ("use a british voice", None), ("open codex", None), ("use codex to write a poem", None),
     ("", None),
@@ -457,3 +503,49 @@ def test_match_brain_intent(text, expected):
 def test_hinglish_which_brain_phrases_count_as_hinglish():
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES
     assert {"kaunsa brain hai", "kaun sa model hai"} <= HINGLISH_INTENT_PHRASES
+
+
+def test_hinglish_offline_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"offline ho jao", "online ho jao"} <= HINGLISH_INTENT_PHRASES
+
+
+# -- F2: pause / continue -------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("hold on", True), ("Hold on!", True), ("hold up", True), ("hang on", True),
+    ("wait", True), ("wait a second", True), ("one sec", True), ("one second", True),
+    ("veronica hold on please", True), ("okay wait", True),
+    ("ruko", True), ("ek minute", True), ("रुको", True), ("एक मिनट", True),
+    # not a pause: a request that happens to contain the word
+    ("wait for the build to finish", False), ("hold my calls", False),
+    ("continue", False), ("", False),
+])
+def test_is_pause_phrase(text, expected):
+    from veronica.brain.intents import is_pause_phrase
+    assert is_pause_phrase(text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("continue", True), ("Continue.", True), ("carry on", True), ("go on", True),
+    ("keep going", True), ("aage bolo", True), ("आगे बोलो", True),
+    ("okay go on", True),
+    ("continue the story about mars", False), ("go on a walk", False),
+    ("resume", False),   # that's "resume music"
+    ("hold on", False), ("", False),
+])
+def test_is_resume_phrase(text, expected):
+    from veronica.brain.intents import is_resume_phrase
+    assert is_resume_phrase(text) is expected
+
+
+def test_resume_phrases_do_not_collide_with_other_intents():
+    """one_turn runs the resume branch ahead of the intent ladder, so a
+    continue phrase must not also be an end/HUD/mute/quit phrase."""
+    from veronica.brain.intents import RESUME_PHRASES, match_intent
+    assert all(match_intent(p) is None for p in RESUME_PHRASES)
+
+
+def test_hinglish_pause_and_continue_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"ek minute", "aage bolo"} <= HINGLISH_INTENT_PHRASES

@@ -110,12 +110,15 @@ CASES = [
     ("mcp__mac__volume_set", {"level": 30}, ALLOW),
     ("mcp__mac__applescript", {"script": "beep"}, CONFIRM),
     ("mcp__mac__unknown", {}, CONFIRM),
+    # no allowlist passed: every shortcut is asked about
+    ("mcp__mac__run_shortcut", {"name": "Morning"}, CONFIRM),
     # pim tools
     ("mcp__pim__calendar_events", {"day": "today"}, ALLOW),
     ("mcp__pim__calendar_create", {"title": "x", "start": "2026-09-20 10:00"}, CONFIRM),
     ("mcp__pim__mail_unread", {}, ALLOW),
     ("mcp__pim__mail_search", {"query": "x"}, ALLOW),
     ("mcp__pim__mail_send", {"to": "a@b.com", "subject": "s", "body": "b"}, CONFIRM),
+    ("mcp__pim__message_send", {"to": "+1555", "body": "b"}, CONFIRM),
     ("mcp__pim__reminder_create", {"title": "x"}, CONFIRM),
     ("mcp__pim__reminders_due", {}, ALLOW),
     ("mcp__pim__timer_set", {"minutes": 1}, ALLOW),
@@ -178,6 +181,7 @@ _SECAGENT = Front(app="SecurityAgent", bundle_id="com.apple.SecurityAgent", wind
 
 ALWAYS_CASES = [
     ("mcp__pim__mail_send", {"to": "a@b.c"}, True),
+    ("mcp__pim__message_send", {"to": "+1555", "body": "on my way"}, True),
     ("mcp__pim__calendar_create", {"title": "x"}, False),
     ("mcp__mac__clipboard_write", {"text": "x"}, False),
     ("mcp__memory__fact_add", {"text": "x"}, False),
@@ -276,6 +280,38 @@ def test_always_confirm_computer_type_in_terminal():
 def test_always_confirm_every_computer_tool_on_system_dialog(short, inp):
     assert always_confirm(f"mcp__computer__{short}", inp, _SECAGENT) is True
     assert always_confirm(f"mcp__computer__{short}", inp, None) is False
+
+
+# --- run_shortcut: allow only what the user put on the allowlist -------------
+
+def test_run_shortcut_allowlisted_name_is_allowed():
+    assert classify("mcp__mac__run_shortcut", {"name": "Morning"}, ["Morning"]) == ALLOW
+
+
+def test_run_shortcut_allowlist_ignores_case_and_padding():
+    assert classify("mcp__mac__run_shortcut", {"name": " morning "}, [" Morning"]) == ALLOW
+
+
+def test_run_shortcut_off_the_allowlist_confirms():
+    assert classify("mcp__mac__run_shortcut", {"name": "Wipe Disk"}, ["Morning"]) == CONFIRM
+    assert classify("mcp__mac__run_shortcut", {"name": ""}, ["Morning", ""]) == CONFIRM
+    assert classify("mcp__mac__run_shortcut", {}, ["Morning"]) == CONFIRM
+
+
+def test_run_shortcut_empty_allowlist_allows_nothing():
+    assert classify("mcp__mac__run_shortcut", {"name": "Morning"}, []) == CONFIRM
+
+
+def test_the_allowlist_does_not_leak_to_other_tools():
+    # the extra argument must not turn anything else into an auto-allow
+    assert classify("mcp__mac__applescript", {"script": "Morning"}, ["Morning"]) == CONFIRM
+    assert classify("mcp__pim__message_send", {"to": "Morning"}, ["Morning"]) == CONFIRM
+
+
+def test_run_shortcut_is_not_always_confirm():
+    # allowlisted shortcuts are meant to be auto-allowed; only the classify
+    # gate decides, so this must stay False
+    assert always_confirm("mcp__mac__run_shortcut", {"name": "Morning"}) is False
 
 
 def test_always_confirm_future_send_tools():

@@ -751,3 +751,225 @@ def test_limit_decision_shows_as_a_tool_card():
 
         assert not errors, f"page errors: {errors}"
         browser.close()
+
+
+def _plan(*steps):
+    """A plan event push, as the orchestrator sends it."""
+    body = ", ".join("{summary:%s, state:%s}" % (repr(s), repr(st)) for s, st in steps)
+    return "window.hud.push({kind:'plan', payload:{steps:[" + body + "]}})"
+
+
+@pytest.mark.live
+def test_plan_checklist_renders_each_state():
+    """A multi-step turn's checklist under the action card: one row per step,
+    a mark per state, and the tool card's own palette (amber running, green
+    done, red declined)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        assert page.eval_on_selector("#plan", "el => getComputedStyle(el).display") == "none"
+
+        page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
+        page.evaluate(_plan(("Read: /a", "done"), ("Bash: rm x", "declined"),
+                            ("Open Safari", "running"), ("Copy to clipboard", "pending")))
+
+        rows = page.eval_on_selector_all(
+            "#plan .step", "els => els.map(e => [e.className, e.querySelector('.mark').textContent, "
+                           "e.querySelector('.msg').textContent])")
+        assert rows == [
+            ["step done", "✓", "Read: /a"],
+            ["step declined", "✕", "Bash: rm x"],
+            ["step running", "▸", "Open Safari"],
+            ["step pending", "○", "Copy to clipboard"],
+        ]
+        assert page.locator("#plan .more").count() == 0
+        # the action card opens for the plan even if no tool card preceded it
+        assert "hidden" not in (page.get_attribute("#action", "class") or "")
+
+        colors = page.eval_on_selector_all(
+            "#plan .step", "els => els.map(e => getComputedStyle(e).color)")
+        assert colors[0] == "rgb(125, 255, 176)"    # done: the 'allowed' green
+        assert colors[1] == "rgb(255, 122, 122)"    # declined: the 'declined' red
+        assert colors[2] == "rgb(255, 180, 84)"     # running: the 'ask' amber
+        # pending is the plain text colour, only muted
+        assert float(page.eval_on_selector("#plan .step.pending", "el => getComputedStyle(el).opacity")) < 0.6
+
+        st = page.evaluate("window.hud.state()")
+        assert [s["state"] for s in st["plan"]] == ["done", "declined", "running", "pending"]
+
+        # The checklist stays inside the 540x300 card.
+        card = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        box = page.eval_on_selector("#plan", "el => el.getBoundingClientRect()")
+        assert box["left"] >= card["left"] - 0.5 and box["right"] <= card["right"] + 0.5
+        assert box["bottom"] <= card["bottom"] + 0.5
+
+        # An empty plan (the reset at the top of the next turn) puts it away.
+        page.evaluate("window.hud.push({kind:'plan', payload:{steps:[]}})")
+        assert page.eval_on_selector("#plan", "el => getComputedStyle(el).display") == "none"
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_plan_collapses_older_steps():
+    """Never more than five rows: the older ones become a "+N more" line
+    above them, so the part that is still moving is always on screen."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        steps = [("Step %d" % i, "done") for i in range(1, 8)] + [("Step 8", "running")]
+        page.evaluate("window.hud.push({kind:'heard', payload:'do the whole thing'})")
+        page.evaluate(_plan(*steps))
+
+        assert page.inner_text("#plan .more") == "+3 more"
+        shown = page.eval_on_selector_all("#plan .step .msg", "els => els.map(e => e.textContent)")
+        assert shown == ["Step 4", "Step 5", "Step 6", "Step 7", "Step 8"]
+
+        card = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        box = page.eval_on_selector("#plan", "el => el.getBoundingClientRect()")
+        assert box["bottom"] <= card["bottom"] + 0.5, (box, card)
+
+        # A new turn clears the checklist along with the rest of the card.
+        page.evaluate("window.hud.push({kind:'heard', payload:'something else'})")
+        assert page.eval_on_selector("#plan", "el => getComputedStyle(el).display") == "none"
+        assert page.evaluate("window.hud.state()")["plan"] == []
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_plan_mini_mode_shows_only_the_running_step():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 400, "height": 72}, device_scale_factor=2)
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.setMode('mini')")
+        page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "running"),
+                            ("Copy to clipboard", "pending")))
+
+        # The full checklist lives in #text, which mini mode hides wholesale.
+        assert page.eval_on_selector("#text", "el => getComputedStyle(el).display") == "none"
+        # ...so the caption pill carries the one step that is running.
+        assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") != "none"
+        assert page.inner_text("#caption .step") == "2/3 Open Safari"
+        assert page.inner_text("#caption .msg") == "Thinking…"
+
+        cap = page.eval_on_selector("#caption", "el => el.getBoundingClientRect()")
+        assert cap["left"] >= 0 and cap["top"] >= 0
+        assert cap["right"] <= 400 and cap["bottom"] <= 72
+
+        # Nothing running (every step settled): no step chip at all.
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "done")))
+        assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") == "none"
+
+        # Back to full: the checklist is there, the caption chip is not.
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "running")))
+        page.evaluate("window.hud.setMode('full')")
+        assert page.eval_on_selector("#plan", "el => getComputedStyle(el).display") != "none"
+        assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") == "none"
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_plan_survives_a_malformed_payload():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'plan'})")
+        page.evaluate("window.hud.push({kind:'plan', payload:{steps:'nope'}})")
+        page.evaluate("window.hud.push({kind:'plan', payload:{steps:[null, 3]}})")
+        assert page.evaluate("window.hud.state()")["plan"] == []
+
+        # An unknown state renders as pending rather than an unstyled row.
+        page.evaluate("window.hud.push({kind:'plan', payload:{steps:[{summary:'A'},"
+                      "{summary:'B', state:'exploded'}]}})")
+        rows = page.eval_on_selector_all("#plan .step", "els => els.map(e => e.className)")
+        assert rows == ["step pending", "step pending"]
+
+        assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_plan_does_not_overlap_the_rest_of_the_card():
+    """The tightest the full card ever gets: a confirmation outstanding as the
+    last step of a long checklist. Everything must still fit, unoverlapped."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300}, device_scale_factor=2)
+        errors = []
+        page.on("pageerror", lambda exc: errors.append(exc))
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.wait_for_timeout(100)
+
+        page.evaluate("window.hud.push({kind:'state', payload:'confirming'})")
+        page.evaluate("window.hud.push({kind:'hud', payload:{backend:'Codex'}})")
+        page.evaluate("window.hud.push({kind:'heard', payload:" + repr("word " * 60) + "})")
+        for s in ("This is a long first sentence about the weather that goes on quite a while.",
+                  "This is a long second sentence about the weather that goes on quite a while."):
+            page.evaluate("window.hud.push({kind:'sentence', payload:" + repr(s) + "})")
+        page.wait_for_timeout(2500)   # let the typewriter catch up
+        page.evaluate("window.hud.push({kind:'prompt', payload:'Delete build/?'})")
+        page.evaluate(
+            "window.hud.push({kind:'tool', payload:{summary:'Bash: rm -rf build', "
+            "detail:'Bash: rm -rf build', decision:'ask', timeout_ms:8000}})"
+        )
+        page.evaluate(_plan(("Read: /a", "done"), ("Grep: TODO", "done"), ("Read: /b", "done"),
+                            ("Open Safari", "done"), ("Copy to clipboard: a rather long one", "done"),
+                            ("Bash: rm -rf build", "pending")))
+        page.wait_for_timeout(100)
+
+        card = page.eval_on_selector("#card", "el => el.getBoundingClientRect()")
+        boxes = {sel: page.eval_on_selector(sel, "el => el.getBoundingClientRect()")
+                 for sel in ("#status", "#reply", "#action")}
+        for sel, box in boxes.items():
+            assert box["top"] >= card["top"] - 0.5, (sel, box, card)
+            assert box["bottom"] <= card["bottom"] + 0.5, (sel, box, card)
+            assert box["left"] >= card["left"] - 0.5 and box["right"] <= card["right"] + 0.5, (sel, box)
+        names = list(boxes)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                assert not _rects_intersect(boxes[names[i]], boxes[names[j]]), (names[i], names[j])
+
+        page.locator("#card").screenshot(path=str(SCREENSHOT_DIR / "hud-plan.png"))
+        assert not errors, f"page errors: {errors}"
+        browser.close()

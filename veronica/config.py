@@ -16,7 +16,12 @@ log = logging.getLogger("veronica.config")
 
 # The brains Veronica can run on, in the user's default order. The registry
 # in veronica.brain.backends is the source of truth for everything else.
-BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot")
+BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot", "local")
+
+# The offline brain's defaults: the llama.cpp server and weights the user
+# already keeps on this Mac. Both are plain paths, editable in Settings.
+LOCAL_SERVER_BIN = Path.home() / "Github/sih/manas/runtime/bin/llama-server"
+LOCAL_MODEL = Path.home() / "Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf"
 
 
 class Settings(BaseSettings):
@@ -38,6 +43,9 @@ class Settings(BaseSettings):
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
     capture_extra_s: float = 3.0
+    # How long a turn may stay silent before she says a short "On it." so a
+    # slow brain doesn't feel like a dropped question. 0 turns the line off.
+    ack_after_s: float = 3.5
 
     # wake word
     wake_engine: str = "whisper"
@@ -94,16 +102,33 @@ class Settings(BaseSettings):
     # ahead skips the yes/no for the ONE confirm-class action it produces
     # (never for always-confirm tools, see policy.always_confirm).
     preapprove_by_wording: bool = True
+    # Shortcuts the user has marked safe: `run_shortcut` runs these without
+    # asking. Everything else is confirm-class, so an empty list (the
+    # default) means every shortcut is asked about.
+    shortcut_allowlist: list[str] = Field(default_factory=list)
     # External brains: may the vendor CLI use its own shell/file tools
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.
     codex_native_tools: bool = True
     antigravity_native_tools: bool = True
     copilot_native_tools: bool = True
+    # Offline brain (veronica.brain.backends.local): a llama.cpp server on
+    # this Mac. Started lazily, on a port of ours, and never asked to reach
+    # the network.
+    local_server_bin: Path = Field(default_factory=lambda: LOCAL_SERVER_BIN)
+    local_model: Path = Field(default_factory=lambda: LOCAL_MODEL)
+    local_ctx: int = 8192
+    local_port: int = 8749
+    # Stand the local brain in when the active brain needs the network and
+    # there isn't any (see veronica.net / BrainSwitcher.maybe_offline).
+    brain_offline_fallback: bool = True
 
     # memory
     memory_enabled: bool = True
     memory_recent_turns: int = 6
+    # How many remembered facts the system prompt carries, most-recently-used
+    # first; the block is still byte-capped on top of this (brain/prompts.py).
+    memory_facts_max: int = 40
 
     # push-to-talk
     ptt_enabled: bool = True
@@ -187,6 +212,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "int", "Confirmation timeout (seconds)", "How long she waits for yes/no.",
         min=3, max=30, restart=False,
     ),
+    "ack_after_s": EditableField(
+        "float", "\"On it\" after (seconds)",
+        "How long a slow answer may stay silent before she says she's on it. 0 = never.",
+        min=0, max=15, restart=False,
+    ),
     "vad_silence_ms": EditableField(
         "int", "End-of-speech silence (ms)",
         "How long you can pause before Veronica decides you're done talking. "
@@ -228,6 +258,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
+    "memory_facts_max": EditableField(
+        "int", "Facts she carries into a new conversation",
+        "The most recently used facts go first; the rest stay in memory and still come back "
+        "via her memory tools. 0 = none.",
+        min=0, max=200, restart=False,
+    ),
     "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
     "brain_session_max_age_h": EditableField(
         "int", "Start a fresh conversation after (hours)",
@@ -243,6 +279,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", 'Pre-approve when I say "do it"',
         "If your request already says do it / go ahead, skip the yes/no for that one action "
         "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
+    ),
+    "shortcut_allowlist": EditableField(
+        "list", "Shortcuts she may run without asking",
+        "Comma-separated shortcut names, exactly as they're named in Shortcuts. "
+        "Anything not listed still asks first.",
         restart=False,
     ),
     "brain_backend": EditableField(
@@ -276,6 +318,25 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", "Copilot: allow its own shell",
         "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
+    ),
+    "brain_offline_fallback": EditableField(
+        "bool", "Use the local model when offline",
+        "No internet? Answer on the model running on this Mac, and go back when it returns.",
+        restart=False,
+    ),
+    "local_server_bin": EditableField(
+        "str", "Local server", "Path to llama-server.", restart=False,
+    ),
+    "local_model": EditableField(
+        "str", "Local model", "Path to the .gguf weights she thinks with offline.", restart=False,
+    ),
+    "local_ctx": EditableField(
+        "int", "Local context (tokens)", "Bigger remembers more and loads slower.",
+        min=1024, max=131072, restart=False,
+    ),
+    "local_port": EditableField(
+        "int", "Local port", "Where the local server listens, on this Mac only.",
+        min=1024, max=65535, restart=False,
     ),
 }
 

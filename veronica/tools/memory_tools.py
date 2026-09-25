@@ -6,6 +6,8 @@ import asyncio
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from veronica.memory.store import KIND_LABELS
+
 RECALL_LIMIT_MAX = 20
 
 
@@ -61,15 +63,19 @@ async def recall(args: dict) -> dict:
     return _ok("\n".join(lines))
 
 
-@tool("facts_list", "List all facts remembered about the user", {})
+@tool("facts_list", "List all facts remembered about the user, grouped by kind", {})
 @_guard
 async def facts_list(args: dict) -> dict:
     if store is None:
         return _err("memory store not available")
-    rows = await asyncio.to_thread(store.facts)
-    if not rows:
+    grouped = await asyncio.to_thread(store.facts_by_kind)
+    if not grouped:
         return _ok("No facts remembered.")
-    return _ok("\n".join(text for _id, _ts, text in rows))
+    blocks = [
+        "\n".join([f"{KIND_LABELS.get(kind, kind)}:", *(f"- {t}" for t in texts)])
+        for kind, texts in grouped.items()
+    ]
+    return _ok("\n".join(blocks))
 
 
 @tool("fact_add", "Remember a new fact about the user", {"text": str})
@@ -80,7 +86,11 @@ async def fact_add(args: dict) -> dict:
     text = str(args.get("text", "")).strip()
     if not text:
         return _err("text is required")
-    await asyncio.to_thread(store.add_fact, text)
+    _id, replaced = await asyncio.to_thread(store.remember, text)
+    if replaced:
+        # The dedupe is fuzzy: name what it overwrote, so a wrong match comes
+        # back to the brain (and so to the user) instead of going unnoticed.
+        return _ok(f"Updated: {text} — that replaces {replaced!r}")
     return _ok(f"Remembered: {text}")
 
 

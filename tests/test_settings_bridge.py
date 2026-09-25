@@ -210,11 +210,14 @@ def test_state_has_every_section_and_key(h):
     assert {"followup_window_s", "confirm_listen_s", "wake_min_rms", "wake_phrases",
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
             "input_volume_floor"} <= set(st["listening"])
-    assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
+    assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
+                                    "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
+                                    "unread_enabled", "unread_time"}
+    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
-                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools", "brain_label",
-                                    "brain_session_max_age_h"}
+                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
+                                "brain_offline_fallback", "local_server_bin", "local_model",
+                                "local_ctx", "local_port", "brain_session_max_age_h", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -492,6 +495,18 @@ def test_set_preapprove_by_wording_is_live(h):
     assert h.bridge.get_state()["brain"]["preapprove_by_wording"] is True
 
 
+def test_set_offline_fallback_and_local_paths_are_live(h):
+    assert h.bridge.set("brain", "brain_offline_fallback", False)["ok"]
+    assert h.orch.s.brain_offline_fallback is False
+    assert ("brain_offline_fallback", False) in h.prefs.overrides
+    assert h.bridge.set("brain", "local_model", "/models/other.gguf")["ok"]
+    assert str(h.orch.s.local_model) == "/models/other.gguf"
+    assert h.bridge.set("brain", "local_ctx", 4096)["ok"] and h.orch.s.local_ctx == 4096
+    assert h.bridge.set("brain", "local_port", 9000)["ok"] and h.orch.s.local_port == 9000
+    st = h.bridge.get_state()["brain"]
+    assert st["local_model"] == "/models/other.gguf" and st["local_ctx"] == 4096
+
+
 def test_set_restart_class_saves_while_warming():
     h = Harness(warming=True)
     res = h.bridge.set("brain", "effort", "high")
@@ -529,6 +544,19 @@ def test_set_briefings_mutates_schedule_and_saves(h):
         True, "07:45", True, 60)
     assert h.prefs.saved[-1] == {"proactive": sched.to_prefs()}
     assert h.orch.calls == []  # silent
+
+
+def test_set_quiet_hours_and_trigger_rows(h):
+    assert h.bridge.set("briefings", "quiet_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "quiet_from", "23:00")["ok"]
+    assert h.bridge.set("briefings", "quiet_to", "07:15")["ok"]
+    assert h.bridge.set("briefings", "battery_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "unread_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "unread_time", "10:30")["ok"]
+    sched = h.orch.proactive.schedule
+    assert (sched.quiet_enabled, sched.quiet_from, sched.quiet_to) == (True, "23:00", "07:15")
+    assert (sched.battery_enabled, sched.unread_enabled, sched.unread_time) == (True, True, "10:30")
+    assert h.bridge.set("briefings", "quiet_from", "11 pm")["ok"] is False
 
 
 def test_set_briefing_time_validated(h):
@@ -892,7 +920,7 @@ def test_state_brain_label_comes_from_the_switcher():
     assert st["brain"]["brain_label"] == "Claude (for Codex)"
     assert st["brain"]["brain_backend"] == "codex"
     assert st["brain"]["brain_failover"] is True and st["brain"]["codex_native_tools"] is True
-    assert st["meta"]["fields"]["brain_backend"]["choices"] == ["codex", "antigravity", "claude", "copilot"]
+    assert st["meta"]["fields"]["brain_backend"]["choices"] == ["codex", "antigravity", "claude", "copilot", "local"]
 
 
 def test_state_brain_label_empty_without_switcher(h):
@@ -942,3 +970,15 @@ def test_set_brain_failover_fields_are_live(h):
     assert h.bridge.set("brain", "copilot_native_tools", False)["ok"]
     assert h.orch.s.copilot_native_tools is False
     assert h.bridge.get_state()["brain"]["copilot_native_tools"] is False
+
+
+def test_shortcut_allowlist_is_editable_and_has_a_row(h):
+    # the list field takes a comma-separated string from the window
+    assert h.bridge.set("brain", "shortcut_allowlist", "Morning, Pay Rent")["ok"]
+    assert h.orch.s.shortcut_allowlist == ["Morning", "Pay Rent"]
+    assert ("shortcut_allowlist", ["Morning", "Pay Rent"]) in h.prefs.overrides
+    assert h.bridge.get_state()["brain"]["shortcut_allowlist"] == ["Morning", "Pay Rent"]
+    assert EDITABLE_SETTINGS["shortcut_allowlist"].kind == "list"
+    # ...and settings.js hand-lists a row for it, or the window can't reach it
+    js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
+    assert "settingRow('brain', 'shortcut_allowlist'" in js

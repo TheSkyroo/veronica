@@ -22,6 +22,8 @@ from veronica.brain.backends import BACKENDS
 from veronica.brain.backends.cli import LimitError
 from veronica.brain.gate import GateServer
 from veronica.brain.intents import (
+    is_pause_phrase,
+    is_resume_phrase,
     is_stop_dictation,
     match_brain_intent,
     match_dictation_intent,
@@ -61,6 +63,25 @@ PTT = object()
 _TRAILING_STOP_DICTATION_RE = re.compile(
     r"[\s,.;!?]*\b(?:stop|end)\s+dictat(?:ion|ing)\b[\s.!?]*$", re.IGNORECASE
 )
+
+# Small counts read better spoken as words ("Forgot three things") than as
+# digits; past ten the digits are fine.
+_COUNT_WORDS = ("no", "one", "two", "three", "four", "five",
+                "six", "seven", "eight", "nine", "ten")
+
+
+def _count_word(n: int) -> str:
+    return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else str(n)
+
+
+def _cancel_or_reap(fut: asyncio.Future) -> None:
+    """Cancel a not-yet-done synth future; for one that already completed
+    (possibly with an exception) before we got to it, retrieve the result
+    instead so asyncio doesn't complain about an exception nobody read."""
+    if not fut.cancel():
+        with contextlib.suppress(BaseException):
+            fut.exception()
+
 
 @dataclass(frozen=True)
 class ConfirmResult:
@@ -358,10 +379,25 @@ class Orchestrator:
         # must route a wake barge / PTT press to the capture instead of
         # tearing the turn down (which used to turn "yes" into a decline).
         self._confirm_listening = False
+        # F2: the sentences a barge stopped her before she could say them,
+        # as the same (text, synth future) pairs handle_text's queue held —
+        # kept alive so "continue" can speak them without re-synthesising.
+        # Every barge parks them; one_turn drops them the moment the user
+        # says anything other than a pause/continue phrase, and a new brain
+        # turn drops them too, so they can never leak into a later answer.
+        self._paused_tail: list[tuple[str, asyncio.Future]] | None = None
         self._now_speaking = ""
         # Brain turns are numbered per handle_text call; the brain gets the
         # id (begin_turn) so a pre-approval can be pinned to one turn.
         self._turn_id = 0
+        # F3: the current turn's tool calls as a checklist ({summary, state}),
+        # rebuilt per brain turn. `_plan_turn` is True only inside one, so a
+        # local intent's card can't append to a turn that is already over;
+        # `_plan_shown` records whether the HUD is currently showing a card
+        # (it only ever is once a turn made more than one call).
+        self._plan: list[dict] = []
+        self._plan_turn = False
+        self._plan_shown = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
         # Push-to-talk is a *signal* into run_forever / the in-flight turn,
@@ -468,12 +504,83 @@ class Orchestrator:
         self._emit("state", state)
 
     def _emit(self, kind: str, payload) -> None:
-        if self._on_event is None:
+        if self._on_event is not None:
+            try:
+                self._on_event(kind, payload)
+            except Exception:
+                log.exception("on_event failed for %s", kind)
+        # The plan card is a *view* of the tool cards, so fold every one into
+        # the turn's checklist — after the card itself has gone out, so a
+        # listener sees the action before the plan that contains it.
+        if kind == "tool" and isinstance(payload, dict):
+            self._plan_note(str(payload.get("summary") or ""), str(payload.get("decision") or ""))
+
+    # -- plan card (F3) -------------------------------------------------------
+    # A turn that makes more than one tool call shows them as a checklist
+    # instead of one card at a time. Nothing here decides anything: the steps
+    # ARE the decisions ToolGate already reported (through tool_card) plus the
+    # ones confirm() already emitted, so the card can never show an action the
+    # gate didn't allow, and the gate never learns the card exists.
+
+    # A decision that starts a step, and the state it starts in: an auto or
+    # pre-approved call is already executing, an asked one waits on the user.
+    _PLAN_START = {"auto": "running", "preapproved": "running", "ask": "pending"}
+    # ...and how confirm()'s answer settles the step its "ask" started. A
+    # redirect is a decline of *this* action (whatever the user said instead
+    # comes back as its own request).
+    _PLAN_SETTLE = {"allowed": "running", "declined": "declined", "redirected": "declined"}
+
+    def tool_card(self, summary: str, decision: str) -> None:
+        """ToolGate's on_tool hook: the cards it reports (auto, trusted,
+        pre-approved) go out through here rather than straight to the HUD, so
+        they land in the plan alongside the ones confirm() emits."""
+        self._emit("tool", {"summary": summary, "decision": decision})
+
+    def _plan_reset(self) -> None:
+        """Top of a brain turn: the checklist is per turn, never cumulative."""
+        self._plan = []
+        self._plan_turn = True
+        if self._plan_shown:
+            # A card from the previous turn can still be on screen (a turn
+            # that never passed through 'heard' — an announcement, --text
+            # mode — doesn't clear the HUD by itself), so empty it explicitly.
+            self._plan_shown = False
+            self._emit("plan", {"steps": []})
+
+    def _plan_note(self, summary: str, decision: str) -> None:
+        """Fold one tool decision into the turn's checklist."""
+        if not self._plan_turn:
+            return          # a local intent's card outside a brain turn isn't a step
+        state = self._PLAN_START.get(decision)
+        if state is not None:
+            # A new call is proof the previous one finished: the gate only
+            # sees the next tool once the brain has the last one's result.
+            for step in self._plan:
+                if step["state"] == "running":
+                    step["state"] = "done"
+            self._plan.append({"summary": summary, "state": state})
+        elif decision in self._PLAN_SETTLE and self._plan:
+            self._plan[-1]["state"] = self._PLAN_SETTLE[decision]
+        else:
+            return          # "limit" and the like: swapping brains is not a step
+        self._plan_emit()
+
+    def _plan_emit(self) -> None:
+        """Only a multi-step turn gets a card: one tool call keeps the plain
+        action card it has always had."""
+        if len(self._plan) < 2:
             return
-        try:
-            self._on_event(kind, payload)
-        except Exception:
-            log.exception("on_event failed for %s", kind)
+        self._plan_shown = True
+        self._emit("plan", {"steps": [dict(step) for step in self._plan]})
+
+    def _plan_finish(self) -> None:
+        """End of the turn, however it ended: nothing is still running."""
+        self._plan_turn = False
+        if any(step["state"] == "running" for step in self._plan):
+            for step in self._plan:
+                if step["state"] == "running":
+                    step["state"] = "done"
+            self._plan_emit()
 
     # -- speaking -------------------------------------------------------------
     def _finished_speaking(self, text: str) -> None:
@@ -598,11 +705,19 @@ class Orchestrator:
         `lang` ("hi"/"en"/None) picks the voice the reply is spoken with."""
         self._set("thinking")
         self._barged = False   # fresh turn: any earlier barge no longer applies
+        # A new answer supersedes whatever an earlier pause was holding, even
+        # if one_turn never saw the utterance that started it (announcements,
+        # --text mode, a brain-side re-ask).
+        self._drop_paused_tail("a new turn started")
         self._turn_id += 1
         getattr(self.brain, "begin_turn", lambda _tid: None)(self._turn_id)
         t0 = time.monotonic()
         spoken: list[str] = []
         first = True
+        # The item taken off the queue but not yet handed to the player: a
+        # pause landing while its synth is still running must keep it, while
+        # one landing mid-playback must not make her repeat what was heard.
+        unspoken: tuple[str, asyncio.Future] | None = None
         self.player.reset()
         queue: asyncio.Queue = asyncio.Queue(maxsize=2)
 
@@ -632,23 +747,21 @@ class Orchestrator:
             finally:
                 await queue.put(None)
 
-        def _cancel_or_reap(fut: asyncio.Future) -> None:
-            # Cancel a not-yet-done synth future; for one that already
-            # completed (possibly with an exception) before we got to it,
-            # retrieve the result instead so asyncio doesn't complain about
-            # an exception that was never retrieved.
-            if not fut.cancel():
-                with contextlib.suppress(BaseException):
-                    fut.exception()
-
-        def _drain(q: asyncio.Queue) -> None:
+        def _drain(q: asyncio.Queue, keep: list | None = None) -> None:
+            # `keep` is the pause tail: with one, queued sentences are moved
+            # into it (futures left running) instead of being cancelled. A
+            # future that is already dead is never parked — "continue" would
+            # only trip over it.
             while True:
                 try:
                     item = q.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 if item is not None:
-                    _cancel_or_reap(item[1])
+                    if keep is None or item[1].cancelled():
+                        _cancel_or_reap(item[1])
+                    else:
+                        keep.append(item)
                 q.task_done()
 
         # Exposed so confirm() (which the brain may await mid-stream, e.g. as
@@ -658,19 +771,35 @@ class Orchestrator:
         # jump the queue.
         self._speech_queue = queue
         prod = asyncio.create_task(producer())
+        # "On it." if the brain is still thinking ack_after_s in. Its own
+        # task, so it can never sit between the answer and the speakers; it
+        # checks `spoken` at fire time, so a turn that has already said
+        # something stays silent.
+        ack = (
+            asyncio.create_task(self._ack_if_slow(lambda: bool(spoken), lang))
+            if self.s.ack_after_s > 0 else None
+        )
         try:
+            self._plan_reset()
             while True:
                 item = await queue.get()
                 try:
                     if item is None:
                         break
                     sent, fut = item
-                    samples, sr = await fut
+                    unspoken = item
+                    # Shielded: a barge landing in here cancels this turn,
+                    # and the synth has to survive that — it is exactly the
+                    # sentence "continue" would speak. The finally below
+                    # cancels it when nothing is going to.
+                    samples, sr = await asyncio.shield(fut)
                     if first:
                         first = False
                         self._set("speaking")
                         log.info("latency first-sentence=%.2fs", time.monotonic() - t0)
-                    if not self.muted:
+                    if self.muted:
+                        unspoken = None   # nothing was played; nothing to resume
+                    else:
                         async with self._speech_lock:
                             # Emit right after acquiring the lock, immediately
                             # before play, so a listener never sees these
@@ -678,6 +807,10 @@ class Orchestrator:
                             self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
                             self._emit("sentence", sent)
                             self._now_speaking = sent
+                            # Committed to playing it: a pause from here on
+                            # resumes at the sentence AFTER this one, however
+                            # little of it the user actually heard.
+                            unspoken = None
                             try:
                                 await self.player.play(samples)
                             finally:
@@ -695,19 +828,47 @@ class Orchestrator:
             # queue must never be left with unbalanced put()/task_done()
             # counts — an unbalanced queue would hang any confirm() blocked
             # in queue.join() forever.
+            if ack is not None:
+                # Cancelled first (and reaped last): a still-sleeping ack
+                # must not speak into the silence after the turn is over, and
+                # cancel() alone doesn't yield to the loop — awaiting it here
+                # would let the producer take another step before it is
+                # stopped below, which is a different turn's business.
+                ack.cancel()
+            # A barge may turn out to be "hold on": park what she hadn't said
+            # yet (with its synth already running) instead of cancelling it,
+            # so "continue" can pick up exactly there. Anything other than
+            # "continue" drops the lot — see _drop_paused_tail.
+            tail: list | None = [] if self._barged else None
+            if unspoken is not None:
+                if tail is not None and not unspoken[1].cancelled():
+                    tail.append(unspoken)
+                else:
+                    # Nobody will await it: shield() kept it alive past the
+                    # cancellation, so stop it here rather than orphan it.
+                    _cancel_or_reap(unspoken[1])
             prod.cancel()
             # Drain BEFORE awaiting prod: if the queue was full, the
             # producer's own `finally: await queue.put(None)` would block
             # forever with nobody left to consume it. Freeing space here
             # lets that put() (and thus `await prod` below) complete.
-            _drain(queue)
+            _drain(queue, tail)
             with contextlib.suppress(BaseException):
                 await prod
             # The producer's finally may have just put its None sentinel
             # (normal exit already consumed it above, so this is a no-op
             # then); drain it too so unfinished_tasks balances to zero.
-            _drain(queue)
+            _drain(queue, tail)
             self._speech_queue = None
+            if tail:
+                self._paused_tail = tail
+                log.info("barge parked %d unspoken sentence(s)", len(tail))
+            if ack is not None:
+                with contextlib.suppress(BaseException):
+                    await ack
+            # The turn is over — including when it was cancelled out from
+            # under us — so no step of it can still be running.
+            self._plan_finish()
         if not spoken:
             # A brain that stopped right after a redirected confirm isn't
             # speechless — the redirect is about to be run as the next
@@ -715,8 +876,98 @@ class Orchestrator:
             if not getattr(self.brain, "pending_redirect", None):
                 await self.say("I have nothing to say to that.")
         elif self.store is not None and self.s.memory_enabled:
-            self.store.add_turn(text, " ".join(spoken))
+            reply = " ".join(spoken)
+            self.store.add_turn(text, reply)
+            # The brain never says which facts it leaned on, so infer it from
+            # the words that came out (MemoryStore.touch_facts_used) and let
+            # that order the facts block. Done here, after the last sentence
+            # is spoken, so the scan can never sit between a sentence and the
+            # speaker.
+            self.store.touch_facts_used(reply)
         return spoken
+
+    # Deliberately tiny: the acknowledgement must read as "heard you, still
+    # working", never as the answer itself.
+    ACK_TEXT = {"en": "On it.", "hi": "एक सेकंड।"}
+
+    async def _ack_if_slow(self, produced: Callable[[], bool], lang: str | None) -> None:
+        """Say a short "still here" line ack_after_s into a turn, but only
+        while the brain has produced nothing at all. Runs as its own task
+        (handle_text cancels it when the turn ends), so it can only ever
+        take the speech lock ahead of a sentence, never delay one that is
+        already synthesised and waiting."""
+        await asyncio.sleep(self.s.ack_after_s)
+        if produced():
+            return
+        hindi = (lang or self._utterance_lang) == "hi"
+        log.info("ack: brain silent for %.1fs", self.s.ack_after_s)
+        await self.say(self.ACK_TEXT["hi" if hindi else "en"], lang="hi" if hindi else None)
+
+    def _drop_paused_tail(self, why: str) -> None:
+        """Throw away the sentences a pause parked, cancelling the synth
+        futures nobody will await now. Anything but "continue" gets here:
+        the user has moved on, and a stale remainder spoken into a later
+        turn would be worse than saying nothing."""
+        tail, self._paused_tail = self._paused_tail, None
+        if not tail:
+            return
+        log.info("dropping %d paused sentence(s): %s", len(tail), why)
+        for _sent, fut in tail:
+            if not fut.cancel():
+                # already finished: retrieve the result/exception so asyncio
+                # doesn't complain that nobody looked at it.
+                with contextlib.suppress(BaseException):
+                    fut.exception()
+
+    async def _resume_tail(self, tail: list[tuple[str, asyncio.Future]]) -> None:
+        """Speak what a pause held back, in order, starting at the first
+        sentence the user never heard. The synth futures were started by the
+        turn that produced them, so nothing is re-synthesised. A barge in
+        here parks the rest again — "hold on ... continue ... hold on" works
+        as many times as the user likes."""
+        rest = list(tail)
+        self._barged = False   # like a fresh turn: the pause barge is spent
+        self._set("speaking")
+        self.player.reset()
+        try:
+            while rest:
+                sent, fut = rest[0]
+                try:
+                    samples, sr = await asyncio.shield(fut)
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise     # a barge is tearing this resume down
+                    # The parked synth died with the turn that started it.
+                    # One lost sentence is not worth taking the listening
+                    # loop down for, so skip it like any other failure.
+                    log.warning("parked synthesis was cancelled for %r", sent)
+                    rest.pop(0)
+                    continue
+                except Exception:
+                    log.exception("parked synthesis failed for %r", sent)
+                    rest.pop(0)
+                    continue
+                if self.muted:
+                    break
+                async with self._speech_lock:
+                    self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
+                    self._emit("sentence", sent)
+                    self._now_speaking = sent
+                    rest.pop(0)   # committed: a pause now resumes after it
+                    try:
+                        await self.player.play(samples)
+                    finally:
+                        self._finished_speaking(sent)
+        finally:
+            if self._barged and rest:
+                self._paused_tail = rest
+                log.info("barge parked %d unspoken sentence(s)", len(rest))
+            else:
+                # Muted part way through, or the resume ended some other
+                # way: these futures have no reader left.
+                for _sent, fut in rest:
+                    _cancel_or_reap(fut)
 
     async def _brain_turn(self, text: str, images: list[bytes] = (), *, lang: str | None = None) -> list[str]:
         """handle_text plus the confirm redirect: if a confirmation in this
@@ -732,6 +983,9 @@ class Orchestrator:
         through the same path — a limit there is a limit like any other."""
         if self.switcher is not None:
             await self.switcher.maybe_return()
+            # ...and, the other way round, drop to the local model when the
+            # brain that's up needs a vendor host and the wire is dead.
+            await self.switcher.maybe_offline()
         spoken = await self._ask_with_failover(text, images, lang=lang)
         if spoken is None:
             return []
@@ -769,8 +1023,9 @@ class Orchestrator:
 
     # -- brains -----------------------------------------------------------------
     async def _brain_switch_turn(self, action: tuple[str, str | None]) -> None:
-        """Local fast path for "switch to codex" / "which brain are you on":
-        the switcher does the switch (or says why it can't); a switch first
+        """Local fast path for "switch to codex" / "go offline" / "which
+        brain are you on": the switcher does the switch (or says why it
+        can't — "go online" asks it which brain to go back to); a switch first
         interrupts whatever the current brain is doing and drops any
         screen-control trust. Also run by the menu bar's Brain submenu and
         the settings page."""
@@ -779,8 +1034,17 @@ class Orchestrator:
         if sw is None:
             await self.say("I can only use Claude right now.")
             return
+        if kind == "online":
+            name = sw.online_candidate()
+            if name is None:
+                await self.say("No online brain is ready.")
+                return
+            kind, name = "switch", name
         if kind == "which":
             label = self._brain_label()
+            if sw.standing_in and sw.brain.name == "local" and sw._standin_reason == "offline":
+                await self.say("I'm on the local model — there's no internet.")
+                return
             if sw.standing_in and sw.brain.name in BACKENDS:
                 until = sw.limited_until.get(sw.preferred, 0.0)
                 mins = max(1, round((until - sw._clock()) / 60))
@@ -1187,6 +1451,19 @@ class Orchestrator:
             # Dispatched through _run_with_barge by one_turn (see
             # _brief_now_turn), so a long briefing can be cut off.
             await self._brief_now_turn()
+            return
+        if kind in ("snooze", "resume"):
+            # A snooze only holds announcements (the ticker keeps running and
+            # queues them), so it never touches the saved schedule.
+            if kind == "resume":
+                self.proactive.hold_until = None
+                reply = "Okay, notifications back on."
+            else:
+                until = proactive_mod.resolve_hold_until(dt.datetime.now(), 60 if arg is None else arg)
+                self.proactive.hold_until = until
+                reply = f"Okay, quiet until {self._time_spoken(until.strftime('%H:%M'))}."
+            self._emit("tool", {"summary": f"{kind.capitalize()} notifications", "decision": "auto"})
+            await self.say(reply)
             return
         if kind == "briefing_on":
             sched.briefing_enabled = True
@@ -1655,7 +1932,39 @@ class Orchestrator:
                 text = ""
             self._emit("heard", text)
             log.info("heard=%r lang=%s", text, self._utterance_lang)
-            if self.s.preapprove_by_wording and self.detect_preapproval(text):
+            # F2 pause/continue. Checked before everything else, because a
+            # phrase only means this while a barge is holding the rest of an
+            # answer: outside that window "ruko" is still an end phrase and
+            # "wait" is still a request for the brain, and the ladder below
+            # keeps deciding those.
+            resume_hit = False
+            if self._paused_tail is not None:
+                if is_pause_phrase(text):
+                    # The barge already stopped playback and parked the rest,
+                    # so there is nothing to do but stay quiet and listen for
+                    # the word that starts her again. The post-wake window is
+                    # used rather than the short follow-up one: the user
+                    # interrupted on purpose and may need a moment.
+                    log.info("paused with %d sentence(s) held", len(self._paused_tail))
+                    self._set("paused")
+                    pcm = await self._capture_or_ptt(max_s=self.s.listen_wait_s, partial=True)
+                    self._end_partial_window()
+                    if pcm is PTT:
+                        pcm = await self._listen_after_ptt()
+                    is_followup = False
+                    if pcm is None:
+                        # Nothing more said. The remainder stays parked (a
+                        # later "continue" still works); the next request
+                        # drops it.
+                        break
+                    continue
+                if is_resume_phrase(text):
+                    resume_hit = True
+                else:
+                    self._drop_paused_tail(f"superseded by {text!r}")
+            # `not resume_hit`: "go on" is a continue, not a go-ahead for
+            # whatever the next turn's first tool call happens to be.
+            if not resume_hit and self.s.preapprove_by_wording and self.detect_preapproval(text):
                 # The request itself said go ahead: the brain turn this is
                 # about to become (the next handle_text) gets its first
                 # confirm-class action without the yes/no.
@@ -1739,7 +2048,19 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or brain_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
-            if intent in ("hud_mini", "hud_full"):
+            if resume_hit:
+                # "Continue": speak the parked remainder (already synthesised)
+                # under the usual barge race, so she can be stopped — or
+                # paused again — part way through it.
+                tail, self._paused_tail = self._paused_tail, None
+                barged = await self._run_with_barge(self._resume_tail(tail))
+                if barged:
+                    pcm = await self._relisten(barged)
+                    is_followup = False
+                    if pcm is None:
+                        break
+                    continue
+            elif intent in ("hud_mini", "hud_full"):
                 self._emit("hud", {"mode": "mini" if intent == "hud_mini" else "full"})
                 self.player.reset()
                 await self.say("Okay.")
@@ -1763,9 +2084,21 @@ class Orchestrator:
                 kind, arg = mem
                 self.player.reset()
                 if kind == "remember":
+                    # A rewording of something she already has replaces it
+                    # (MemoryStore.remember). The match is fuzzy, so say
+                    # what went: "March 8" quietly eating "March 3" is the
+                    # one failure the user can't otherwise hear.
+                    replaced = ""
                     if self.store is not None:
-                        self.store.add_fact(arg)
-                    await self.say("Got it.")
+                        _id, replaced = self.store.remember(arg)
+                    await self.say(
+                        f"Updated — that replaces '{replaced}'." if replaced else "Got it.")
+                elif kind == "forget_topic":
+                    n = self.store.delete_facts_about(arg) if self.store is not None else 0
+                    await self.say(
+                        f"Forgot {_count_word(n)} {'thing' if n == 1 else 'things'} about {arg}."
+                        if n else f"I didn't have anything about {arg}."
+                    )
                 else:
                     n = self.store.delete_fact_matching(arg) if self.store is not None else 0
                     await self.say("Forgotten." if n else "I didn't have that.")

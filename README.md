@@ -22,6 +22,11 @@ Do not set `ANTHROPIC_API_KEY` (or any other vendor key) — every brain uses th
   models too (~500 MB more) — fetched the first time you say "speak hindi", or ahead of time with
   `uv run python scripts/download_models.py --hindi`.
 - Say the wake word while Veronica is talking to interrupt her (barge-in).
+- Interrupt with "hold on" / "wait" / "one sec" ("ruko", "ek minute") and she stops but keeps the rest of the
+  answer: say "continue" / "carry on" / "go on" ("aage bolo") and she picks up at the next sentence. Anything
+  else you say is treated as a new request and the remainder is dropped; "stop" / "that's all" still cancels.
+- If a slow answer leaves her silent for more than 3.5 s she says "On it." once (Settings → Listening, or
+  `VERONICA_ACK_AFTER_S`; 0 turns it off).
 - Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
 - A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
 - The HUD can be dragged anywhere on screen (click and drag its background) — it reopens wherever you left it.
@@ -110,6 +115,7 @@ one is active. Every brain uses the vendor CLI's own login — there are no API 
 | **Antigravity** | Google's `agy` CLI (Gemini), on your Google account | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` |
 | **Claude** | Anthropic's `claude` CLI (Claude Code), on your Claude plan | `npm i -g @anthropic-ai/claude-code` | `claude` |
 | **Copilot** | GitHub's `copilot` CLI, on your Copilot plan | `npm i -g @github/copilot` | `copilot login` |
+| **Local** | llama.cpp on this Mac — no account, no network | a `llama-server` binary and a `.gguf` | — |
 
 Only the brains that are installed *and* logged in are offered; the check is local and cheap (the binary on
 `PATH` plus the file the login writes — `~/.codex/auth.json`, `~/.copilot/config.json`, Antigravity's
@@ -151,10 +157,12 @@ credits, overloaded …) and **Settings → Brain → Switch brains on usage lim
 on, she says "Codex hit its usage limit — switching to Antigravity.", puts the failed brain in a cooldown of
 **Limit cooldown (minutes)** (`brain_limit_cooldown_min`, default 60) and re-runs the same request once on the
 next brain in **Failover order** (`brain_failover_order`, default `codex,antigravity,claude,copilot`; the
-preferred brain is implicitly first) that is installed, logged in and not cooling down. If none is: "Codex hit
-its usage limit and no other brain is ready." With failover off she just says "Codex hit its usage limit." A
-stand-in that hits its own limit fails over again down the order, each with its own cooldown, and a brain
-already cooling down is never retried in the same chain. The preference is not changed by failover: the HUD
+preferred brain is implicitly first) that is installed, logged in and not cooling down. The local model is never
+picked automatically — a usage limit, or a brain that isn't logged in, is no reason to drop to the 3B weights;
+only a dead wire is (see Offline). If none is: "Codex hit its usage limit and no other brain is ready." With
+failover off she just says "Codex hit its usage limit." A stand-in that hits its own limit fails over again
+down the order, each with its own cooldown, and a brain already cooling down is never retried in the same
+chain. The preference is not changed by failover: the HUD
 shows "Brain: Antigravity (for Codex)", the menu item reads "Antigravity — standing in for Codex", "which brain
 are you on" answers "I'm on Antigravity — Codex hit its limit, I'll try it again in 42 minutes.", and once the
 cooldown passes she returns to the preferred brain **silently** before the next turn (the label updates; the
@@ -162,6 +170,44 @@ next reply just comes from it). A manual "switch to …" clears that brain's coo
 preferred brain isn't installed or logged in, she starts on the first available one and says once "Codex isn't
 logged in, so I'm on Claude for now." (re-checking the preferred one every minute); with nothing ready she
 says "No brain is ready — log into Codex, Antigravity or Claude."
+
+### Offline
+
+The **Local** brain is a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` running on this Mac,
+with a quantised model file. Nothing leaves the machine: no account, no login, no network call, not even to
+check for one.
+
+She starts the server herself on the first local turn (`llama-server --model <gguf> --ctx-size 8192 --host
+127.0.0.1 --port 8749 --jinja --no-webui`), waits for `/health`, and leaves it running until she is closed or
+ten minutes pass without a turn — a model load costs seconds, so it is worth keeping warm. A server already
+listening on that port is used as-is rather than replaced.
+
+**Settings → Brain → Offline:** *Use the local model when offline* (`brain_offline_fallback`, default on),
+*Local model* (`local_model`, default `~/Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf` — small, fast and
+instruction-tuned), *Local server* (`local_server_bin`, default `~/Github/sih/manas/runtime/bin/llama-server`),
+*Local context (tokens)* (`local_ctx`, default 8192) and *Local port* (`local_port`, default 8749). All live, no
+restart. To think with different weights, point *Local model* at any other `.gguf` — a bigger one is slower to
+load and to speak, a smaller one forgets more; the next local turn restarts the server on it.
+
+**When it takes over.** Before each turn she checks whether the active brain's vendor host is reachable (one TCP
+connect, cached for 20 seconds). If it isn't, she says "No internet — switching to the local model." and answers
+locally, exactly like a usage-limit stand-in: the preference doesn't change, "which brain are you on" answers
+"I'm on the local model — there's no internet.", and she goes back to the preferred brain **silently** as soon
+as the wire returns. Turn it off with `brain_offline_fallback`. By voice, any time: "go offline" / "offline
+mode" / "use the local model" / "offline ho jao" switches to it, and "go online" / "back online" / "online ho
+jao" hands the next turn back to the first ready vendor brain.
+
+**What it can and cannot do.** Tools: **yes** — Veronica's own tools (mac, calendar/mail/reminders/timers,
+memory, music, browser, screen control) are offered to the model as function schemas and run in-process, each
+call through the same confirm gate, with the same HUD cards and the same trust window. The web: **no** — there
+is no search and no fetch, and she is told to say so rather than guess. Screenshots: **no** — the default model
+is text-only, so she says she can't see. A small model that ignores the tool schema simply answers in words;
+that is normal and not an error. Expect a short answer in a handful of seconds, and expect it to be less sharp
+than the hosted brains — it is a three-billion-parameter model on a laptop.
+
+If the server won't start she says "The local model wouldn't start — check the Local settings." The Local brain
+is offered only when both the binary and the model file exist ("The local model server isn't there — set its
+path in Settings.").
 
 **Known limits.**
 
@@ -209,15 +255,27 @@ search when the local Python's sqlite3 build has it, otherwise a plain substring
   recent context into a fresh Claude session.
 - **Remember a fact** — "remember that I take my coffee black" / "remember I'm allergic to peanuts": stored as a
   fact and said back as "Got it." This is a local intent (matched before the brain runs), so it works even offline
-  and doesn't cost a Claude turn.
+  and doesn't cost a Claude turn. Say roughly the same thing again and the old wording is *replaced* rather than
+  kept twice — she says "Updated — that replaces 'I take my coffee black'.", naming what went, because the match
+  is fuzzy enough to get it wrong ("March 8" over "March 3") and that has to be audible.
+- Every fact is filed under a kind — preference, person, place, routine or other — worked out from its wording when
+  it is written (cue words, no model call). `facts_list` reads them back grouped under those headings.
 - **Forget a fact** — "forget that I take my coffee black" / "forget the peanut thing": removes any matching fact
   and says "Forgotten." (or "I didn't have that." if nothing matched).
+- **Forget a whole topic** — "forget everything about the office" / "forget anything related to Priya": removes
+  every fact that topic turns up in and says how many went ("Forgot three things about the office."). Generic
+  sweeps ("forget everything", "forget it") still delete nothing.
 - Claude can also manage memory itself mid-conversation via MCP tools: `recall` (search past turns) and `facts_list`
   run automatically; `fact_add` and `fact_delete` both ask "Run …?" first — a fact persists across every future
   session, so it gets the same confirmation as anything else that changes standing state.
 - On every new Claude session, Veronica injects a short "Facts about the user" list and the last few turns
   ("Recent conversation") into the system prompt, capped small (2 KB / 1 KB) so it stays cheap — an existing session
   already carries its own context, so this only matters right after a fresh one starts.
+- The facts block holds at most `memory_facts_max` facts (40 by default, editable under Settings > Brain), most
+  recently used first. "Used" is worked out from the words of her reply — after each turn, the facts whose
+  distinctive words show up in what she just said are bumped to the front — so a long memory keeps the facts that
+  actually come up and quietly drops the ones that never do (they stay in the database and her memory tools still
+  find them).
 
 Disable memory entirely (no DB, no injection, no remember/forget intents) with:
 
@@ -300,6 +358,26 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
   for 3 seconds, and types everything you said into whichever app is currently focused (via System Events —
   requires **Accessibility** access, same as push-to-talk).
 
+## Shortcuts & Messages
+
+| Tool | Can | Cannot |
+| --- | --- | --- |
+| `mac.run_shortcut` | Run any shortcut installed in Shortcuts.app by name ("run the Morning shortcut"), case-insensitively, with optional text input handed over as a file (`shortcuts run <name> --input-path …`). A shortcut gets 2 minutes. | Create or edit shortcuts, or hand back what one returned — the CLI prints nothing on success, so she just says she ran it. A name that isn't installed is refused ("there's no shortcut called 'Morning' on this Mac") rather than guessed at. |
+| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number or Apple ID ("message +15551234567: on my way"). | Read your messages, look a name up in Contacts, or send attachments. A bare first name isn't a handle, so Messages refuses it and she asks you for the number. |
+
+**Which shortcuts run without asking.** Every shortcut is confirm-class by default — a shortcut is a program you
+wrote, and Veronica can't see what's in it. Settings → Brain → "Shortcuts she may run without asking" is a
+comma-separated list of names (empty out of the box); a shortcut whose name is on that list runs straight away,
+everything else still asks "Run the shortcut 'X'?" first.
+
+**Sending a message always asks.** `message_send` is in `policy.always_confirm` alongside sending mail: the
+screen-control trust window never covers it, saying "just do it" in your request never pre-approves it, and no
+setting turns the question off. The confirm reads the recipient and the first 40 characters — "Message Priya: on
+my way".
+
+Messages.app needs the usual one-time automation permission the first time she sends (System Settings → Privacy &
+Security → Automation), and Shortcuts must have been opened once for `shortcuts list` to report anything.
+
 ## Voice & speed
 
 - **Pick a voice** — "use a british voice" / "switch to adam voice" / "speak with a female voice": ten Kokoro voices
@@ -367,6 +445,17 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 - **Meeting nudges** — "warn me 10 minutes before my meetings" / "remind me before my meetings" / "turn on nudges"
   announces "Heads up, <event> starts in 10 minutes." before each timed calendar event (1–60 minutes, default 5);
   "turn off nudges" / "stop the meeting nudges" turns them off.
+- **Quiet hours** — off by default; once switched on in Settings (default 22:00–08:00), anything that comes due inside
+  the window waits instead of being dropped and is spoken when it ends, the first one prefixed "While you were away:"
+  if more than one waited. A nudge whose moment has passed by then (the meeting already happened) is dropped, and
+  at most ten wait at once — past that she just adds "And 4 more I held back."
+- **Snooze** — "snooze notifications for an hour" / "mute nudges until 5" / "notifications rok do" holds
+  announcements until then ("Okay, quiet until 5 pm."); "resume notifications" / "unsnooze" releases them. A snooze
+  lasts an hour by default and doesn't survive a restart.
+- **Low battery** — off by default: below 15% on battery she says "Battery's at 12 percent.", once per discharge
+  (plugging in arms it again).
+- **Unread mail** — off by default: "You have 7 unread since this morning." once a day at the hour set in Settings
+  (default 11:00), silent when the inbox is clear.
 
 Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
 fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
@@ -381,7 +470,8 @@ used to need an environment variable or a voice command.
   it straight on the History tab.
 - **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
   spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
-  utterance limits, briefing/nudge schedule, start at login, push-to-talk.
+  utterance limits, briefing/nudge schedule, facts carried into a new conversation, start at login,
+  push-to-talk.
 - **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
   brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
   Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a

@@ -238,7 +238,7 @@
     listening() {
       const frag = [el('h2', {text: 'Listening'}), el('p', {class: 'lead', text: 'Wake word, turn-taking and how patient she is.'})];
       frag.push(el('h3', {text: 'Conversation'}));
-      for (const k of ['followup_window_s', 'confirm_listen_s', 'vad_silence_ms', 'max_utterance_s']) frag.push(settingRow('listening', k));
+      for (const k of ['followup_window_s', 'confirm_listen_s', 'ack_after_s', 'vad_silence_ms', 'max_utterance_s']) frag.push(settingRow('listening', k));
       frag.push(el('h3', {text: 'Wake word'}));
       for (const k of ['wake_phrases', 'wake_min_rms', 'wake_window_s', 'wake_hop_s']) frag.push(settingRow('listening', k, k === 'wake_phrases' ? {wide: true} : null));
       frag.push(el('h3', {text: 'Microphone'}));
@@ -254,6 +254,14 @@
         row('briefings', 'briefing_time', {kind: 'str', label: 'Briefing time', help: '24-hour HH:MM.', placeholder: '08:00'}, b.briefing_time),
         row('briefings', 'nudges_enabled', {kind: 'bool', label: 'Reminder nudges'}, b.nudges_enabled),
         row('briefings', 'nudge_minutes', {kind: 'int', label: 'Nudge ahead (minutes)', help: 'How early before an event she speaks up.', min: 1, max: 60}, b.nudge_minutes == null ? 5 : b.nudge_minutes),
+        el('h3', {text: 'Quiet hours'}),
+        row('briefings', 'quiet_enabled', {kind: 'bool', label: 'Quiet hours', help: 'Anything due in the window waits and is spoken when it ends.'}, b.quiet_enabled),
+        row('briefings', 'quiet_from', {kind: 'str', label: 'Quiet from', help: '24-hour HH:MM.', placeholder: '22:00'}, b.quiet_from),
+        row('briefings', 'quiet_to', {kind: 'str', label: 'Quiet until', help: '24-hour HH:MM.', placeholder: '08:00'}, b.quiet_to),
+        el('h3', {text: 'Other nudges'}),
+        row('briefings', 'battery_enabled', {kind: 'bool', label: 'Low battery', help: 'Once per discharge, below 15%.'}, b.battery_enabled),
+        row('briefings', 'unread_enabled', {kind: 'bool', label: 'Unread mail nudge'}, b.unread_enabled),
+        row('briefings', 'unread_time', {kind: 'str', label: 'Unread nudge time', help: '24-hour HH:MM.', placeholder: '11:00'}, b.unread_time),
       ];
     },
     brain() {
@@ -274,13 +282,21 @@
       frag.push(settingRow('brain', 'codex_native_tools'));
       frag.push(settingRow('brain', 'antigravity_native_tools'));
       frag.push(settingRow('brain', 'copilot_native_tools'));
+      frag.push(el('h3', {text: 'Offline'}));
+      frag.push(settingRow('brain', 'brain_offline_fallback'));
+      frag.push(settingRow('brain', 'local_model', {wide: true}));
+      frag.push(settingRow('brain', 'local_server_bin', {wide: true}));
+      frag.push(settingRow('brain', 'local_ctx'));
+      frag.push(settingRow('brain', 'local_port'));
       frag.push(el('h3', {text: 'Thinking'}));
       frag.push(settingRow('brain', 'effort'));
       frag.push(settingRow('brain', 'memory_enabled'));
+      frag.push(settingRow('brain', 'memory_facts_max'));
       frag.push(settingRow('brain', 'brain_cwd', {wide: true}));
       frag.push(settingRow('brain', 'brain_session_max_age_h'));
       frag.push(settingRow('brain', 'computer_trust_s'));
       frag.push(settingRow('brain', 'preapprove_by_wording'));
+      frag.push(settingRow('brain', 'shortcut_allowlist', {wide: true}));
       return frag;
     },
     history() {

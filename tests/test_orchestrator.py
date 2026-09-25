@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -1901,18 +1902,34 @@ class FakeStore:
     def __init__(self):
         self.turns = []
         self.facts = []
+        self.used = []
 
     def add_turn(self, heard, reply):
         self.turns.append((heard, reply))
 
     def add_fact(self, text):
-        self.facts.append(text)
-        return len(self.facts)
+        return self.remember(text)[0]
+
+    def remember(self, text):
+        replaced = text if text in self.facts else ""
+        if not replaced:
+            self.facts.append(text)
+        return (self.facts.index(text) + 1, replaced)
 
     def delete_fact_matching(self, text):
         before = len(self.facts)
         self.facts = [f for f in self.facts if text.lower() not in f.lower()]
         return before - len(self.facts)
+
+    def delete_facts_about(self, topic):
+        words = set(topic.lower().split())
+        before = len(self.facts)
+        self.facts = [f for f in self.facts if not (words & set(f.lower().split()))]
+        return before - len(self.facts)
+
+    def touch_facts_used(self, spoken):
+        self.used.append(spoken)
+        return 0
 
 
 async def test_handle_text_logs_turn_when_store_present():
@@ -1986,6 +2003,46 @@ async def test_forget_intent_no_match_says_didnt_have_that():
     o.store = store
     await o.one_turn()
     assert "I didn't have that." in o.tts.said
+
+
+async def test_remember_intent_names_the_fact_it_replaced():
+    """The dedupe is fuzzy ("March 8" for "March 3"), so what it overwrote
+    is spoken — a wrong match has to be audible."""
+    store = FakeStore()
+    store.facts = ["I like tea"]
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == ["I like tea"]
+    assert "Updated \u2014 that replaces 'I like tea'." in o.tts.said
+
+
+async def test_forget_topic_intent_deletes_by_topic_and_counts():
+    store = FakeStore()
+    store.facts = ["the office wifi is slow", "office lunch is at one", "I like tea"]
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None],
+                 stt_texts=["forget everything about the office"])
+    o.store = store
+    await o.one_turn()
+    assert store.facts == ["I like tea"]
+    assert "Forgot two things about the office." in o.tts.said
+
+
+async def test_forget_topic_intent_with_nothing_to_forget():
+    store = FakeStore()
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None],
+                 stt_texts=["forget everything about the office"])
+    o.store = store
+    await o.one_turn()
+    assert "I didn't have anything about the office." in o.tts.said
+
+
+async def test_handle_text_bumps_facts_used_in_the_reply():
+    store = FakeStore()
+    o, _ = build()
+    o.store = store
+    await o.handle_text("hello")
+    assert store.used == ["Sure. Done."]
 
 
 # -- commit: voice mute/unmute/quit intents -----------------------------------
@@ -3101,6 +3158,7 @@ from veronica import proactive as pr_mod
 class FakeProactive:
     def __init__(self):
         self.schedule = pr_mod.Schedule()
+        self.hold_until = None
         self.started = 0
     async def start(self): self.started += 1
     def stop(self): pass
@@ -3226,6 +3284,29 @@ async def test_nudges_on_out_of_range_minutes_keeps_stored(monkeypatch):
     await o.one_turn()
     assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 7
     assert o.tts.said[-1] == "Okay, I'll warn you 7 minutes before each event."
+
+
+async def test_snooze_sets_hold_until_and_confirms(monkeypatch):
+    import datetime as dt
+
+    o, p, saved, ev = build_pro(["snooze notifications for an hour"], monkeypatch)
+    before = dt.datetime.now()
+    await o.one_turn()
+    assert 59 <= (p.hold_until - before).total_seconds() / 60 <= 61
+    assert o.tts.said[-1].startswith("Okay, quiet until ")
+    assert ("tool", {"summary": "Snooze notifications", "decision": "auto"}) in ev
+    assert saved == []                                  # a snooze isn't part of the schedule
+
+
+async def test_snooze_until_a_clock_time_and_resume(monkeypatch):
+    o, p, _, _ = build_pro(["mute nudges until 5 pm"], monkeypatch)
+    await o.one_turn()
+    assert p.hold_until.hour == 17 and p.hold_until.minute == 0
+    assert o.tts.said[-1] == "Okay, quiet until 5 pm."
+
+    o.stt = STT(["resume notifications"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert p.hold_until is None and o.tts.said[-1] == "Okay, notifications back on."
 
 
 async def test_proactive_intent_without_proactive_says_unavailable(monkeypatch):
@@ -4388,11 +4469,16 @@ class FakeSwitcher:
     def __init__(self, brain, avail=True, fail_to=None, clock=lambda: 1000.0):
         self.brain, self.avail, self.fail_to = brain, avail, fail_to
         self.switched, self.returned, self.failovers = [], 0, []
+        self.offline_checks = 0
         self.preferred = "claude"
         self.standing_in = False
         self.limited_until = {}
         self._clock = clock
         self.gate = None
+        self._standin_reason = None
+
+    def online_candidate(self):
+        return "codex"
 
     async def switch(self, name, *, manual=True):
         self.switched.append(name)
@@ -4404,6 +4490,9 @@ class FakeSwitcher:
 
     async def maybe_return(self):
         self.returned += 1
+
+    async def maybe_offline(self):
+        self.offline_checks += 1
 
     async def failover(self, reason):
         self.failovers.append(reason)
@@ -4484,6 +4573,42 @@ async def test_brain_turn_checks_for_return_first():
     o, _ = build_brain(["tell me a joke"])
     await o.one_turn()
     assert o.switcher.returned == 1 and o.brain.asked == ["tell me a joke"]
+
+
+async def test_brain_turn_also_checks_the_wire():
+    o, _ = build_brain(["tell me a joke"])
+    await o.one_turn()
+    assert o.switcher.offline_checks == 1
+
+
+async def test_go_offline_switches_to_the_local_model():
+    o, _ = build_brain(["go offline"])
+    await o.one_turn()
+    assert o.switcher.switched == ["local"] and o.tts.said == ["Switched to Local."]
+
+
+async def test_go_online_picks_the_first_ready_vendor_brain():
+    o, _ = build_brain(["back online"])
+    o.brain.name = "local"
+    o.switcher.online_candidate = lambda: "codex"
+    await o.one_turn()
+    assert o.switcher.switched == ["codex"] and o.tts.said == ["Switched to Codex."]
+
+
+async def test_go_online_with_nothing_ready_says_so():
+    o, _ = build_brain(["go online"])
+    o.switcher.online_candidate = lambda: None
+    await o.one_turn()
+    assert o.switcher.switched == [] and o.tts.said == ["No online brain is ready."]
+
+
+async def test_which_brain_while_offline_says_why():
+    o, _ = build_brain(["which brain are you on"])
+    o.brain.name = "local"
+    o.switcher.standing_in = True
+    o.switcher._standin_reason = "offline"
+    await o.one_turn()
+    assert o.tts.said == ["I'm on the local model — there's no internet."]
 
 
 async def test_limit_error_fails_over_and_reruns_once():
@@ -4634,3 +4759,366 @@ async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
     assert seen["socket_during_run"] is True
     assert not o.s.gate_socket.exists()
     assert ("hud", {"backend": "Claude"}) in ev
+
+
+# -- F2: pause / continue, and the "on it" acknowledgement ---------------------
+
+class IndexedTTS:
+    """Synthesises a one-sample buffer whose value is the index of the
+    sentence, so the player can report exactly what reached the speakers."""
+    def __init__(self): self.said = []
+    async def asynth(self, text, lang=None):
+        self.said.append(text)
+        return np.full(1, len(self.said) - 1, dtype=np.float32), 24000
+
+
+class HeardPlayer:
+    """Records the sentences actually played (chimes, being long buffers,
+    are ignored) and takes `dur` over each one so a barge can land mid-way."""
+    def __init__(self, tts, dur=0.05):
+        self.tts, self.dur = tts, dur
+        self.heard = []; self.stops = 0; self.resets = 0
+
+    async def play(self, s):
+        if len(s) == 1:
+            self.heard.append(self.tts.said[int(s[0])])
+        await asyncio.sleep(self.dur)
+
+    def stop(self): self.stops += 1
+    def reset(self): self.resets += 1
+
+
+class ThreeBrain:
+    def __init__(self): self.asked = []; self.interrupts = 0
+    async def ask(self, text):
+        self.asked.append(text)
+        for s in ["One.", "Two.", "Three."]:
+            yield s
+    async def interrupt(self): self.interrupts += 1
+
+
+def build_pause(stt_texts, captures, barge_on_call=1):
+    """A turn that gets barged while "One." is playing, leaving "Two." and
+    "Three." queued: exactly the situation a pause has to survive."""
+    o, states = build(stt_texts=stt_texts)
+    o.tts = IndexedTTS()
+    o.player = HeardPlayer(o.tts)
+    o.brain = ThreeBrain()
+    o.wake = BargeWake(barge_on_call=barge_on_call)
+    o.recorder = Rec([np.zeros(1, np.int16)] * captures)
+    return o, states
+
+
+async def test_pause_keeps_the_remainder_and_speaks_nothing():
+    # listen, re-listen after the barge ("hold on"), then the paused window
+    o, states = build_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert o.player.heard == ["One."]
+    assert [s for s, _ in o._paused_tail] == ["Two.", "Three."]
+    assert "paused" in states
+    # nothing new was synthesised: she said not one word about pausing
+    assert o.tts.said == ["One.", "Two.", "Three."]
+
+
+async def test_continue_speaks_the_unspoken_remainder_in_order():
+    o, _ = build_pause(["do the thing", "hold on", "continue"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+    assert o._paused_tail is None
+    assert o.tts.said == ["One.", "Two.", "Three."]   # no re-synthesis
+    assert o.brain.asked == ["do the thing"]          # the brain wasn't asked again
+
+
+async def test_hinglish_continue_also_resumes():
+    o, _ = build_pause(["do the thing", "ruko", "aage bolo"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+
+
+async def test_unrelated_request_after_a_pause_drops_the_remainder():
+    o, _ = build_pause(["do the thing", "hold on", "what's the weather"], captures=3)
+    await o.one_turn()
+    # the new request is answered in full; nothing of the parked answer leaks
+    assert o.player.heard == ["One.", "One.", "Two.", "Three."]
+    assert o.brain.asked == ["do the thing", "what's the weather"]
+    assert o._paused_tail is None
+
+
+async def test_a_later_turn_never_inherits_a_stale_remainder():
+    o, _ = build_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert o._paused_tail is not None      # parked, the window just closed
+
+    o.recorder = Rec([np.zeros(1, np.int16)])
+    o.stt = STT(["what's the weather"])
+    o.player.heard.clear()
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]   # the new answer only
+    assert o._paused_tail is None
+
+
+async def test_stop_during_a_pause_ends_the_turn():
+    o, states = build_pause(["do the thing", "hold on", "stop"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One."]
+    assert o._paused_tail is None
+    assert states[-1] == "idle"
+
+
+async def test_pause_phrase_with_nothing_parked_is_a_normal_request():
+    """"Wait" out of the blue still goes to the brain — the pause phrases
+    only take over while a barge is holding a remainder."""
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["wait"])
+    await o.one_turn()
+    assert o.brain.asked == ["wait"]
+
+
+class SlowSecondTTS(IndexedTTS):
+    """"Two." takes a moment to synthesise, so a barge can land while the
+    consumer is sitting in `await fut` — the window the parked tail is
+    actually taken from on a real machine."""
+    async def asynth(self, text, lang=None):
+        if text == "Two.":
+            await asyncio.sleep(0.02)
+        return await super().asynth(text, lang)
+
+
+def build_slow_pause(stt_texts, captures):
+    """build_pause, but with playback instant and the second synthesis slow:
+    the barge lands on the unfinished synth rather than mid-playback."""
+    o, states = build_pause(stt_texts, captures=captures)
+    o.tts = SlowSecondTTS()
+    o.player = HeardPlayer(o.tts, dur=0)
+    return o, states
+
+
+async def test_a_pause_never_parks_a_cancelled_synth():
+    o, _ = build_slow_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert [s for s, _ in o._paused_tail] == ["Two.", "Three."]
+    assert not any(fut.cancelled() for _s, fut in o._paused_tail)
+
+
+async def test_continue_survives_a_barge_that_landed_on_an_unfinished_synth():
+    o, _ = build_slow_pause(["do the thing", "hold on", "continue"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+    assert o._paused_tail is None
+    assert sorted(o.tts.said) == ["One.", "Three.", "Two."]   # no re-synthesis
+
+
+async def test_resume_skips_a_parked_synth_that_came_back_cancelled():
+    """Belt and braces for the same thing: whatever put a dead future in the
+    tail, speaking the rest must not take the listening loop down."""
+    o, _ = build()
+    o.tts = IndexedTTS()
+    o.player = HeardPlayer(o.tts, dur=0)
+    dead = asyncio.ensure_future(asyncio.sleep(1))
+    dead.cancel()
+    await asyncio.sleep(0)
+    good = asyncio.ensure_future(o.tts.asynth("Three."))
+    await o._resume_tail([("Two.", dead), ("Three.", good)])
+    assert o.player.heard == ["Three."]
+    assert o._paused_tail is None
+
+
+# -- the acknowledgement -------------------------------------------------------
+
+class SlowFirstBrain:
+    """Silent for `delay`, then two sentences with another gap between."""
+    def __init__(self, delay=0.06): self.delay = delay
+    async def ask(self, text):
+        await asyncio.sleep(self.delay)
+        yield "Answer."
+        await asyncio.sleep(self.delay)
+        yield "More."
+
+
+def build_ack(ack_after_s):
+    o, states = build()
+    o.s = Settings(followup_window_s=0, confirm_listen_s=0, ack_after_s=ack_after_s)
+    return o, states
+
+
+async def test_ack_fires_once_when_the_brain_stays_silent():
+    o, _ = build_ack(0.01)
+    o.brain = SlowFirstBrain()
+    assert await o.handle_text("q") == ["Answer.", "More."]
+    assert o.tts.said == ["On it.", "Answer.", "More."]   # once, and before the answer
+
+
+async def test_ack_is_spoken_in_hindi_for_a_hindi_turn():
+    o, _ = build_ack(0.01)
+    o.brain = SlowFirstBrain()
+    await o.handle_text("q", lang="hi")
+    assert o.tts.said[0] == "एक सेकंड।"
+
+
+async def test_ack_silent_when_the_first_sentence_arrives_sooner():
+    o, _ = build_ack(0.5)
+    await o.handle_text("q")
+    assert o.tts.said == ["Sure.", "Done."]
+
+
+async def test_ack_off_when_zero():
+    o, _ = build_ack(0)
+    o.brain = SlowFirstBrain()
+    await o.handle_text("q")
+    assert o.tts.said == ["Answer.", "More."]
+
+
+# ---- F3: the plan card ----------------------------------------------------
+
+class GateBrain:
+    """A turn that is a sequence of tool calls through the real ToolGate,
+    then one sentence — the shape the plan card is built from. The gate's
+    on_tool goes to orch.tool_card, exactly as __main__ wires it."""
+
+    def __init__(self, orch, calls):
+        from veronica.brain.gate import ToolGate
+        self.gate = ToolGate(orch.s, orch.confirm, on_tool=orch.tool_card)
+        self.calls = list(calls)
+        self.decisions = []
+
+    async def ask(self, text):
+        for tool, inp in self.calls:
+            self.decisions.append(await self.gate.decide(tool, inp))
+        yield "Done."
+
+
+def build_plan(calls, answers=()):
+    """`answers` is one transcript per confirm the calls will raise."""
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16) for _ in answers], stt_texts=answers)
+    o.brain = GateBrain(o, calls)
+    return o, ev
+
+
+def plans(ev):
+    return [[(s["summary"], s["state"]) for s in p["steps"]] for k, p in ev if k == "plan"]
+
+
+READ_A, READ_B = ("Read", {"file_path": "/a"}), ("Read", {"file_path": "/b"})
+RM = ("Bash", {"command": "rm x"})
+
+
+async def test_plan_card_not_shown_for_a_single_tool_call():
+    """One call keeps the plain action card: no plan event at all."""
+    o, ev = build_plan([READ_A])
+    await o.handle_text("read it")
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["auto"]
+    assert plans(ev) == []
+
+
+async def test_plan_appears_on_the_second_tool_call():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    assert plans(ev) == [
+        # the second call is proof the first finished...
+        [("Read: /a", "done"), ("Read: /b", "running")],
+        # ...and the end of the turn is proof the last one did
+        [("Read: /a", "done"), ("Read: /b", "done")],
+    ]
+
+
+async def test_plan_event_follows_the_tool_card_it_describes():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    kinds = [k for k, _ in ev if k in ("tool", "plan")]
+    assert kinds == ["tool", "tool", "plan", "plan"]
+
+
+async def test_plan_step_waits_while_the_confirm_is_out_then_runs():
+    o, ev = build_plan([READ_A, RM], answers=["yes"])
+    await o.handle_text("clean up")
+    assert plans(ev) == [
+        [("Read: /a", "done"), ("Bash: rm x", "pending")],
+        [("Read: /a", "done"), ("Bash: rm x", "running")],
+        [("Read: /a", "done"), ("Bash: rm x", "done")],
+    ]
+
+
+async def test_plan_marks_a_declined_step():
+    o, ev = build_plan([READ_A, RM], answers=["no"])
+    await o.handle_text("clean up")
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Bash: rm x", "declined")]
+
+
+async def test_plan_marks_a_redirected_step_declined():
+    """"open it in Safari instead" is a no to *this* action; what the user
+    said instead comes back as its own request."""
+    o, ev = build_plan([READ_A, RM], answers=["open it in Safari instead"])
+    await o.handle_text("clean up")
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Bash: rm x", "declined")]
+
+
+async def test_plan_resets_at_the_start_of_each_turn():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    ev.clear()
+    o.brain = GateBrain(o, [("Read", {"file_path": "/c"}), ("Read", {"file_path": "/d"})])
+    await o.handle_text("read two more")
+    # the stale card is emptied first, and nothing from the old turn survives
+    assert plans(ev)[0] == []
+    assert plans(ev)[-1] == [("Read: /c", "done"), ("Read: /d", "done")]
+
+
+async def test_plan_reset_is_silent_when_no_card_was_shown():
+    o, ev = build_plan([READ_A])
+    await o.handle_text("read it")
+    ev.clear()
+    o.brain = GateBrain(o, [READ_B])
+    await o.handle_text("read another")
+    assert plans(ev) == []
+
+
+async def test_tool_card_outside_a_brain_turn_is_not_a_plan_step():
+    """A local intent ("look at the screen") cards itself without a brain
+    turn; it must not append to a plan that is already over."""
+    o, _, ev = build3()
+    o.tool_card("Look at screen", "auto")
+    o.tool_card("Pause music", "auto")
+    assert plans(ev) == []
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["auto", "auto"]
+
+
+async def test_usage_limit_card_is_not_a_plan_step():
+    o, ev = build_plan([READ_A, READ_B])
+    o._plan_reset()
+    o._emit("tool", {"summary": "Codex: usage limit — on Claude", "decision": "limit"})
+    o._emit("tool", {"summary": "Read: /a", "decision": "auto"})
+    o._emit("tool", {"summary": "Read: /b", "decision": "auto"})
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "running")]
+
+
+async def test_plan_finishes_running_steps_when_the_turn_is_cancelled():
+    o, ev = build_plan([READ_A, READ_B])
+
+    class Stuck(GateBrain):
+        async def ask(self, text):
+            for tool, inp in self.calls:
+                await self.gate.decide(tool, inp)
+            await asyncio.sleep(10)
+            yield "never"
+
+    o.brain = Stuck(o, [READ_A, READ_B])
+    turn = asyncio.create_task(o.handle_text("read both"))
+    await asyncio.sleep(0.05)
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "done")]
+
+
+async def test_a_turn_that_never_gets_going_leaves_no_plan_latched():
+    """If anything between the reset and the turn's own try/finally raises,
+    `_plan_turn` must not stay True — every later local card would be
+    folded into a plan that is long over."""
+    o, ev = build_plan([READ_A])
+
+    class DeadPlayer(Player):
+        def reset(self): raise RuntimeError("audio device vanished")
+
+    o.player = DeadPlayer()
+    with pytest.raises(RuntimeError):
+        await o.handle_text("read it")
+    assert o._plan_turn is False

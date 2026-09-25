@@ -6,12 +6,17 @@ at runtime — a stand-in — for two reasons: the preferred brain hit a usage
 limit (time-based cooldown, `limited_until`) or it isn't installed/logged in
 (re-checked every minute). Either way the preference itself only changes on
 a manual switch. Nothing here spawns a CLI: brains are built lazily and
-`check` only looks at local markers."""
+`check` only looks at local markers.
+
+A third reason to stand in: there is no internet. Every brain but `local`
+needs a vendor host, so `maybe_offline` (called once per turn) puts the
+local model in when the probe in `veronica.net` says the wire is dead, and
+`maybe_return` goes back — silently — when it is alive again."""
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
-from veronica import prefs
+from veronica import net, prefs
 from veronica.brain.backends import BACKENDS, Availability, check_backend, make_brain
 from veronica.brain.base import Brain
 from veronica.brain.gate import ToolGate
@@ -22,6 +27,8 @@ log = logging.getLogger("veronica.brain")
 NO_BRAIN_LINE = "No brain is ready — log into Codex, Antigravity or Claude."
 NO_BRAIN_LABEL = "No brain"
 RECHECK_S = 60.0     # how often a stand-in for availability reasons re-checks the preferred brain
+OFFLINE_LINE = "No internet — switching to the local model."
+LOCAL = "local"      # the one backend that needs no network
 
 
 class NoBrain:
@@ -79,6 +86,7 @@ class BrainSwitcher:
         clock: Callable[[], float] = time.monotonic,
         say: Callable[[str], object] | None = None,
         on_backend: Callable[[str, bool], None] | None = None,
+        is_online: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.s = settings
         self.gate = gate
@@ -86,6 +94,9 @@ class BrainSwitcher:
         self._memory = memory
         self._factory = factory
         self._check = check
+        #: name -> is that brain's vendor reachable? Takes the backend name
+        #: so the probe hits the host that brain actually needs.
+        self._is_online = is_online or (lambda name: net.online(net.VENDOR_HOSTS.get(name)))
         self._clock = clock
         self._say = say
         self._on_backend = on_backend
@@ -115,6 +126,13 @@ class BrainSwitcher:
                 out.append(n)
         return out
 
+    def _candidates(self) -> list[str]:
+        """`_order()` without the local model. Standing in for a brain that
+        isn't logged in, or moving off one that hit its usage limit, must
+        never drop the user onto the 3B model: that is `maybe_offline`'s
+        job alone, and `switch("local")` is still there for asking."""
+        return [n for n in self._order() if n != LOCAL]
+
     def _cooling(self, name: str) -> bool:
         return self.limited_until.get(name, 0.0) > self._clock()
 
@@ -141,8 +159,8 @@ class BrainSwitcher:
     async def _stand_in(self, why: str, *, announce: bool) -> None:
         """Preferred is unavailable for `why`: activate the first available
         alternative (or NoBrain) and schedule the next availability check."""
-        for n in self._order()[1:]:
-            if self._check(n).ok:
+        for n in self._candidates():
+            if n != self.preferred and self._check(n).ok:
                 await self._activate(n)
                 if announce:
                     # why is "not installed" / "not logged in" -> "isn't installed"
@@ -209,7 +227,7 @@ class BrainSwitcher:
             return None
         log.warning("brain: %s usage limit: %s", current, reason)
         self.limited_until[current] = self._clock() + self.s.brain_limit_cooldown_min * 60
-        for n in self._order():
+        for n in self._candidates():
             if n == current or self._cooling(n) or not self._check(n).ok:
                 continue
             await self._speak(f"{label} hit its usage limit — switching to {_label(n)}.")
@@ -227,7 +245,11 @@ class BrainSwitcher:
         if not self.standing_in:
             return
         now = self._clock()
-        if self._standin_reason == "limit":
+        if self._standin_reason == "offline":
+            # net.online is itself cached, so this costs nothing most turns.
+            if not await self._is_online(self.preferred):
+                return
+        elif self._standin_reason == "limit":
             if self._cooling(self.preferred):
                 return
         elif now < self._next_recheck:
@@ -244,3 +266,32 @@ class BrainSwitcher:
         if self.brain.name == "none":
             # Nothing was ready at start; maybe something is now.
             await self._stand_in(avail.reason, announce=False)
+
+    async def maybe_offline(self) -> None:
+        """Before each turn: if the active brain needs a vendor host and
+        there is no way to reach it, stand the local model in — the same
+        machinery as a usage limit, announced once. Off with
+        `brain_offline_fallback`; a no-op when we're already local."""
+        if not self.s.brain_offline_fallback:
+            return
+        current = self.brain.name
+        if current == LOCAL or current not in BACKENDS:
+            return
+        if await self._is_online(current):
+            return
+        if not self._check(LOCAL).ok:
+            log.warning("brain: offline and the local model isn't set up")
+            return
+        await self._speak(OFFLINE_LINE)
+        await self._activate(LOCAL)
+        self.standing_in = True
+        self._standin_reason = "offline"
+        self._notify()
+
+    def online_candidate(self) -> str | None:
+        """The first ready brain that isn't the local one — what "go online"
+        goes back to."""
+        for n in self._candidates():
+            if self._check(n).ok:
+                return n
+        return None

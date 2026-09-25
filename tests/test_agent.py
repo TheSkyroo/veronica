@@ -54,7 +54,7 @@ def test_system_prompt_injection_is_wrapped_and_labeled():
     assert p.index("<recent_turns>") < p.index("Recent conversation:") < p.index("</recent_turns>")
 
 
-def test_system_prompt_facts_capped_keeps_newest_whole_facts():
+def test_system_prompt_facts_capped_keeps_most_recently_used_whole_facts():
     facts = [f"fact number {i} " + "x" * 50 for i in range(200)]
     p = system_prompt(dt.date(2026, 9, 15), facts=facts)
     start = p.index("<user_facts>")
@@ -63,8 +63,8 @@ def test_system_prompt_facts_capped_keeps_newest_whole_facts():
     # small, fixed wrapper overhead beyond the capped body is fine; the
     # capped body itself must respect the budget.
     assert len(block.encode("utf-8")) <= FACTS_CAP_BYTES + 200
-    assert facts[-1] in p          # newest kept
-    assert facts[0] not in p       # oldest dropped
+    assert facts[0] in p           # most recently used kept
+    assert facts[-1] not in p      # longest unused dropped
     # nothing was cut mid-line: every fact line present is the full,
     # untruncated original fact text
     for line in block.splitlines():
@@ -105,6 +105,9 @@ def test_summarize_detail_pim_tools():
     assert summarize_detail("mcp__pim__mail_unread", {}) == "Read unread mail"
     assert summarize_detail("mcp__pim__mail_search", {"query": "invoice"}) == "Search mail: invoice"
     assert summarize_detail("mcp__pim__mail_send", {"to": "a@b.com"}) == "Send mail to a@b.com"
+    assert summarize_detail("mcp__pim__message_send", {"to": "Priya", "body": "on my way"}) == "Message Priya: on my way"
+    # long bodies are cut to the first 40 characters, so the confirm stays short
+    assert summarize_detail("mcp__pim__message_send", {"to": "Priya", "body": "x" * 60}) == "Message Priya: " + "x" * 40
     assert summarize_detail("mcp__pim__reminder_create", {"title": "Buy milk"}) == "Create reminder Buy milk"
     assert summarize_detail("mcp__pim__reminders_due", {}) == "Check reminders"
     assert summarize_detail("mcp__pim__timer_set", {"minutes": 5}) == "Set timer 5 min"
@@ -283,6 +286,9 @@ class FakeMemory:
 
     def facts(self):
         return self._facts
+
+    def facts_for_prompt(self, limit):
+        return [text for _id, _ts, text in self._facts][:limit]
 
     def recent(self, n):
         return self._recent[-n:]
@@ -558,6 +564,7 @@ def test_summarize_mac_tools():
     assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
     assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
     assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__mac__run_shortcut", {"name": "Morning"}) == "Run the shortcut 'Morning'"
     assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
 
 
@@ -1284,6 +1291,7 @@ async def test_preapproval_not_applied_to_auto_tools_or_redirects(tmp_home):
 
 @pytest.mark.parametrize("tool,inp,front", [
     ("mcp__pim__mail_send", {"to": "a@b.c"}, _FINDER),
+    ("mcp__pim__message_send", {"to": "Priya", "body": "on my way"}, _FINDER),
     ("Bash", {"command": "rm -rf build"}, _FINDER),
     ("Bash", {"command": "git push --force"}, _FINDER),
     ("Bash", {"command": "shutdown -h now"}, _FINDER),

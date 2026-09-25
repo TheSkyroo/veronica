@@ -192,6 +192,11 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
     "kahan ho", "wapas aao",
     "quit karo", "band ho jao",
+    "offline ho jao", "local model use karo", "online ho jao", "online wapas jao",
+    # pause / continue (F2): defined further down, listed here so a whole
+    # utterance like "aage bolo" is treated as Hindi and answered in Hindi.
+    "ruko zara", "zara ruko", "ek minute", "ek sec", "ek second",
+    "aage bolo", "aage boliye", "jaari rakho", "continue karo",
 }) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH \
     | _WHICH_BRAIN_PHRASES_HINGLISH
 
@@ -274,6 +279,13 @@ _FORGET_RE = re.compile(r"^forget\s+(?:that\s+)?(.+)$", re.IGNORECASE)
 # instead of stashing the literal question text as a fact.
 _REMEMBER_QUESTION_LEADS = frozenset({"when", "what", "how", "if", "why"})
 
+# "forget everything about the office" is a sweep, not one fact: it gets its
+# own kind so the orchestrator deletes by topic and says how many went.
+_FORGET_TOPIC_RE = re.compile(
+    r"^(?:everything|anything|all)\s+(?:about|to do with|related to|regarding)\s+(.+)$",
+    re.IGNORECASE,
+)
+
 
 def match_memory_intent(text: str) -> tuple[str, str] | None:
     """Match "remember (that) X" / "forget (that) X" against a heard
@@ -281,8 +293,9 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
     normalized string), this carries a payload, so it preserves the
     original casing/punctuation of X rather than normalizing it — only an
     optional leading "veronica"/"hey veronica" and a trailing sentence-ending
-    period are stripped. Returns ("remember", X) or ("forget", X), or None
-    if the utterance doesn't start with "remember"/"forget"."""
+    period are stripped. Returns ("remember", X), ("forget", X) or —
+    for "forget everything about X" — ("forget_topic", X), or None if the
+    utterance doesn't start with "remember"/"forget"."""
     raw = (text or "").strip()
     raw = _MEMORY_LEAD_RE.sub("", raw, count=1).strip()
     for kind, pattern in (("remember", _REMEMBER_RE), ("forget", _FORGET_RE)):
@@ -293,6 +306,10 @@ def match_memory_intent(text: str) -> tuple[str, str] | None:
                 return None
             if kind == "remember" and arg.split()[0].lower() in _REMEMBER_QUESTION_LEADS:
                 return None
+            if kind == "forget":
+                topic = _FORGET_TOPIC_RE.match(arg)
+                if topic:
+                    return ("forget_topic", topic.group(1).strip())
             return (kind, arg)
     return None
 
@@ -418,8 +435,14 @@ def match_voice_intent(text: str) -> VoiceAction | None:
 # morning at 8", "stop the morning briefing", "warn me 10 minutes before my
 # meetings", "turn off nudges". Carries a payload (the briefing time as
 # "HH:MM", or the nudge lead in minutes) so it has its own function.
+# "snooze notifications for an hour" / "mute nudges until 5" / "resume
+# notifications" ride along here too (F4): the payload is the snooze length
+# in minutes, or an "HH:MM" it runs until — with a trailing "?" when the
+# hour was spoken without am/pm, so the orchestrator takes the next one
+# either way round.
 ProactiveAction = tuple[
-    Literal["brief_now", "briefing_on", "briefing_off", "nudges_on", "nudges_off"], str | int | None
+    Literal["brief_now", "briefing_on", "briefing_off", "nudges_on", "nudges_off", "snooze", "resume"],
+    str | int | None,
 ]
 
 _BRIEF_NOW_PHRASES = frozenset({
@@ -472,6 +495,80 @@ def parse_clock_time(s: str) -> str | None:
     return f"{h:02d}:{mm:02d}"
 
 
+# Snooze: "for"/"until" carries either a length or a clock time; the
+# Hinglish form puts it up front ("ek ghante ke liye notifications band karo").
+_NOTIFICATIONS = r"(?:notifications?|nudges?|announcements?|alerts?)"
+_SNOOZE_RE = re.compile(
+    rf"^(?:snooze|mute|pause|silence)\s+(?:the |my )?{_NOTIFICATIONS}"
+    r"(?:\s+(?:for|until|till)\s+(.+))?$"
+)
+_SNOOZE_BARE_RE = re.compile(r"^(?:snooze|mute|pause|silence)\s+(?:for|until|till)\s+(.+)$")
+_SNOOZE_HI_RE = re.compile(
+    rf"^(?:(.+?)\s+(?:ke liye|tak)\s+)?{_NOTIFICATIONS}\s+(?:band karo|band kar do|rok do|chup karo)$"
+)
+_RESUME_RE = re.compile(
+    rf"^(?:unsnooze|unpause|(?:resume|restart|turn on)\s+(?:the |my )?{_NOTIFICATIONS}"
+    rf"|turn\s+(?:the |my )?{_NOTIFICATIONS}\s+back on"
+    rf"|{_NOTIFICATIONS}\s+(?:shuru karo|chalu karo|wapas chalu karo))$"
+)
+_HALF_HOUR = frozenset({"half an hour", "half hour", "aadha ghanta", "aadhe ghante", "adha ghanta"})
+_DURATION_WORDS = {"a": 1, "an": 1, "one": 1, "ek": 1, "two": 2, "do": 2, "three": 3, "teen": 3,
+                   "four": 4, "char": 4, "five": 5, "paanch": 5}
+_DURATION_RE = re.compile(r"^(\d{1,3}|[a-z]+)\s*(hours?|hrs?|ghante|ghanta|minutes?|mins?)$")
+
+
+def parse_duration_minutes(s: str) -> int | None:
+    """"an hour" / "30 minutes" / "ek ghante" / "half an hour" -> minutes,
+    or None if it isn't a length of time (up to 12 hours)."""
+    s = (s or "").strip().lower()
+    if s in _HALF_HOUR:
+        return 30
+    m = _DURATION_RE.match(s)
+    if not m:
+        return None
+    n = int(m[1]) if m[1].isdigit() else _DURATION_WORDS.get(m[1])
+    if not n:
+        return None
+    minutes = n * 60 if m[2].startswith(("hour", "hr", "ghant")) else n
+    return minutes if 1 <= minutes <= 720 else None
+
+
+def _snooze_payload(rest: str | None) -> int | str | None | Literal[False]:
+    """The "for …"/"until …" tail -> minutes, an "HH:MM"("?"), or None for a
+    bare snooze; False when it parsed as neither (leave it to the brain)."""
+    if rest is None:
+        return None
+    rest = rest.strip()
+    minutes = parse_duration_minutes(rest)
+    if minutes is not None:
+        return minutes
+    clock = parse_clock_time(rest)
+    if clock is None:
+        return False
+    if int(clock[:2]) < 12 and rest not in ("noon", "midnight") and not re.search(r"\b[ap]m\b", rest):
+        return clock + "?"
+    return clock
+
+
+def _match_snooze_candidate(candidate: str) -> ProactiveAction | None:
+    if _RESUME_RE.match(candidate):
+        return ("resume", None)
+    m = _SNOOZE_RE.match(candidate) or _SNOOZE_BARE_RE.match(candidate)
+    if m:
+        payload = _snooze_payload(m.group(1))
+        return None if payload is False else ("snooze", payload)
+    m = _SNOOZE_HI_RE.match(candidate)
+    if m:
+        when = (m.group(1) or "").strip()
+        if when.endswith("baje"):          # "5 baje tak" — a clock time, not a length
+            when = when[: -len("baje")].strip()
+            clock = parse_clock_time(when)
+            return ("snooze", clock + "?" if clock and int(clock[:2]) < 12 else clock) if clock else None
+        payload = _snooze_payload(when or None)
+        return None if payload is False else ("snooze", payload)
+    return None
+
+
 def _match_proactive_candidate(candidate: str) -> ProactiveAction | None:
     if candidate in _BRIEF_NOW_PHRASES:
         return ("brief_now", None)
@@ -491,7 +588,7 @@ def _match_proactive_candidate(candidate: str) -> ProactiveAction | None:
         if "before" not in candidate and "nudges" not in candidate:
             return None
         return ("nudges_on", int(m.group(1)) if m.group(1) else None)
-    return None
+    return _match_snooze_candidate(candidate)
 
 
 def match_proactive_intent(text: str) -> ProactiveAction | None:
@@ -520,9 +617,9 @@ def match_proactive_intent(text: str) -> ProactiveAction | None:
 # the orchestrator's BrainSwitcher does the actual switch (and says why it
 # can't). Names are the BACKENDS keys — kept literal here so this module
 # stays import-light.
-BrainAction = tuple[Literal["switch", "which"], str | None]
+BrainAction = tuple[Literal["switch", "which", "online"], str | None]
 
-_BRAIN_NAMES = r"(claude|codex|antigravity|copilot)"
+_BRAIN_NAMES = r"(claude|codex|antigravity|copilot|local)"
 _BRAIN_SWITCH_RE = re.compile(
     rf"^(?:switch(?: brains?)? to|use|change(?: brains?)? to|switch(?: the)? brain to)\s+(?:the )?{_BRAIN_NAMES}(?: brain)?$"
 )
@@ -540,10 +637,30 @@ _WHICH_BRAIN_PHRASES = frozenset({
     "who am i talking to", "which ai is this", "which ai are you",
 })
 
+# Offline / online by voice (F1). "go offline" means the local model, not
+# an airplane-mode toggle; "go online" hands the next turn back to whichever
+# vendor brain is ready (the switcher picks — see online_candidate).
+_OFFLINE_PHRASES = frozenset({
+    "go offline", "offline mode", "offline", "use the local model", "use local model",
+    "use the local brain", "switch to the local model", "run locally", "work offline",
+    # Hinglish
+    "offline ho jao", "local model use karo",
+})
+_ONLINE_PHRASES = frozenset({
+    "go online", "back online", "go back online", "online mode", "online",
+    "stop using the local model", "use the internet again",
+    # Hinglish
+    "online ho jao", "online wapas jao",
+})
+
 
 def _match_brain_candidate(candidate: str) -> BrainAction | None:
     if candidate in _WHICH_BRAIN_PHRASES or candidate in _WHICH_BRAIN_PHRASES_HINGLISH:
         return ("which", None)
+    if candidate in _OFFLINE_PHRASES:
+        return ("switch", "local")
+    if candidate in _ONLINE_PHRASES:
+        return ("online", None)
     for pattern in (_BRAIN_SWITCH_RE, _BRAIN_BACK_RE, _BRAIN_SWITCH_HINGLISH_RE):
         m = pattern.match(candidate)
         if m:
@@ -553,7 +670,9 @@ def _match_brain_candidate(candidate: str) -> BrainAction | None:
 
 def match_brain_intent(text: str) -> BrainAction | None:
     """"switch to codex" / "use copilot" / "go back to claude" -> ("switch",
-    name); "which brain are you on" -> ("which", None). Same candidate
+    name); "go offline" / "use the local model" -> ("switch", "local");
+    "go online" / "back online" -> ("online", None); "which brain are you
+    on" -> ("which", None). Same candidate
     strategy as match_intent: whole normalized utterance, then each clause.
     Unknown names ("use gemini") don't match, so they reach the brain."""
     for candidate in _candidates_for(normalize(text)):
@@ -597,6 +716,59 @@ _NOTE_THAT_RE = re.compile(r"^note that\s+(.+)$", re.IGNORECASE)
 
 DICTATE_PHRASES = frozenset({"dictate", "start dictation", "begin dictation"})
 STOP_DICTATION_PHRASES = frozenset({"stop dictation", "stop dictating", "end dictation"})
+
+
+# Pause / continue (F2). Deliberately NOT part of match_intent's ladder:
+# these only mean "park the answer" / "say the rest" while a barge has just
+# stopped Veronica mid-reply, and only the orchestrator knows that a
+# remainder is being held. Outside that window "ruko" is still an END
+# phrase and "wait" is still just a request — which is what the ladder,
+# untouched, keeps doing.
+PAUSE_PHRASES = frozenset({
+    "hold on", "hold up", "hang on", "wait", "wait a sec", "wait a second",
+    "one sec", "one second", "just a sec", "just a second",
+    # Hinglish
+    "ruko", "ruko zara", "zara ruko", "ek minute", "ek sec", "ek second",
+    # Devanagari
+    "रुको", "ज़रा रुको", "एक मिनट",
+})
+
+# Kept disjoint from the other phrase sets on purpose: bare "resume" is
+# already "resume music", so it is not a continue phrase.
+RESUME_PHRASES = frozenset({
+    "continue", "carry on", "carry on then", "go on", "keep going",
+    "finish it", "say the rest",
+    # Hinglish
+    "aage bolo", "aage boliye", "jaari rakho", "continue karo",
+    # Devanagari
+    "आगे बोलो", "जारी रखो",
+})
+
+
+def _matches_any(text: str, phrases: frozenset[str]) -> bool:
+    """match_intent's matching rule — whole utterance first, then each
+    clause, each with the wrapper/filler variants — against one phrase set."""
+    for candidate in _candidates_for(normalize(text)):
+        if candidate in phrases:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in phrases:
+                return True
+    return False
+
+
+def is_pause_phrase(text: str) -> bool:
+    """True if `text` asks her to hold the rest of what she was saying."""
+    return _matches_any(text, PAUSE_PHRASES)
+
+
+def is_resume_phrase(text: str) -> bool:
+    """True if `text` asks her to carry on from where a pause stopped her."""
+    return _matches_any(text, RESUME_PHRASES)
 
 
 def match_note_intent(text: str) -> str | None:

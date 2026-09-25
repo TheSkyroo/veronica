@@ -53,14 +53,18 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 # not listed here is unreachable from the window (deliberately).
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
-    "listening": ("followup_window_s", "confirm_listen_s", "vad_silence_ms", "max_utterance_s",
+    "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
-    "brain": ("effort", "memory_enabled", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording",
+    "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
-              "codex_native_tools", "antigravity_native_tools", "copilot_native_tools"),
+              "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
+              "brain_offline_fallback", "local_server_bin", "local_model", "local_ctx", "local_port"),
 }
 HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
-BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
+BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
+                 "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
+                 "unread_enabled", "unread_time")
+BRIEFING_TIME_KEYS = ("briefing_time", "quiet_from", "quiet_to", "unread_time")
 
 
 def _inline(fn: Callable[[], None]) -> None:
@@ -417,16 +421,16 @@ class SettingsBridge:
         sched = getattr(pro, "schedule", None) if pro is not None else None
         if sched is None:
             return _fail("Briefings aren't available right now.")
-        if key == "briefing_time":
+        if key in BRIEFING_TIME_KEYS:
             text = str(value or "").strip()
             if not proactive._TIME_RE.match(text):
                 return _fail("Time must be HH:MM (24-hour)")
-            sched.briefing_time = text
+            setattr(sched, key, text)
         elif key == "nudge_minutes":
             if isinstance(value, bool):
                 raise TypeError("nudge_minutes must be a number")
             sched.nudge_minutes = max(1, min(60, int(value)))
-        else:  # briefing_enabled / nudges_enabled
+        else:  # the on/off flags
             setattr(sched, key, _to_bool(value))
         proactive.save_schedule(sched, save=self._prefs.save)
         return _ok()

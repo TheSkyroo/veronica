@@ -382,6 +382,29 @@ async def mail_send(args: dict) -> dict:
     return await _osascript(script, ok_text=f"Sent to {to}")
 
 
+# -- messages -------------------------------------------------------------------
+@tool("message_send", "Send an iMessage/SMS through Messages.app", {"to": str, "body": str})
+@_guard
+async def message_send(args: dict) -> dict:
+    to = str(args.get("to", "")).strip()
+    body = str(args.get("body", ""))
+    if not to:
+        return _err("to is required")
+    if not body:
+        return _err("body is required")
+    # `buddy "..."` wants a phone number or Apple ID, not a contact's display
+    # name — Messages resolves nothing for us, so a bare first name fails and
+    # the app's own error comes back to the brain, which can then ask.
+    script = (
+        'tell application "Messages"\n'
+        "set targetService to 1st service whose service type = iMessage\n"
+        + f'set targetBuddy to buddy "{_q(to)}" of targetService\n'
+        + f'send "{_q(body)}" to targetBuddy\n'
+        + "end tell\n"
+    )
+    return await _osascript(script, ok_text=f"Sent to {to}")
+
+
 # -- reminders ----------------------------------------------------------------
 def _format_reminders(raw: str) -> str:
     lines = [ln for ln in raw.split("\n") if ln.strip()]
@@ -552,6 +575,7 @@ async def timer_cancel(args: dict) -> dict:
 TOOLS = [
     calendar_events, calendar_create,
     mail_unread, mail_search, mail_send,
+    message_send,
     reminder_create, reminders_due,
     notes_create,
     timer_set, timer_list, timer_cancel,

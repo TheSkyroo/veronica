@@ -32,9 +32,11 @@ def fixture_state(**over) -> dict:
                       "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
         "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
-                  "preapprove_by_wording": True, "brain_backend": "codex", "brain_failover": True,
+                  "preapprove_by_wording": True, "shortcut_allowlist": [], "brain_backend": "codex", "brain_failover": True,
                   "brain_failover_order": "codex,antigravity,claude,copilot", "brain_limit_cooldown_min": 60,
                   "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
+                  "brain_offline_fallback": True, "local_server_bin": "/opt/llama-server",
+                  "local_model": "/models/granite.gguf", "local_ctx": 8192, "local_port": 8749,
                   "brain_label": "Claude (for Codex)"},
         "about": {"version": "0.1.0", "build": "a517483", "built_at": "2026-09-17T10:00:00+05:30", "dirty": True,
                   "describe": "Veronica 0.1.0 (a517483, 17 Sep)", "update": {"available": False, "detail": ""},
@@ -371,7 +373,7 @@ def test_brain_tab_renders_backend_rows_and_label():
         # the choice shows capitalised labels for the backend names
         assert page.input_value("#pane select[data-key=brain_backend]") == "codex"
         labels = page.evaluate("Array.from(document.querySelectorAll('#pane select[data-key=brain_backend] option')).map(o => o.textContent)")
-        assert labels == ["Codex", "Antigravity", "Claude", "Copilot"]
+        assert labels == ["Codex", "Antigravity", "Claude", "Copilot", "Local"]
         assert page.is_checked("#pane input[data-key=codex_native_tools]")
         assert not page.is_checked("#pane input[data-key=copilot_native_tools]")
 

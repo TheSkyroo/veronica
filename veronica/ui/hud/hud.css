@@ -25,6 +25,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #status[data-state="thinking"] .dot{background:#ffb454}
 #status[data-state="speaking"] .dot{background:#f0c36c}
 #status[data-state="confirming"] .dot{background:#ff8a3c}
+#status[data-state="paused"] .dot{background:#f0c36c;opacity:.55}
 #status[data-state="error"] .dot{background:#ff5a5a}
 
 /* ---- brain line: "Brain: Codex" under the status row (hud event with a
@@ -80,6 +81,28 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #hint{margin-top:3px}
 #hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
 
+/* ---- plan checklist: a multi-step turn's tool calls, at most the newest
+   five (older ones collapse into the "+N more" line above them). Same
+   palette as the tool card — amber for what is running, green for what is
+   done, red for a decline — plus a muted grey for what hasn't started. ---- */
+#plan{margin-top:6px;display:flex;flex-direction:column;gap:1px;
+  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35}
+#plan .more{opacity:.35;letter-spacing:.03em;padding-left:14px}
+#plan .step{display:flex;align-items:baseline;gap:5px;min-width:0}
+#plan .step .mark{flex:0 0 auto;width:9px;text-align:center}
+#plan .step .msg{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#plan .step.pending{opacity:.42}
+#plan .step.running{color:#ffb454}
+#plan .step.done{color:#7dffb0;opacity:.55}
+#plan .step.failed,#plan .step.declined{color:#ff7a7a}
+/* A checklist makes the card tight (body.planning is set while one is up),
+   so the things it duplicates give way: the tool card's detail row (the
+   checklist's own last row names that action), the transcript bubble (the
+   checklist IS what she's doing about it) and the reply's extra lines. */
+body.planning #heard{display:none}
+body.planning .bubble .msg{-webkit-line-clamp:1}
+body.planning #tool .detail{display:none}
+
 /* ---- mini mode: compact bar — a 64px orb plus a caption pill ---- */
 body.mini #card{width:400px;height:72px;padding:0 8px;gap:12px;align-items:center;justify-content:flex-start;
   border:none;background:transparent;box-shadow:none;backdrop-filter:none;border-radius:0}
@@ -97,6 +120,11 @@ body.mini #caption.hidden{display:none}
 #caption .msg{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #caption .msg.partial{font-style:italic;opacity:.75}
 #caption .msg.prompt{color:#f0c36c;font-weight:500}
+/* the plan's running step, mini mode's one line of it ("2/4 Open Safari") */
+#caption .step{display:none}
+body.mini #caption .step{display:inline-block;flex:0 1 auto;min-width:0;max-width:150px;
+  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;color:#ffb454;opacity:.75;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 #caption[data-state="warming"] .dot{background:#a0a4ad}
 #caption[data-state="listening"] .dot,#caption[data-state="followup"] .dot{background:#7ad0ff}

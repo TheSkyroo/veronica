@@ -44,7 +44,7 @@ class Clock:
     def __call__(self): return self.t
 
 
-def make(schedule, events="No events.", mail=0, reminders="No reminders due.", now=None):
+def make(schedule, events="No events.", mail=0, reminders="No reminders due.", now=None, battery=None):
     said = []
     calls = {"events": 0, "expires": []}
 
@@ -56,9 +56,10 @@ def make(schedule, events="No events.", mail=0, reminders="No reminders due.", n
         return events
     async def mail_count(): return mail
     async def rem(days): return reminders
+    async def batt(): return battery[0] if battery else (None, None)
 
     clock = Clock(now or dt.datetime(2026, 9, 16, 8, 0))
-    p = pr.Proactive(schedule, announce, cal, mail_count, rem, now=clock)
+    p = pr.Proactive(schedule, announce, cal, mail_count, rem, battery=batt, now=clock)
     return p, said, clock, calls
 
 
@@ -202,3 +203,147 @@ async def test_nudges_tolerate_calendar_failure_and_back_off(caplog):
     clock.t = dt.datetime(2026, 9, 16, 9, 6)
     await p.tick()
     assert calls["events"] == 2                      # retried after the cache window
+
+
+# -- batch F: quiet hours, snooze and the battery/unread triggers --------------
+def test_schedule_roundtrip_quiet_hours_and_triggers():
+    s = pr.Schedule(quiet_enabled=True, quiet_from="23:30", quiet_to="07:00",
+                    battery_enabled=True, unread_enabled=True, unread_time="11:30")
+    assert pr.Schedule.from_prefs(s.to_prefs()) == s
+    assert pr.Schedule.from_prefs({"quiet_from": "9pm", "unread_time": "", "battery_enabled": "yes"}) == pr.Schedule()
+    assert pr.Schedule().quiet_enabled is False       # opt-in, like the briefing itself
+    assert (pr.Schedule().quiet_from, pr.Schedule().quiet_to) == ("22:00", "08:00")
+
+
+def test_resolve_hold_until():
+    now = dt.datetime(2026, 9, 16, 14, 0)
+    assert pr.resolve_hold_until(now, 60) == dt.datetime(2026, 9, 16, 15, 0)
+    assert pr.resolve_hold_until(now, "17:00") == dt.datetime(2026, 9, 16, 17, 0)
+    assert pr.resolve_hold_until(now, "09:00") == dt.datetime(2026, 9, 17, 9, 0)
+    # a bare hour ("until 5") means the next 5 o'clock, am or pm
+    assert pr.resolve_hold_until(now, "05:00?") == dt.datetime(2026, 9, 16, 17, 0)
+    assert pr.resolve_hold_until(dt.datetime(2026, 9, 16, 18, 0), "05:00?") == dt.datetime(2026, 9, 17, 5, 0)
+
+
+async def test_quiet_hours_hold_then_deliver_with_prefix():
+    sched = pr.Schedule(briefing_enabled=True, briefing_time="07:30", quiet_enabled=True,
+                        unread_enabled=True, unread_time="07:45")
+    p, said, clock, _ = make(sched, mail=5, now=dt.datetime(2026, 9, 16, 7, 30))
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 7, 45)
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 8, 0)           # quiet hours over
+    await p.tick()
+    assert said[0].startswith("While you were away: Good morning")
+    assert said[1] == "You have 5 unread since this morning."
+
+
+async def test_quiet_hours_single_held_item_has_no_prefix():
+    sched = pr.Schedule(briefing_enabled=True, briefing_time="07:30", quiet_enabled=True)
+    p, said, clock, _ = make(sched, now=dt.datetime(2026, 9, 16, 7, 30))
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 8, 0)
+    await p.tick()
+    assert len(said) == 1 and said[0].startswith("Good morning")
+
+
+async def test_quiet_hours_drop_held_item_whose_moment_passed():
+    ev = "23:30–23:45  Standup (Work)"
+    sched = pr.Schedule(nudges_enabled=True, nudge_minutes=5, quiet_enabled=True)
+    p, said, clock, calls = make(sched, events=ev, now=dt.datetime(2026, 9, 16, 23, 26))
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 17, 8, 0)
+    await p.tick()
+    assert said == [] and calls["expires"] == []       # the meeting is long over
+
+
+async def test_held_announcements_are_capped():
+    """A long snooze must not queue up an unbounded monologue for the
+    moment it ends."""
+    p, said, clock, _ = make(pr.Schedule(), now=dt.datetime(2026, 9, 16, 22, 0))
+    p.hold_until = dt.datetime(2026, 9, 16, 23, 0)
+    for i in range(pr.Proactive.HELD_MAX + 5):
+        await p._announce_or_hold(f"Thing {i}.")
+    assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 23, 1)
+    await p._flush_held(clock.t)
+    assert len(said) == pr.Proactive.HELD_MAX + 1
+    assert said[0] == "While you were away: Thing 0."
+    assert said[-1] == "And 5 more I held back."
+    assert p._held == []
+
+
+async def test_quiet_hours_off_by_default_speaks_at_night():
+    ev = "23:30–23:45  Standup (Work)"
+    p, said, clock, _ = make(pr.Schedule(nudges_enabled=True), events=ev, now=dt.datetime(2026, 9, 16, 23, 26))
+    await p.tick(); assert said == ["Heads up, Standup starts in 4 minutes."]
+
+
+async def test_snooze_holds_and_resume_releases():
+    ev = "09:30–10:00  Standup (Work)"
+    p, said, clock, _ = make(pr.Schedule(nudges_enabled=True), events=ev, now=dt.datetime(2026, 9, 16, 9, 26))
+    p.hold_until = dt.datetime(2026, 9, 16, 10, 0)
+    await p.tick(); assert said == []
+    p.hold_until = None                                 # "resume notifications"
+    clock.t = dt.datetime(2026, 9, 16, 9, 28)
+    await p.tick(); assert said == ["Heads up, Standup starts in 4 minutes."]
+
+
+async def test_snooze_expires_on_its_own():
+    sched = pr.Schedule(briefing_enabled=True, briefing_time="08:00")
+    p, said, clock, _ = make(sched, now=dt.datetime(2026, 9, 16, 8, 0))
+    p.hold_until = dt.datetime(2026, 9, 16, 9, 0)
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 9, 0)
+    await p.tick()
+    assert len(said) == 1 and said[0].startswith("Good morning")
+    assert p.hold_until is None
+
+
+async def test_battery_warns_once_per_discharge_and_never_while_charging():
+    batt = [(12, "discharging")]
+    p, said, clock, _ = make(pr.Schedule(battery_enabled=True), battery=batt)
+    await p.tick(); assert said == ["Battery's at 12 percent."]
+    batt[0] = (11, "discharging")
+    await p.tick(); assert len(said) == 1                # once per discharge cycle
+    batt[0] = (11, "charging")
+    await p.tick(); assert len(said) == 1
+    batt[0] = (80, "charging")
+    await p.tick()
+    batt[0] = (14, "discharging")                        # unplugged again, ran down again
+    await p.tick(); assert said[-1] == "Battery's at 14 percent."
+
+
+async def test_battery_quiet_above_threshold_disabled_or_unknown():
+    batt = [(40, "discharging")]
+    p, said, _, _ = make(pr.Schedule(battery_enabled=True), battery=batt)
+    await p.tick(); assert said == []
+    batt[0] = (None, None)
+    await p.tick(); assert said == []
+    batt[0] = (5, None)                                  # plugged in, not charging
+    await p.tick(); assert said == []
+
+    batt[0] = (5, "discharging")
+    p2, said2, _, _ = make(pr.Schedule(), battery=batt)   # trigger off by default
+    await p2.tick(); assert said2 == []
+
+
+async def test_unread_nudge_fires_at_its_hour_only():
+    sched = pr.Schedule(unread_enabled=True, unread_time="11:00")
+    p, said, clock, _ = make(sched, mail=7, now=dt.datetime(2026, 9, 16, 10, 59))
+    await p.tick(); assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 11, 0)
+    await p.tick(); assert said == ["You have 7 unread since this morning."]
+    clock.t = dt.datetime(2026, 9, 16, 11, 1)
+    await p.tick(); assert len(said) == 1                 # once a day
+    clock.t = dt.datetime(2026, 9, 17, 11, 0)
+    await p.tick(); assert len(said) == 2
+
+
+async def test_unread_nudge_silent_when_inbox_is_clear_and_when_off():
+    sched = pr.Schedule(unread_enabled=True, unread_time="11:00")
+    p, said, clock, _ = make(sched, mail=0, now=dt.datetime(2026, 9, 16, 11, 0))
+    await p.tick(); assert said == []
+
+    p2, said2, _, _ = make(pr.Schedule(), mail=3, now=dt.datetime(2026, 9, 16, 11, 0))
+    await p2.tick(); assert said2 == []
