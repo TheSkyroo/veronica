@@ -1,5 +1,5 @@
 (() => {
-  const model = {state:'idle', heard:'', reply:'', tool:null, prompt:'', mic:0, ready:true,
+  const model = {state:'idle', heard:'', reply:'', tool:null, plan:[], prompt:'', mic:0, ready:true,
                  voice:null, voiceStart:0, confirmStart:null, confirmTimeoutMs:8000};
   const MAX_REPLY_LEN = 220;
   let micSmooth = 0, replyQueue = [], typing = false, replyGen = 0, pendingTimeout = null;
@@ -28,6 +28,7 @@
   const countdownBarEl = countdownEl.querySelector('i');
   const hintRowEl = $('hint');
   const hintEl = hintRowEl.querySelector('.msg');
+  const planEl = $('plan');
   const statusEl = $('status');
   const statusLabelEl = statusEl.querySelector('.label');
   const statusLevelEl = statusEl.querySelector('.level i');
@@ -35,6 +36,7 @@
   const brainEl = $('brain');
   const captionEl = $('caption');
   const captionMsgEl = captionEl.querySelector('.msg');
+  const captionStepEl = captionEl.querySelector('.step');
   captionEl.dataset.state = 'idle';
 
   // Mini mode's single-line caption: whatever set it last wins (see hud.push
@@ -49,6 +51,60 @@
   }
 
   const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined', redirected: 'redirected', preapproved: 'pre-approved', limit: 'limit'};
+
+  // ---- plan checklist (F3) --------------------------------------------------
+  // The orchestrator sends the whole list every time a step changes, and only
+  // for a turn that made more than one tool call — a single call keeps the
+  // plain action card above. Display only: the confirm gate has already
+  // decided everything this shows.
+  const PLAN_MARK = {pending: '○', running: '▸', done: '✓', failed: '✕', declined: '✕'};
+  const PLAN_STATES = ['pending', 'running', 'done', 'failed', 'declined'];
+  const PLAN_VISIBLE = 5;
+
+  // Mini mode has one line to spare, so it gets the running step alone.
+  function setCaptionStep(text) {
+    captionStepEl.textContent = text || '';
+    captionStepEl.classList.toggle('hidden', !text);
+  }
+
+  function renderPlan() {
+    const steps = model.plan;
+    planEl.textContent = '';
+    // The card is tight with a checklist in it — hud.css trims the chat
+    // bubbles and the tool card's detail row while this is set.
+    document.body.classList.toggle('planning', steps.length > 0);
+    if (!steps.length) {
+      planEl.classList.add('hidden');
+      setCaptionStep('');
+      return;
+    }
+    // Older steps collapse so the part that is actually moving stays visible.
+    const collapsed = Math.max(0, steps.length - PLAN_VISIBLE);
+    if (collapsed) {
+      const more = document.createElement('div');
+      more.className = 'more';
+      more.textContent = '+' + collapsed + ' more';
+      planEl.appendChild(more);
+    }
+    let running = -1;
+    steps.forEach((st, i) => {
+      if (st.state === 'running') running = i;
+      if (i < collapsed) return;
+      const row = document.createElement('div');
+      row.className = 'step ' + st.state;
+      const mark = document.createElement('span');
+      mark.className = 'mark';
+      mark.textContent = PLAN_MARK[st.state] || PLAN_MARK.pending;
+      const msg = document.createElement('span');
+      msg.className = 'msg';
+      msg.textContent = st.summary;
+      row.appendChild(mark); row.appendChild(msg);
+      planEl.appendChild(row);
+    });
+    planEl.classList.remove('hidden');
+    actionEl.classList.remove('hidden');   // a plan can arrive before any card
+    setCaptionStep(running < 0 ? '' : (running + 1) + '/' + steps.length + ' ' + steps[running].summary);
+  }
 
   // Hide an empty bubble/row (no awkward blank box in the card) and show it
   // once it has content.
@@ -72,6 +128,7 @@
     badgeEl.className = 'badge'; badgeEl.textContent = '';
     toolTitleEl.textContent = ''; detailEl.textContent = '';
     pillEl.className = 'pill'; pillEl.textContent = '';
+    model.plan = []; renderPlan();
     actionEl.classList.add('hidden');
     model.prompt = ''; promptEl.textContent = ''; promptRowEl.classList.add('hidden');
     hintEl.textContent = ''; hintRowEl.classList.add('hidden');
@@ -209,6 +266,20 @@
             }
             break;
           }
+          case 'plan': {
+            // The turn's whole checklist, resent on every change (and empty
+            // when the turn resets it). Unknown states fall back to pending
+            // rather than rendering an unstyled row.
+            const steps = payload && Array.isArray(payload.steps) ? payload.steps : [];
+            model.plan = steps
+              .filter(st => st && typeof st === 'object')
+              .map(st => ({
+                summary: String(st.summary ?? ''),
+                state: PLAN_STATES.indexOf(st.state) >= 0 ? st.state : 'pending',
+              }));
+            renderPlan();
+            break;
+          }
           case 'prompt': {
             // The confirmation question, spoken right before we start
             // listening. Shown immediately in the prompt row, alongside a
@@ -243,7 +314,8 @@
       }
     },
     state() {
-      return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, mic:model.mic, ready:model.ready,
+      return {state:model.state, heard:model.heard, reply:model.reply, tool:model.tool, plan:model.plan,
+              mic:model.mic, ready:model.ready,
               particles:activeCount(), intensity:cfg.intensity};
     },
     setMode(mode) {
