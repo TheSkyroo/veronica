@@ -373,7 +373,7 @@ def test_brain_tab_renders_backend_rows_and_label():
         # the choice shows capitalised labels for the backend names
         assert page.input_value("#pane select[data-key=brain_backend]") == "codex"
         labels = page.evaluate("Array.from(document.querySelectorAll('#pane select[data-key=brain_backend] option')).map(o => o.textContent)")
-        assert labels == ["Codex", "Antigravity", "Claude", "Copilot"]
+        assert labels == ["Codex", "Antigravity", "Claude", "Copilot", "Local"]
         assert page.is_checked("#pane input[data-key=codex_native_tools]")
         assert not page.is_checked("#pane input[data-key=copilot_native_tools]")
 
