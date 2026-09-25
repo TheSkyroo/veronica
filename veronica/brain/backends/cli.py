@@ -81,8 +81,11 @@ class Error:
 
 Event = Text | ToolStart | ToolEnd | Session | Done | Error
 
+# "You've hit your weekly limit - resets 6:30am (Asia/Calcutta)" is what
+# Claude Code says on a subscription limit, hence the per-period markers.
 LIMIT_MARKERS = ("usage limit", "rate limit", "rate_limit", "429", "quota", "resource exhausted",
-                 "too many requests", "limit reached", "out of credits", "insufficient_quota", "overloaded")
+                 "too many requests", "limit reached", "out of credits", "insufficient_quota", "overloaded",
+                 "hourly limit", "daily limit", "weekly limit", "monthly limit")
 OVERFLOW_MARKERS = ("context", "compact", "too long", "prompt is too long", "max_tokens")
 
 Mode = Literal["per_turn", "persistent"]

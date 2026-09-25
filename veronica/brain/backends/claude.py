@@ -15,6 +15,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from veronica.brain.agent import Confirm, _image_media_type
+from veronica.brain.backends.cli import LIMIT_MARKERS, LimitError
 from veronica.brain.gate import ToolGate
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
@@ -254,13 +255,21 @@ class ClaudeBrain:
                         errors = getattr(msg, "errors", None)
                         error_text = " ".join(
                             str(part) for part in (msg.result, errors) if part
-                        ).lower()
+                        )
+                        lowered = error_text.lower()
+                        # Same markers the CLI backends use: a limit has to
+                        # leave ask() as LimitError or the switcher can never
+                        # fail over off Claude (spec 4a).
+                        if any(marker in lowered for marker in LIMIT_MARKERS):
+                            log.warning("brain limit: %s", error_text)
+                            await self.close()
+                            raise LimitError(error_text)
                         # Substring heuristic, not a structured error code from the
                         # SDK — a false positive here just resets the session
                         # (loses conversation history) rather than mis-handling
                         # a genuinely different error, so it's a safe bias.
                         if any(
-                            marker in error_text
+                            marker in lowered
                             for marker in (
                                 "context",
                                 "compact",

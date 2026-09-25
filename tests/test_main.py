@@ -368,7 +368,9 @@ class _StubOrchestrator:
     async def stop_brain(self):
         self.brain_stopped += 1
 
-    async def handle_text(self, text):
+    async def _brain_turn(self, text):
+        """text mode goes through _brain_turn, not handle_text, so a usage
+        limit fails over instead of escaping as a traceback."""
         return await self._handle_text(self, text)
 
 

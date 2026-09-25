@@ -443,6 +443,8 @@ from veronica.brain.intents import match_brain_intent
     ("claude pe wapas jao", ("switch", "claude")), ("antigravity chalao", ("switch", "antigravity")),
     ("which brain are you on", ("which", None)), ("which model are you using", ("which", None)),
     ("who am i talking to", ("which", None)), ("which brain is this", ("which", None)),
+    # not a which-brain phrase: it is usually about a photo, a caller or a name
+    ("who is this", None), ("who is this?", None),
     ("kaunsa brain hai", ("which", None)),
     ("use qwen please", None), ("use gemini", None), ("switch to spanish", None),
     ("use a british voice", None), ("open codex", None), ("use codex to write a poem", None),

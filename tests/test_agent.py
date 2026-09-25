@@ -9,6 +9,7 @@ from veronica.brain.backends import claude as claude_mod
 from claude_agent_sdk.types import PermissionResultDeny
 
 from veronica.brain.agent import Brain, summarize_detail, summarize_tool
+from veronica.brain.backends.cli import LimitError
 from veronica.brain.prompts import FACTS_CAP_BYTES, RECENT_CAP_BYTES, system_prompt
 from veronica.config import Settings
 
@@ -397,7 +398,7 @@ async def test_error_result_speaks_error(brain, tmp_home, monkeypatch):
             super().__init__(options)
             r = _Result("sess-err")
             r.is_error = True
-            r.result = "rate limited"
+            r.result = "something broke"
             self.script = [r]
 
     monkeypatch.setattr(Brain, "_client_cls", ErrClient)
@@ -405,6 +406,29 @@ async def test_error_result_speaks_error(brain, tmp_home, monkeypatch):
     assert out == ["Claude returned an error, check the log."]
     assert brain._client is None
     assert not (tmp_home / "session").exists()
+
+
+# The exact line Claude Code prints when the subscription limit is hit.
+WEEKLY_LIMIT = "You've hit your weekly limit \u00b7 resets 6:30am (Asia/Calcutta)"
+
+
+@pytest.mark.parametrize("message", [WEEKLY_LIMIT, "rate limited", "usage limit reached"])
+async def test_limit_result_raises_limit_error(brain, tmp_home, monkeypatch, message):
+    """Spec 4a: a limit has to leave ask() as LimitError, or the switcher can
+    never fail over from Claude."""
+    class LimitClient(FakeClient):
+        def __init__(self, options=None):
+            super().__init__(options)
+            r = _Result("sess-limit")
+            r.is_error = True
+            r.result = message
+            self.script = [r]
+
+    monkeypatch.setattr(Brain, "_client_cls", LimitClient)
+    with pytest.raises(LimitError) as e:
+        [s async for s in brain.ask("x")]
+    assert message in str(e.value)
+    assert brain._client is None
 
 
 async def test_context_overflow_result_starts_fresh_conversation(brain, tmp_home, monkeypatch):

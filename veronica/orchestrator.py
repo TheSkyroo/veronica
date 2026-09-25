@@ -728,24 +728,12 @@ class Orchestrator:
         A brain that hits its usage limit raises LimitError out of ask();
         the switcher moves to the next ready brain (and says so) and the
         same request is re-run there once per hop, at most one hop per
-        backend so a chain of limits can't loop."""
+        backend so a chain of limits can't loop. The redirect re-run goes
+        through the same path — a limit there is a limit like any other."""
         if self.switcher is not None:
             await self.switcher.maybe_return()
-        for _hop in range(len(BACKENDS)):
-            try:
-                spoken = await self.handle_text(text, images, lang=lang)
-                break
-            except LimitError as e:
-                if self.switcher is None:
-                    await self.say(f"{self._brain_label()} hit its usage limit.")
-                    return []
-                old = self._brain_label()
-                new = await self.switcher.failover(str(e))
-                if new is None:
-                    return []       # the switcher said "no other brain is ready"
-                self._emit("tool", {"summary": f"{old}: usage limit — on {BACKENDS[new].label}",
-                                    "decision": "limit"})
-        else:
+        spoken = await self._ask_with_failover(text, images, lang=lang)
+        if spoken is None:
             return []
         heard = getattr(self.brain, "pending_redirect", None)
         if not heard:
@@ -754,11 +742,30 @@ class Orchestrator:
         self._emit("heard", heard)
         log.info("heard=%r (redirected from confirm)", heard)
         if not spoken:
-            return await self.handle_text(heard, lang=lang)
+            return await self._ask_with_failover(heard, lang=lang) or []
         # The brain already answered the redirect inside this turn (the deny
         # message carried it), and handle_text stored that reply — no
         # second memory row with the same reply.
         return spoken
+
+    async def _ask_with_failover(self, text: str, images: list[bytes] = (), *,
+                                 lang: str | None = None) -> list[str] | None:
+        """handle_text, retried on the next ready brain each time one reports
+        its usage limit. None = nothing left to say (no brain is ready)."""
+        for _hop in range(len(BACKENDS)):
+            try:
+                return await self.handle_text(text, images, lang=lang)
+            except LimitError as e:
+                if self.switcher is None:
+                    await self.say(f"{self._brain_label()} hit its usage limit.")
+                    return None
+                old = self._brain_label()
+                new = await self.switcher.failover(str(e))
+                if new is None:
+                    return None     # the switcher said "no other brain is ready"
+                self._emit("tool", {"summary": f"{old}: usage limit — on {BACKENDS[new].label}",
+                                    "decision": "limit"})
+        return None
 
     # -- brains -----------------------------------------------------------------
     async def _brain_switch_turn(self, action: tuple[str, str | None]) -> None:
@@ -1907,7 +1914,7 @@ class Orchestrator:
                 self.player.reset()
                 detail = f"{type(exc).__name__} {exc}".lower()
                 if any(k in detail for k in ("login", "logged in", "authenticat")):
-                    message = "Claude Code isn't logged in."
+                    message = f"{self._brain_label()} isn't logged in."
                 else:
                     message = "Something went wrong, check the log."
                 await self.say(message)

@@ -532,7 +532,22 @@ async def test_turn_error_mentioning_login_speaks_specific_message():
     with pytest.raises(asyncio.CancelledError):
         await o.run_forever()
 
-    assert "Claude Code isn't logged in." in o.tts.said
+    assert "Claude isn't logged in." in o.tts.said
+
+
+async def test_login_error_names_the_active_brain():
+    """The login hint used to say "Claude Code" whatever brain was running."""
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+
+    class LoginFail(NamedBrain):
+        async def ask(self, text):
+            raise RuntimeError("not logged in")
+            yield  # noqa: unreachable — makes this an async generator
+
+    o.brain = LoginFail("codex")
+    o.switcher = FakeSwitcher(o.brain)
+    await o._guarded_turn()
+    assert o.tts.said == ["Codex isn't logged in."]
 
 
 # -- task 5: warm-up + pipelined TTS ------------------------------------------
@@ -4127,6 +4142,37 @@ async def test_confirm_redirect_runs_the_text_as_next_request_when_brain_stopped
     assert o.store.turns == [("open it in the other profile instead", "Opening it in the other profile.")]
 
 
+class RedirectThenLimitBrain(RedirectBrain):
+    """Says nothing after the deny, then hits its usage limit on the re-run."""
+    name = "claude"
+
+    async def ask(self, text):
+        self.asked.append(text)
+        if len(self.asked) > 1:
+            raise LimitError("usage limit")
+        r = await self.orch.confirm("Open Chrome")
+        if r.outcome == "other":
+            self.pending_redirect = r.heard
+        return
+        yield  # noqa: unreachable — makes this an async generator
+
+
+async def test_confirm_redirect_rerun_fails_over_on_limit():
+    """The redirect re-run is a brain turn like any other: a limit there must
+    reach the switcher, not escape as "Something went wrong"."""
+    o, _, _ = build3(
+        rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
+        stt_texts=["open chrome", "open it in the other profile instead"],
+    )
+    o.brain = RedirectThenLimitBrain(o, answers=False)
+    standin = NamedBrain("codex", replies=["Opening it in the other profile."])
+    o.switcher = FakeSwitcher(o.brain, fail_to=standin)
+    await o.one_turn()
+    assert o.switcher.failovers == ["usage limit"]
+    assert standin.asked == ["open it in the other profile instead"]
+    assert "Opening it in the other profile." in o.tts.said
+
+
 async def test_confirm_redirect_not_rerun_when_brain_already_answered():
     o, _, ev = build3(
         rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), None],
@@ -4330,9 +4376,11 @@ class NamedBrain(Brain):
 
 class LimitBrain(NamedBrain):
     """ask() reports a usage limit after saying nothing."""
+    reason = "usage limit"
+
     async def ask(self, text):
         self.asked.append(text)
-        raise LimitError("usage limit")
+        raise LimitError(self.reason)
         yield  # noqa: unreachable — makes this an async generator
 
 
@@ -4450,6 +4498,19 @@ async def test_limit_error_fails_over_and_reruns_once():
     assert standin.asked == ["what time is it in tokyo"]
     assert "It's 9 pm in Tokyo." in o.tts.said
     assert ("tool", {"summary": "Claude: usage limit — on Codex", "decision": "limit"}) in ev
+
+
+async def test_claude_weekly_limit_fails_over():
+    """The line Claude Code itself prints; it has to reach the switcher."""
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what time is it in tokyo"])
+    limited = LimitBrain("claude")
+    limited.reason = "You've hit your weekly limit \u00b7 resets 6:30am (Asia/Calcutta)"
+    standin = NamedBrain("codex", replies=["It's 9 pm in Tokyo."])
+    o.brain = limited
+    o.switcher = FakeSwitcher(limited, fail_to=standin)
+    await o.one_turn()
+    assert o.switcher.failovers == [limited.reason]
+    assert standin.asked == ["what time is it in tokyo"] and "It's 9 pm in Tokyo." in o.tts.said
 
 
 async def test_limit_error_without_standin_stops_quietly():

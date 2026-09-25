@@ -535,7 +535,9 @@ _WHICH_BRAIN_PHRASES = frozenset({
     "which brain are you on", "which brain are you using", "which brain is this", "which brain is it",
     "what brain are you on", "what brain are you using", "what brain is this",
     "which model are you on", "which model are you using", "which model is this", "what model are you using",
-    "who am i talking to", "who is this", "which ai is this", "which ai are you",
+    # not "who is this": it fires on every turn, and the question is almost
+    # always about a photo, a caller or a name, not about the brain.
+    "who am i talking to", "which ai is this", "which ai are you",
 })
 
 

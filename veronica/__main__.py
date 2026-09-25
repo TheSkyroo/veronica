@@ -207,7 +207,9 @@ async def _text_mode(text: str) -> None:
         # gate socket the external brains ask on — run_forever's job in
         # the app.
         await orch.start_brain()
-        for sent in await orch.handle_text(text):
+        # _brain_turn, not handle_text: a usage limit fails over to the next
+        # brain here exactly as it does for a spoken turn.
+        for sent in await orch._brain_turn(text):
             print(sent)
     finally:
         await orch.stop_brain()
