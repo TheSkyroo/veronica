@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
     capture_extra_s: float = 3.0
+    # How long a turn may stay silent before she says a short "On it." so a
+    # slow brain doesn't feel like a dropped question. 0 turns the line off.
+    ack_after_s: float = 3.5
 
     # wake word
     wake_engine: str = "whisper"
@@ -201,6 +204,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "confirm_listen_s": EditableField(
         "int", "Confirmation timeout (seconds)", "How long she waits for yes/no.",
         min=3, max=30, restart=False,
+    ),
+    "ack_after_s": EditableField(
+        "float", "\"On it\" after (seconds)",
+        "How long a slow answer may stay silent before she says she's on it. 0 = never.",
+        min=0, max=15, restart=False,
     ),
     "vad_silence_ms": EditableField(
         "int", "End-of-speech silence (ms)",

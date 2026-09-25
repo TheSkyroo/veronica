@@ -53,7 +53,7 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 # not listed here is unreachable from the window (deliberately).
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
-    "listening": ("followup_window_s", "confirm_listen_s", "vad_silence_ms", "max_utterance_s",
+    "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
     "brain": ("effort", "memory_enabled", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",

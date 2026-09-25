@@ -238,7 +238,7 @@
     listening() {
       const frag = [el('h2', {text: 'Listening'}), el('p', {class: 'lead', text: 'Wake word, turn-taking and how patient she is.'})];
       frag.push(el('h3', {text: 'Conversation'}));
-      for (const k of ['followup_window_s', 'confirm_listen_s', 'vad_silence_ms', 'max_utterance_s']) frag.push(settingRow('listening', k));
+      for (const k of ['followup_window_s', 'confirm_listen_s', 'ack_after_s', 'vad_silence_ms', 'max_utterance_s']) frag.push(settingRow('listening', k));
       frag.push(el('h3', {text: 'Wake word'}));
       for (const k of ['wake_phrases', 'wake_min_rms', 'wake_window_s', 'wake_hop_s']) frag.push(settingRow('listening', k, k === 'wake_phrases' ? {wide: true} : null));
       frag.push(el('h3', {text: 'Microphone'}));

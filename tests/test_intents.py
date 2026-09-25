@@ -471,3 +471,44 @@ def test_hinglish_which_brain_phrases_count_as_hinglish():
 def test_hinglish_offline_phrases_count_as_hinglish():
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES
     assert {"offline ho jao", "online ho jao"} <= HINGLISH_INTENT_PHRASES
+
+
+# -- F2: pause / continue -------------------------------------------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("hold on", True), ("Hold on!", True), ("hold up", True), ("hang on", True),
+    ("wait", True), ("wait a second", True), ("one sec", True), ("one second", True),
+    ("veronica hold on please", True), ("okay wait", True),
+    ("ruko", True), ("ek minute", True), ("रुको", True), ("एक मिनट", True),
+    # not a pause: a request that happens to contain the word
+    ("wait for the build to finish", False), ("hold my calls", False),
+    ("continue", False), ("", False),
+])
+def test_is_pause_phrase(text, expected):
+    from veronica.brain.intents import is_pause_phrase
+    assert is_pause_phrase(text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("continue", True), ("Continue.", True), ("carry on", True), ("go on", True),
+    ("keep going", True), ("aage bolo", True), ("आगे बोलो", True),
+    ("okay go on", True),
+    ("continue the story about mars", False), ("go on a walk", False),
+    ("resume", False),   # that's "resume music"
+    ("hold on", False), ("", False),
+])
+def test_is_resume_phrase(text, expected):
+    from veronica.brain.intents import is_resume_phrase
+    assert is_resume_phrase(text) is expected
+
+
+def test_resume_phrases_do_not_collide_with_other_intents():
+    """one_turn runs the resume branch ahead of the intent ladder, so a
+    continue phrase must not also be an end/HUD/mute/quit phrase."""
+    from veronica.brain.intents import RESUME_PHRASES, match_intent
+    assert all(match_intent(p) is None for p in RESUME_PHRASES)
+
+
+def test_hinglish_pause_and_continue_phrases_count_as_hinglish():
+    from veronica.brain.intents import HINGLISH_INTENT_PHRASES
+    assert {"ek minute", "aage bolo"} <= HINGLISH_INTENT_PHRASES

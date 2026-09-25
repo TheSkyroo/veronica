@@ -7,7 +7,8 @@
 
   const STATUS_LABELS = {
     idle: '', warming: 'Warming up…', listening: 'Listening…', thinking: 'Thinking…',
-    speaking: 'Speaking', followup: 'Listening…', confirming: 'Say yes or no', error: 'Error',
+    speaking: 'Speaking', followup: 'Listening…', confirming: 'Say yes or no',
+    paused: 'Paused — say continue', error: 'Error',
   };
 
   const $ = id => document.getElementById(id);

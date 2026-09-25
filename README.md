@@ -22,6 +22,11 @@ Do not set `ANTHROPIC_API_KEY` (or any other vendor key) — every brain uses th
   models too (~500 MB more) — fetched the first time you say "speak hindi", or ahead of time with
   `uv run python scripts/download_models.py --hindi`.
 - Say the wake word while Veronica is talking to interrupt her (barge-in).
+- Interrupt with "hold on" / "wait" / "one sec" ("ruko", "ek minute") and she stops but keeps the rest of the
+  answer: say "continue" / "carry on" / "go on" ("aage bolo") and she picks up at the next sentence. Anything
+  else you say is treated as a new request and the remainder is dropped; "stop" / "that's all" still cancels.
+- If a slow answer leaves her silent for more than 3.5 s she says "On it." once (Settings → Listening, or
+  `VERONICA_ACK_AFTER_S`; 0 turns it off).
 - Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
 - A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
 - The HUD can be dragged anywhere on screen (click and drag its background) — it reopens wherever you left it.

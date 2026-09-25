@@ -193,6 +193,10 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "kahan ho", "wapas aao",
     "quit karo", "band ho jao",
     "offline ho jao", "local model use karo", "online ho jao", "online wapas jao",
+    # pause / continue (F2): defined further down, listed here so a whole
+    # utterance like "aage bolo" is treated as Hindi and answered in Hindi.
+    "ruko zara", "zara ruko", "ek minute", "ek sec", "ek second",
+    "aage bolo", "aage boliye", "jaari rakho", "continue karo",
 }) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH \
     | _WHICH_BRAIN_PHRASES_HINGLISH
 
@@ -620,6 +624,59 @@ _NOTE_THAT_RE = re.compile(r"^note that\s+(.+)$", re.IGNORECASE)
 
 DICTATE_PHRASES = frozenset({"dictate", "start dictation", "begin dictation"})
 STOP_DICTATION_PHRASES = frozenset({"stop dictation", "stop dictating", "end dictation"})
+
+
+# Pause / continue (F2). Deliberately NOT part of match_intent's ladder:
+# these only mean "park the answer" / "say the rest" while a barge has just
+# stopped Veronica mid-reply, and only the orchestrator knows that a
+# remainder is being held. Outside that window "ruko" is still an END
+# phrase and "wait" is still just a request — which is what the ladder,
+# untouched, keeps doing.
+PAUSE_PHRASES = frozenset({
+    "hold on", "hold up", "hang on", "wait", "wait a sec", "wait a second",
+    "one sec", "one second", "just a sec", "just a second",
+    # Hinglish
+    "ruko", "ruko zara", "zara ruko", "ek minute", "ek sec", "ek second",
+    # Devanagari
+    "रुको", "ज़रा रुको", "एक मिनट",
+})
+
+# Kept disjoint from the other phrase sets on purpose: bare "resume" is
+# already "resume music", so it is not a continue phrase.
+RESUME_PHRASES = frozenset({
+    "continue", "carry on", "carry on then", "go on", "keep going",
+    "finish it", "say the rest",
+    # Hinglish
+    "aage bolo", "aage boliye", "jaari rakho", "continue karo",
+    # Devanagari
+    "आगे बोलो", "जारी रखो",
+})
+
+
+def _matches_any(text: str, phrases: frozenset[str]) -> bool:
+    """match_intent's matching rule — whole utterance first, then each
+    clause, each with the wrapper/filler variants — against one phrase set."""
+    for candidate in _candidates_for(normalize(text)):
+        if candidate in phrases:
+            return True
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            if candidate in phrases:
+                return True
+    return False
+
+
+def is_pause_phrase(text: str) -> bool:
+    """True if `text` asks her to hold the rest of what she was saying."""
+    return _matches_any(text, PAUSE_PHRASES)
+
+
+def is_resume_phrase(text: str) -> bool:
+    """True if `text` asks her to carry on from where a pause stopped her."""
+    return _matches_any(text, RESUME_PHRASES)
 
 
 def match_note_intent(text: str) -> str | None:

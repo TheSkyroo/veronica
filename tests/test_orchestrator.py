@@ -4678,3 +4678,160 @@ async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
     assert seen["socket_during_run"] is True
     assert not o.s.gate_socket.exists()
     assert ("hud", {"backend": "Claude"}) in ev
+
+
+# -- F2: pause / continue, and the "on it" acknowledgement ---------------------
+
+class IndexedTTS:
+    """Synthesises a one-sample buffer whose value is the index of the
+    sentence, so the player can report exactly what reached the speakers."""
+    def __init__(self): self.said = []
+    async def asynth(self, text, lang=None):
+        self.said.append(text)
+        return np.full(1, len(self.said) - 1, dtype=np.float32), 24000
+
+
+class HeardPlayer:
+    """Records the sentences actually played (chimes, being long buffers,
+    are ignored) and takes `dur` over each one so a barge can land mid-way."""
+    def __init__(self, tts, dur=0.05):
+        self.tts, self.dur = tts, dur
+        self.heard = []; self.stops = 0; self.resets = 0
+
+    async def play(self, s):
+        if len(s) == 1:
+            self.heard.append(self.tts.said[int(s[0])])
+        await asyncio.sleep(self.dur)
+
+    def stop(self): self.stops += 1
+    def reset(self): self.resets += 1
+
+
+class ThreeBrain:
+    def __init__(self): self.asked = []; self.interrupts = 0
+    async def ask(self, text):
+        self.asked.append(text)
+        for s in ["One.", "Two.", "Three."]:
+            yield s
+    async def interrupt(self): self.interrupts += 1
+
+
+def build_pause(stt_texts, captures, barge_on_call=1):
+    """A turn that gets barged while "One." is playing, leaving "Two." and
+    "Three." queued: exactly the situation a pause has to survive."""
+    o, states = build(stt_texts=stt_texts)
+    o.tts = IndexedTTS()
+    o.player = HeardPlayer(o.tts)
+    o.brain = ThreeBrain()
+    o.wake = BargeWake(barge_on_call=barge_on_call)
+    o.recorder = Rec([np.zeros(1, np.int16)] * captures)
+    return o, states
+
+
+async def test_pause_keeps_the_remainder_and_speaks_nothing():
+    # listen, re-listen after the barge ("hold on"), then the paused window
+    o, states = build_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert o.player.heard == ["One."]
+    assert [s for s, _ in o._paused_tail] == ["Two.", "Three."]
+    assert "paused" in states
+    # nothing new was synthesised: she said not one word about pausing
+    assert o.tts.said == ["One.", "Two.", "Three."]
+
+
+async def test_continue_speaks_the_unspoken_remainder_in_order():
+    o, _ = build_pause(["do the thing", "hold on", "continue"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+    assert o._paused_tail is None
+    assert o.tts.said == ["One.", "Two.", "Three."]   # no re-synthesis
+    assert o.brain.asked == ["do the thing"]          # the brain wasn't asked again
+
+
+async def test_hinglish_continue_also_resumes():
+    o, _ = build_pause(["do the thing", "ruko", "aage bolo"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+
+
+async def test_unrelated_request_after_a_pause_drops_the_remainder():
+    o, _ = build_pause(["do the thing", "hold on", "what's the weather"], captures=3)
+    await o.one_turn()
+    # the new request is answered in full; nothing of the parked answer leaks
+    assert o.player.heard == ["One.", "One.", "Two.", "Three."]
+    assert o.brain.asked == ["do the thing", "what's the weather"]
+    assert o._paused_tail is None
+
+
+async def test_a_later_turn_never_inherits_a_stale_remainder():
+    o, _ = build_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert o._paused_tail is not None      # parked, the window just closed
+
+    o.recorder = Rec([np.zeros(1, np.int16)])
+    o.stt = STT(["what's the weather"])
+    o.player.heard.clear()
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]   # the new answer only
+    assert o._paused_tail is None
+
+
+async def test_stop_during_a_pause_ends_the_turn():
+    o, states = build_pause(["do the thing", "hold on", "stop"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One."]
+    assert o._paused_tail is None
+    assert states[-1] == "idle"
+
+
+async def test_pause_phrase_with_nothing_parked_is_a_normal_request():
+    """"Wait" out of the blue still goes to the brain — the pause phrases
+    only take over while a barge is holding a remainder."""
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["wait"])
+    await o.one_turn()
+    assert o.brain.asked == ["wait"]
+
+
+# -- the acknowledgement -------------------------------------------------------
+
+class SlowFirstBrain:
+    """Silent for `delay`, then two sentences with another gap between."""
+    def __init__(self, delay=0.06): self.delay = delay
+    async def ask(self, text):
+        await asyncio.sleep(self.delay)
+        yield "Answer."
+        await asyncio.sleep(self.delay)
+        yield "More."
+
+
+def build_ack(ack_after_s):
+    o, states = build()
+    o.s = Settings(followup_window_s=0, confirm_listen_s=0, ack_after_s=ack_after_s)
+    return o, states
+
+
+async def test_ack_fires_once_when_the_brain_stays_silent():
+    o, _ = build_ack(0.01)
+    o.brain = SlowFirstBrain()
+    assert await o.handle_text("q") == ["Answer.", "More."]
+    assert o.tts.said == ["On it.", "Answer.", "More."]   # once, and before the answer
+
+
+async def test_ack_is_spoken_in_hindi_for_a_hindi_turn():
+    o, _ = build_ack(0.01)
+    o.brain = SlowFirstBrain()
+    await o.handle_text("q", lang="hi")
+    assert o.tts.said[0] == "एक सेकंड।"
+
+
+async def test_ack_silent_when_the_first_sentence_arrives_sooner():
+    o, _ = build_ack(0.5)
+    await o.handle_text("q")
+    assert o.tts.said == ["Sure.", "Done."]
+
+
+async def test_ack_off_when_zero():
+    o, _ = build_ack(0)
+    o.brain = SlowFirstBrain()
+    await o.handle_text("q")
+    assert o.tts.said == ["Answer.", "More."]

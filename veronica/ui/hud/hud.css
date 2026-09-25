@@ -25,6 +25,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #status[data-state="thinking"] .dot{background:#ffb454}
 #status[data-state="speaking"] .dot{background:#f0c36c}
 #status[data-state="confirming"] .dot{background:#ff8a3c}
+#status[data-state="paused"] .dot{background:#f0c36c;opacity:.55}
 #status[data-state="error"] .dot{background:#ff5a5a}
 
 /* ---- brain line: "Brain: Codex" under the status row (hud event with a
