@@ -48,17 +48,27 @@ CANONICAL: dict[str, str] = (
 
 
 def _ours(tool_name: str) -> str | None:
-    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' / 'mac__open_app'
-    / 'veronica-mac-open_app' (Copilot joins server and tool with '-') -> 'mcp__mac__open_app'."""
+    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' /
+    'veronica-mac-open_app' (Copilot joins server and tool with '-') ->
+    'mcp__mac__open_app'. The `veronica-` prefix is required: every backend
+    registers our servers under it, so a bare `memory__…` / `browser__…` can
+    only be the user's own MCP server and has to go through the gate. Codex
+    sanitises the server name in its hook payload, so `veronica_mac__…`
+    counts too (verified live against codex 0.155)."""
     t = tool_name.removeprefix("mcp__")
-    if t.startswith("veronica-"):
+    if t.startswith("veronica_"):
+        t = t.removeprefix("veronica_")
+    elif t.startswith("veronica-"):
         t = t.removeprefix("veronica-")
-        if "__" not in t:
-            for server in OUR_SERVERS:
-                if t.startswith(server + "-") and len(t) > len(server) + 1:
-                    return f"mcp__{server}__{t[len(server) + 1:]}"
+    else:
+        return None
     server, sep, short = t.partition("__")
-    return f"mcp__{server}__{short}" if sep and server in OUR_SERVERS else None
+    if sep and server in OUR_SERVERS:
+        return f"mcp__{server}__{short}"
+    for server in OUR_SERVERS:
+        if t.startswith(server + "-") and len(t) > len(server) + 1:
+            return f"mcp__{server}__{t[len(server) + 1:]}"
+    return None
 
 
 def _agy_mcp(tool_input: dict) -> tuple[str, dict] | None:
@@ -174,8 +184,8 @@ def run(backend: str, stdin_text: str, *, ask=ask_gate, log_path: Path | None = 
         if canon is None:
             return "", 0
         name, cinp = canon
-        if name.startswith("mcp__"):
-            return emit(backend, True), 0     # gated inside tools.serve already
+        if _ours(str(tool)) or (str(tool) == "call_mcp_tool" and _agy_mcp(dict(inp))):
+            return emit(backend, True), 0     # one of ours: gated inside tools.serve already
         if log_path is not None:
             with open(log_path, "a") as f:
                 f.write(json.dumps({"ts": time.time(), "call": tool, "key": canary_key(str(tool), cinp), "decision": "pending"}) + "\n")

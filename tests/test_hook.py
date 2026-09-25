@@ -18,6 +18,8 @@ from veronica.brain.base import Decision
     ("copilot", "grep", {"pattern": "x"}, None),
     ("qwen", "google_web_search", {"query": "x"}, None),
     ("codex", "mcp__veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
+    # verified live: codex sanitises the server name in the hook payload
+    ("codex", "mcp__veronica_mac__volume_get", {}, ("mcp__mac__volume_get", {})),
     ("copilot", "veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
     ("copilot", "veronica-mac-clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),  # verified
     ("copilot", "veronica-pim-mail_send", {"to": "x"}, ("mcp__pim__mail_send", {"to": "x"})),
@@ -25,7 +27,12 @@ from veronica.brain.base import Decision
     ("copilot", "github-mcp-server-search_code", {"q": "x"}, ("github-mcp-server-search_code", {"q": "x"})),
     ("copilot", "rg", {"pattern": "x"}, None),
     ("copilot", "read_bash", {"id": "0"}, None),
-    ("qwen", "mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
+    # bare <server>__<tool> is NOT ours: every backend registers our servers as
+    # veronica-<name>, so that form can only be somebody else's MCP server.
+    ("qwen", "mac__clipboard_write", {"text": "x"}, ("mac__clipboard_write", {"text": "x"})),
+    ("copilot", "memory__create_entities", {"e": []}, ("memory__create_entities", {"e": []})),
+    ("codex", "mcp__memory__create_entities", {"e": []}, ("mcp__memory__create_entities", {"e": []})),
+    ("codex", "mcp__github__create_issue", {"title": "x"}, ("mcp__github__create_issue", {"title": "x"})),
     ("antigravity", "some_new_tool", {"a": 1}, ("some_new_tool", {"a": 1})),
 ])
 def test_canonical_tool(backend, tool, inp, expected):
@@ -75,6 +82,43 @@ def test_run_mcp_and_readonly_skip_gate(tmp_path):
     out, _ = hook.run("qwen", json.dumps({"tool_name": "read_file", "tool_input": {}}), ask=boom, log_path=tmp_path / "l")
     assert out == ""
     assert not (tmp_path / "l").exists()
+
+
+def test_run_gates_other_servers_mcp_tools(tmp_path):
+    """Only our own MCP tools skip the gate (tools.serve gates those). A
+    third-party MCP tool the user configured in the CLI — including one on a
+    server whose name happens to match ours — is confirm-class."""
+    asked = []
+
+    def ask(tool, input, **kw):
+        asked.append(tool)
+        return Decision(False, "denied", "user declined")
+
+    for name in ("mcp__github__create_issue", "memory__create_entities", "mcp__memory__create_entities"):
+        out, _ = hook.run("codex", json.dumps({"tool_name": name, "tool_input": {"x": "y"}}),
+                          ask=ask, log_path=tmp_path / "l")
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert asked == ["mcp__github__create_issue", "memory__create_entities", "mcp__memory__create_entities"]
+    # agy wraps them; a stranger's server is confirmed under the wrapper name
+    out, _ = hook.run("antigravity", json.dumps({"toolCall": {"name": "call_mcp_tool",
+                                                              "args": {"ServerName": "memory", "ToolName": "create_entities"}}}),
+                      ask=ask, log_path=tmp_path / "l")
+    assert json.loads(out)["decision"] == "deny" and asked[-1] == "call_mcp_tool"
+
+
+def test_run_allows_every_form_of_our_own_mcp_tools(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("gate must not be asked")
+
+    for name in ("mcp__veronica-mac__clipboard_write", "veronica-mac__clipboard_write",
+                 "veronica-mac-clipboard_write", "mcp__veronica_mac__clipboard_write"):
+        out, _ = hook.run("copilot", json.dumps({"toolName": name, "toolArgs": {"text": "x"}}),
+                          ask=boom, log_path=tmp_path / "l")
+        assert json.loads(out)["permissionDecision"] == "allow"
+    out, _ = hook.run("antigravity", json.dumps({"toolCall": {"name": "call_mcp_tool",
+                                                              "args": {"ServerName": "veronica-mac", "ToolName": "clipboard_write"}}}),
+                      ask=boom, log_path=tmp_path / "l")
+    assert json.loads(out)["decision"] == "allow"
 
 
 def test_run_exception_fails_closed(tmp_path):

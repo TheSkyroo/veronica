@@ -189,9 +189,13 @@ def test_parse_mcp_items(tmp_path):
     assert start == cli.ToolStart("item_2", "mcp__mac__volume_get", {}, native=False)
     [end] = b.parse(json.dumps({"type": "item.completed", "item": {**item, "status": "completed", "result": {}}}))
     assert end == cli.ToolEnd("item_2")
+    # another server's tool is not gated in tools.serve, so it must go through
+    # the hook — native=True puts it under the canary too.
     [other] = b.parse(json.dumps({"type": "item.started", "item": {**item, "server": "github", "tool": "search",
                                                                    "arguments": {"q": "x"}}}))
-    assert other.tool == "mcp__github__search" and other.input == {"q": "x"} and other.native is False
+    assert other.tool == "mcp__github__search" and other.input == {"q": "x"} and other.native is True
+    [named] = b.parse(json.dumps({"type": "item.started", "item": {**item, "server": "memory", "tool": "create_entities"}}))
+    assert named.tool == "mcp__memory__create_entities" and named.native is True
 
 
 def test_parse_errors_and_limits(tmp_path):

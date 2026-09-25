@@ -190,7 +190,10 @@ class CodexBrain(CliBrain):
             if done:
                 return [ToolEnd(item_id)]
             server, tool = str(item.get("server") or ""), str(item.get("tool") or "")
-            name = hook._ours(f"{server}__{tool}") or f"mcp__{server}__{tool}"
+            ours = hook._ours(f"{server}__{tool}")
             args = item.get("arguments") or {}
-            return [ToolStart(item_id, name, dict(args) if isinstance(args, dict) else {}, native=False)]
+            # Ours are gated in tools.serve; any other server's tool is gated by
+            # the hook, so the canary has to watch it like a native call.
+            return [ToolStart(item_id, ours or f"mcp__{server}__{tool}",
+                              dict(args) if isinstance(args, dict) else {}, native=ours is None)]
         return []

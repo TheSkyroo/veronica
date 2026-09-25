@@ -183,6 +183,11 @@ def test_parse_tool_events(tmp_path):
         "toolCallId": "c4", "toolName": "github-mcp-server-search_code", "arguments": {"q": "x"},
         "mcpServerName": "github-mcp-server", "mcpToolName": "search_code"}}))
     assert other.tool == "github-mcp-server-search_code" and other.native is True   # hook confirms it by name
+    # a user's own MCP server named like one of ours is still a stranger's
+    [named] = b.parse(json.dumps({"type": "tool.execution_start", "data": {
+        "toolCallId": "c6", "toolName": "memory-create_entities", "arguments": {},
+        "mcpServerName": "memory", "mcpToolName": "create_entities"}}))
+    assert named.tool == "memory-create_entities" and named.native is True
     [view] = b.parse(json.dumps({"type": "tool.execution_start", "data": {"toolCallId": "c5", "toolName": "view",
                                                                          "arguments": {"path": "/tmp/x"}}}))
     assert view.tool in hook.READONLY_TOOLS and b.readonly_summary(view.tool, view.input) == "view /tmp/x"
