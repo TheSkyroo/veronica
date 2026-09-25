@@ -8,6 +8,8 @@ import types
 import pytest
 import rumps as real_rumps
 
+from veronica.brain.backends import BACKENDS, Availability
+
 
 class FakeMenuItem:
     def __init__(self, title, callback=None):
@@ -240,6 +242,9 @@ def fake_env(monkeypatch, tmp_home, request):
     FakeHotkeyMonitor.available_on_start = True
     monkeypatch.setattr(menubar, "HotkeyMonitor", FakeHotkeyMonitor)
     monkeypatch.setattr(menubar, "SettingsWindow", FakeSettingsWindow)
+    # The Brain submenu's availability check looks at PATH and ~: every
+    # brain is "ready" under test unless a test fakes it otherwise.
+    monkeypatch.setattr(menubar, "check_backend", lambda name: Availability(True, "ok"))
     # No AppKit main thread under test: run marshalled callbacks inline.
     monkeypatch.setattr(menubar, "_main_thread", lambda fn: fn())
     # Never shell out to git for the About item / update check.
@@ -688,15 +693,15 @@ def test_build_popup_menu_fallback_has_five_titles_and_actions(fake_env, monkeyp
 
         assert [i.title for i in menu.items] == [
             "About Veronica — Veronica 0.1.0 (abc1234, 17 Sep)", "Settings…", "-",
-            "Mute", "HUD: Full", "Voice", "Start at Login (build the app first)", "Quit",
+            "Mute", "HUD: Full", "Voice", "Brain", "Start at Login (build the app first)", "Quit",
         ]
         assert [i.action for i in menu.items] == [
-            None, "onSettings:", None, "onMute:", "onToggleHud:", None, "onToggleLogin:", "onQuit:",
+            None, "onSettings:", None, "onMute:", "onToggleHud:", None, None, "onToggleLogin:", "onQuit:",
         ]
         assert all(i.target is not None for i in menu.items if i.action is not None)
         assert menu.items[0].enabled is False
         # login item is disabled (no callback) when not running from a bundle
-        assert menu.items[6].enabled is False
+        assert menu.items[7].enabled is False
     finally:
         _quit_and_join(app)
 
@@ -1441,4 +1446,183 @@ def test_notify_without_orchestrator_only_logs(fake_env, caplog):
         assert "none detail" in caplog.text
     finally:
         app._orch = orch
+        _quit_and_join(app)
+
+
+# -- brains: Brain submenu, "Brain: …" label from hud events -------------------
+
+BRAIN_LABELS = [info.label for info in BACKENDS.values()]
+
+
+class _BrainOrch:
+    """Orchestrator stand-in for the Brain menu: a switcher with the active
+    brain's name, and request_brain_switch recording what was asked."""
+
+    def __init__(self, active="codex", preferred="codex", standing_in=False):
+        self.switcher = types.SimpleNamespace(
+            brain=types.SimpleNamespace(name=active), preferred=preferred, standing_in=standing_in)
+        self.requested = []
+        self.player = _ResettablePlayer()
+
+    def request_brain_switch(self, name):
+        self.requested.append(name)
+
+
+def test_brain_submenu_lists_backends_after_voice(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        sub = app._brain_menu
+        assert sub is app._brain_item and sub.title == "Brain"
+        assert app.menu.index(sub) == app.menu.index(app._voice_menu) + 1
+        assert [i.title for i in sub.children] == BRAIN_LABELS
+        assert list(app._brain_items) == list(BACKENDS)
+        assert all(i.callback == app._pick_brain for i in app._brain_items.values())
+    finally:
+        _quit_and_join(app)
+
+
+def test_drain_hud_backend_event_sets_brain_title_and_reaches_hud(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._events.put(("hud", {"backend": "Codex"}))
+        app._drain(None)
+        assert app._brain_item.title == "Brain: Codex"
+        # unlike mode/config, the label is the page's to show too
+        assert app._hud.pushed == [{"kind": "hud", "payload": {"backend": "Codex"}}]
+        app._events.put(("hud", {"backend": "Claude (for Codex)"}))
+        app._events.put(("hud", {"mode": "mini"}))
+        app._drain(None)
+        assert app._brain_item.title == "Brain: Claude (for Codex)"
+        assert len(app._hud.pushed) == 2 and app._hud.mode_calls == ["mini"]
+    finally:
+        _quit_and_join(app)
+
+
+def test_brain_menu_click_requests_switch(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        bo = _BrainOrch(active="codex")
+        app._orch = bo
+        app._pick_brain(app._brain_items["claude"])
+        assert bo.requested == ["claude"]
+        app._pick_brain(app._brain_items["copilot"])
+        assert bo.requested == ["claude", "copilot"]
+    finally:
+        _quit_and_join(app)
+
+
+def test_brain_menu_click_noop_without_orch(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app = menubar.VeronicaApp.__new__(menubar.VeronicaApp)
+    app._brain_items = {"codex": fake_rumps.MenuItem("Codex")}
+    app._brain_avail = {}
+    app._brain_checked_at = 0
+    app._pick_brain(app._brain_items["codex"])  # must not raise: no self._orch set
+    app._refresh_brain_menu()
+    assert app._brain_items["codex"].state == 0
+
+
+def test_refresh_brain_menu_checks_active_and_marks_standin(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        app._orch = _BrainOrch(active="codex")
+        app._refresh(None)
+        assert app._brain_items["codex"].state == 1
+        assert app._brain_items["claude"].state == 0
+        assert app._brain_items["codex"].title == "Codex"
+        # Codex hit its limit, Antigravity is answering for it
+        app._orch = _BrainOrch(active="antigravity", preferred="codex", standing_in=True)
+        app._refresh(None)
+        assert app._brain_items["antigravity"].state == 1
+        assert app._brain_items["antigravity"].title == "Antigravity — standing in for Codex"
+        assert app._brain_items["codex"].state == 0 and app._brain_items["codex"].title == "Codex"
+        # back on the preferred brain: plain title again
+        app._orch = _BrainOrch(active="codex")
+        app._refresh(None)
+        assert app._brain_items["antigravity"].title == "Antigravity"
+        assert app._brain_items["codex"].state == 1
+    finally:
+        _quit_and_join(app)
+
+
+def test_refresh_brain_menu_disables_unavailable_from_cached_check(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        checks = []
+
+        def fake_check(name):
+            checks.append(name)
+            if name == "copilot":
+                return Availability(False, "not installed", "Copilot isn't installed — …")
+            if name == "claude":
+                return Availability(False, "not logged in", "Claude isn't logged in — …")
+            return Availability(True, "ok")
+
+        monkeypatch.setattr(menubar, "check_backend", fake_check)
+        app._brain_checked_at = -menubar.BRAIN_CHECK_INTERVAL_S    # force the next refresh to re-check
+        app._orch = _BrainOrch(active="codex")
+        app._refresh(None)
+        assert checks == list(BACKENDS)
+        assert app._brain_items["copilot"].title == "Copilot (not installed)"
+        assert app._brain_items["copilot"].callback is None
+        assert app._brain_items["claude"].title == "Claude (not logged in)"
+        assert app._brain_items["claude"].callback is None
+        assert app._brain_items["codex"].title == "Codex"
+        assert app._brain_items["codex"].callback == app._pick_brain
+        # the 0.25 s timer doesn't re-run the check until the interval passes
+        app._refresh(None)
+        app._refresh(None)
+        assert checks == list(BACKENDS)
+        # ...then it does, and a brain that got logged in is enabled again
+        monkeypatch.setattr(menubar, "check_backend", lambda name: Availability(True, "ok"))
+        app._brain_checked_at -= menubar.BRAIN_CHECK_INTERVAL_S
+        app._refresh(None)
+        assert app._brain_items["copilot"].title == "Copilot"
+        assert app._brain_items["copilot"].callback == app._pick_brain
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_brain_submenu_mirrors_menu_bar(fake_env, monkeypatch):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        monkeypatch.setattr(menubar, "check_backend", lambda name: Availability(
+            name != "copilot", "ok" if name != "copilot" else "not installed"))
+        app._brain_checked_at = -menubar.BRAIN_CHECK_INTERVAL_S
+        app._orch = _BrainOrch(active="claude")
+        app._events.put(("hud", {"backend": "Claude"}))
+        app._drain(None)
+        fake_appkit, _ = _fake_appkit_for_menu()
+        monkeypatch.setitem(sys.modules, "AppKit", fake_appkit)
+        menu = app._build_popup_menu()
+        brain_item = next(i for i in menu.items if i.title.startswith("Brain"))
+        assert brain_item.title == "Brain: Claude"
+        sub = brain_item.submenu
+        assert sub.title == "Brain"
+        assert [i.title for i in sub.items] == ["Codex", "Antigravity", "Claude", "Copilot (not installed)"]
+        assert [i.action for i in sub.items] == ["onPickBrain:"] * 4
+        assert [i.representedObject() for i in sub.items] == list(BACKENDS)
+        assert [i.state for i in sub.items] == [0, 0, 1, 0]
+        assert [i.enabled for i in sub.items] == [True, True, True, False]
+        assert all(i.target is not None for i in sub.items)
+    finally:
+        _quit_and_join(app)
+
+
+def test_popup_menu_handler_forwards_brain_pick(fake_env):
+    menubar, fake_rumps, orch_holder = fake_env
+    app, orch = _make_app(menubar, orch_holder)
+    try:
+        picked = []
+        app._pick_brain = lambda item: picked.append(item.title)
+        handler = menubar._make_menu_handler_class().alloc().initWithApp_(app)
+        handler.onPickBrain_(_represented("antigravity"))
+        assert picked == ["Antigravity"]
+    finally:
         _quit_and_join(app)

@@ -174,6 +174,13 @@ def match_update_intent(text: str) -> bool:
     return any(c in UPDATE_PHRASES for c in _candidates_for(normalize(text)))
 
 
+# Hinglish "which brain" phrases (the switch forms are regexes, see
+# match_brain_intent below).
+_WHICH_BRAIN_PHRASES_HINGLISH = frozenset({
+    "kaunsa brain hai", "kaun sa brain hai", "kaunsa brain chal raha hai", "kaunsa model hai",
+    "kaun sa model hai", "kaunsa brain use kar rahi ho",
+})
+
 # Romanized-Hindi (Hinglish) forms of the local intents above. Filled in by
 # the Hinglish intents work; quick.is_hinglish_phrase() unions this with its
 # own phrase tables so a whole-utterance Hinglish command is treated as
@@ -185,7 +192,8 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "chhoti ho jao", "chota karo", "badi ho jao", "bada karo",
     "kahan ho", "wapas aao",
     "quit karo", "band ho jao",
-}) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH
+}) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH \
+    | _WHICH_BRAIN_PHRASES_HINGLISH
 
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"
@@ -502,6 +510,62 @@ def match_proactive_intent(text: str) -> ProactiveAction | None:
             continue
         for candidate in _candidates_for(clause_norm):
             result = _match_proactive_candidate(candidate)
+            if result is not None:
+                return result
+    return None
+
+
+# Brains: "switch to codex" / "use copilot" / "back to claude" / "which
+# brain are you on". Carries the backend name, so it has its own function;
+# the orchestrator's BrainSwitcher does the actual switch (and says why it
+# can't). Names are the BACKENDS keys — kept literal here so this module
+# stays import-light.
+BrainAction = tuple[Literal["switch", "which"], str | None]
+
+_BRAIN_NAMES = r"(claude|codex|antigravity|copilot)"
+_BRAIN_SWITCH_RE = re.compile(
+    rf"^(?:switch(?: brains?)? to|use|change(?: brains?)? to|switch(?: the)? brain to)\s+(?:the )?{_BRAIN_NAMES}(?: brain)?$"
+)
+_BRAIN_BACK_RE = re.compile(rf"^(?:go )?back to {_BRAIN_NAMES}(?: brain)?$")
+# Hinglish: "codex pe switch karo", "copilot use karo", "claude pe wapas jao".
+_BRAIN_SWITCH_HINGLISH_RE = re.compile(
+    rf"^{_BRAIN_NAMES}\s+(?:(?:pe|par)\s+(?:switch karo|jao|wapas jao)|use karo|chalao)$"
+)
+_WHICH_BRAIN_PHRASES = frozenset({
+    "which brain are you on", "which brain are you using", "which brain is this", "which brain is it",
+    "what brain are you on", "what brain are you using", "what brain is this",
+    "which model are you on", "which model are you using", "which model is this", "what model are you using",
+    # not "who is this": it fires on every turn, and the question is almost
+    # always about a photo, a caller or a name, not about the brain.
+    "who am i talking to", "which ai is this", "which ai are you",
+})
+
+
+def _match_brain_candidate(candidate: str) -> BrainAction | None:
+    if candidate in _WHICH_BRAIN_PHRASES or candidate in _WHICH_BRAIN_PHRASES_HINGLISH:
+        return ("which", None)
+    for pattern in (_BRAIN_SWITCH_RE, _BRAIN_BACK_RE, _BRAIN_SWITCH_HINGLISH_RE):
+        m = pattern.match(candidate)
+        if m:
+            return ("switch", m.group(1))
+    return None
+
+
+def match_brain_intent(text: str) -> BrainAction | None:
+    """"switch to codex" / "use copilot" / "go back to claude" -> ("switch",
+    name); "which brain are you on" -> ("which", None). Same candidate
+    strategy as match_intent: whole normalized utterance, then each clause.
+    Unknown names ("use gemini") don't match, so they reach the brain."""
+    for candidate in _candidates_for(normalize(text)):
+        result = _match_brain_candidate(candidate)
+        if result is not None:
+            return result
+    for clause in _CLAUSE_SPLIT_RE.split(text or ""):
+        clause_norm = normalize(clause)
+        if not clause_norm:
+            continue
+        for candidate in _candidates_for(clause_norm):
+            result = _match_brain_candidate(candidate)
             if result is not None:
                 return result
     return None

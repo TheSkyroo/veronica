@@ -30,6 +30,7 @@ from veronica import config, proactive
 from veronica import prefs as _prefs
 from veronica import updater as _updater
 from veronica import version as _version
+from veronica.brain.backends import check_backend as _check_backend
 from veronica.speech import voices
 from veronica.ui import login_item as _login_item
 
@@ -54,7 +55,9 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
     "listening": ("followup_window_s", "confirm_listen_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
-    "brain": ("effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording"),
+    "brain": ("effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
+              "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
+              "codex_native_tools", "antigravity_native_tools", "copilot_native_tools"),
 }
 HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
@@ -98,8 +101,10 @@ class SettingsBridge:
         run_thread: Callable[[Callable[[], None]], None] = _thread,
         open_path: Callable[[Path | str], None] = _open_path,
         marshal: Callable[[Callable[[], None]], None] = _inline,
+        check_backend: Callable[[str], Any] = _check_backend,
     ) -> None:
         self._settings = settings
+        self._check_backend = check_backend
         self._get_orch = get_orch
         #: A store, None, or a zero-arg callable returning either (the menu
         #: bar passes a callable: its orchestrator — and so the MemoryStore
@@ -246,7 +251,12 @@ class SettingsBridge:
             },
             "listening": {name: setting(name) for name in SETTING_SECTIONS["listening"]},
             "briefings": sched.to_prefs(),
-            "brain": {name: setting(name) for name in SETTING_SECTIONS["brain"]},
+            "brain": {
+                **{name: setting(name) for name in SETTING_SECTIONS["brain"]},
+                # What's actually answering right now ("Codex", "Claude (for
+                # Codex)" while standing in); "" until the switcher exists.
+                "brain_label": self._brain_label(orch),
+            },
             "about": {
                 "version": self._version.APP_VERSION,
                 "build": info.get("sha", ""),
@@ -303,6 +313,26 @@ class SettingsBridge:
 
     def _orch_or_none(self):
         return self._get_orch()
+
+    @staticmethod
+    def _brain_label(orch) -> str:
+        switcher = getattr(orch, "switcher", None)
+        label = getattr(switcher, "status_label", None)
+        return str(label()) if callable(label) else ""
+
+    def _set_brain(self, name: str) -> dict:
+        """Brain choice: the switch runs as the same turn "switch to codex"
+        does (interrupt, then "Switched to Codex."); the switcher persists
+        the preference itself. Refused up front, with the spoken hint, when
+        that brain isn't installed or logged in."""
+        orch = self._orch_or_none()
+        if orch is None or getattr(orch, "switcher", None) is None:
+            return _fail(STARTING_UP)
+        avail = self._check_backend(name)
+        if not avail.ok:
+            return _fail(avail.hint)
+        self._run_on_loop(self._with_player_reset(orch, orch._brain_switch_turn(("switch", name)), push_after=True))
+        return _ok(**{_PUSH_AFTER_TURN: True})
 
     async def _with_player_reset(self, orch, coro, *, push_after: bool = False) -> None:
         """The orchestrator's own dispatch resets the player before a turn
@@ -414,6 +444,8 @@ class SettingsBridge:
             self._prefs.save_settings_override(name, _jsonable(getattr(probe, name)))
             self.restart_required = True
             return _ok(restart_required=True)
+        if name == "brain_backend":
+            return self._set_brain(coerced)
         if orch is None:
             return _fail(STARTING_UP)
         setattr(orch.s, name, coerced)   # validate_assignment=True: raises ValueError on bad input

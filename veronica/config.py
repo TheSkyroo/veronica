@@ -6,12 +6,17 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from veronica import prefs
 
 log = logging.getLogger("veronica.config")
+
+
+# The brains Veronica can run on, in the user's default order. The registry
+# in veronica.brain.backends is the source of truth for everything else.
+BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot")
 
 
 class Settings(BaseSettings):
@@ -68,8 +73,14 @@ class Settings(BaseSettings):
     chime_followup_hz: int = 660
 
     # brain
-    brain_timeout_s: int = 60
-    interrupt_drain_s: int = 3
+    # Which backend does the thinking (the *preferred* one; failover may
+    # stand another in at runtime, see veronica.brain.switch).
+    brain_backend: str = "codex"
+    brain_failover: bool = True
+    brain_failover_order: str = "codex,antigravity,claude,copilot"
+    brain_limit_cooldown_min: int = 60
+    brain_timeout_s: float = 60
+    interrupt_drain_s: float = 3
     effort: str = "low"
     max_turns: int | None = None
     brain_cwd: Path = Field(default_factory=Path.home)
@@ -80,6 +91,12 @@ class Settings(BaseSettings):
     # ahead skips the yes/no for the ONE confirm-class action it produces
     # (never for always-confirm tools, see policy.always_confirm).
     preapprove_by_wording: bool = True
+    # External brains: may the vendor CLI use its own shell/file tools
+    # (each call still asked through Veronica's hook)? Off = only our
+    # MCP tools. Flipped off automatically when the hook canary trips.
+    codex_native_tools: bool = True
+    antigravity_native_tools: bool = True
+    copilot_native_tools: bool = True
 
     # memory
     memory_enabled: bool = True
@@ -105,6 +122,13 @@ class Settings(BaseSettings):
     hud_particles: int = 4000   # orb particle count (live-editable)
     hud_intensity: float = 1.0  # orb glow/brightness multiplier (live-editable)
 
+    @field_validator("brain_backend")
+    @classmethod
+    def _known_backend(cls, v: str) -> str:
+        if v not in BRAIN_BACKENDS:
+            raise ValueError(f"brain_backend must be one of {', '.join(BRAIN_BACKENDS)}; got {v!r}")
+        return v
+
     @property
     def session_file(self) -> Path:
         return self.home / "session"
@@ -120,6 +144,20 @@ class Settings(BaseSettings):
     @property
     def memory_path(self) -> Path:
         return self.home / "memory.db"
+
+    @property
+    def gate_socket(self) -> Path:
+        """Unix socket the external brains' processes ask for tool permission on."""
+        return self.home / "gate.sock"
+
+    def backend_dir(self, name: str) -> Path:
+        """Per-brain workspace (session id, hook config, hook log); private."""
+        d = self.home / "backends" / name
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return d
+
+    def session_file_for(self, name: str) -> Path:
+        return self.session_file if name == "claude" else self.backend_dir(name) / "session"
 
     def ensure_dirs(self) -> None:
         (self.home / "logs").mkdir(parents=True, exist_ok=True)
@@ -198,6 +236,38 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", 'Pre-approve when I say "do it"',
         "If your request already says do it / go ahead, skip the yes/no for that one action "
         "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
+    ),
+    "brain_backend": EditableField(
+        "choice", "Brain", "Which assistant runs the thinking. Each uses its own login.",
+        choices=BRAIN_BACKENDS, restart=False,
+    ),
+    "brain_failover": EditableField(
+        "bool", "Switch brains on usage limits",
+        "When the current brain hits its usage limit, hand the request to the next available one "
+        "and come back later.",
+        restart=False,
+    ),
+    "brain_failover_order": EditableField(
+        "str", "Failover order", "Comma-separated backend names, tried in order.", restart=False,
+    ),
+    "brain_limit_cooldown_min": EditableField(
+        "int", "Limit cooldown (minutes)", "How long to wait before trying a brain that hit its limit again.",
+        min=5, max=1440, restart=False,
+    ),
+    "codex_native_tools": EditableField(
+        "bool", "Codex: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
+        restart=False,
+    ),
+    "antigravity_native_tools": EditableField(
+        "bool", "Antigravity: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
+        restart=False,
+    ),
+    "copilot_native_tools": EditableField(
+        "bool", "Copilot: allow its own shell",
+        "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
         restart=False,
     ),
 }

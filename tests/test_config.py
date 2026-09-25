@@ -267,3 +267,57 @@ def test_preapprove_by_wording_is_a_live_bool():
     assert "never for sending mail" in f.help
     assert coerce_setting("preapprove_by_wording", "off") is False
     assert coerce_setting("preapprove_by_wording", True) is True
+
+
+def test_gate_socket_and_backend_dirs(tmp_home):
+    s = Settings()
+    assert s.gate_socket == tmp_home / "gate.sock"
+    d = s.backend_dir("codex")
+    assert d == tmp_home / "backends" / "codex" and d.is_dir()
+    assert d.stat().st_mode & 0o777 == 0o700
+    assert s.session_file_for("claude") == s.session_file
+    assert s.session_file_for("codex") == d / "session"
+
+
+def test_antigravity_native_tools_is_a_live_bool():
+    assert Settings().antigravity_native_tools is True
+    f = EDITABLE_SETTINGS["antigravity_native_tools"]
+    assert f.kind == "bool" and f.restart is False
+    assert f.label == "Antigravity: allow its own shell"
+    assert coerce_setting("antigravity_native_tools", "off") is False
+
+
+def test_brain_backend_default_and_choices():
+    s = Settings()
+    assert s.brain_backend == "codex"
+    assert s.brain_failover is True
+    assert s.brain_failover_order == "codex,antigravity,claude,copilot"
+    assert s.brain_limit_cooldown_min == 60
+    f = EDITABLE_SETTINGS["brain_backend"]
+    assert f.kind == "choice" and f.restart is False and f.label == "Brain"
+    assert f.choices == ("codex", "antigravity", "claude", "copilot")
+    for name in f.choices:
+        assert Settings(brain_backend=name).brain_backend == name
+    assert coerce_setting("brain_backend", "claude") == "claude"
+    with pytest.raises(ValueError):
+        coerce_setting("brain_backend", "gemini")
+
+
+def test_brain_backend_rejects_unknown(tmp_home):
+    with pytest.raises(ValueError):
+        Settings(brain_backend="nope")
+    s = Settings()
+    with pytest.raises(ValueError):
+        s.brain_backend = "qwen"
+    assert s.brain_backend == "codex"
+
+
+def test_brain_failover_fields_are_live():
+    assert EDITABLE_SETTINGS["brain_failover"].kind == "bool"
+    assert EDITABLE_SETTINGS["brain_failover"].restart is False
+    assert EDITABLE_SETTINGS["brain_failover_order"].kind == "str"
+    assert EDITABLE_SETTINGS["brain_failover_order"].restart is False
+    f = EDITABLE_SETTINGS["brain_limit_cooldown_min"]
+    assert f.kind == "int" and f.restart is False and (f.min, f.max) == (5, 1440)
+    assert coerce_setting("brain_limit_cooldown_min", 1) == 5
+    assert coerce_setting("brain_limit_cooldown_min", 99999) == 1440

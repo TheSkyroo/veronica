@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Veronica's brain a swappable backend — Claude (default), Codex, Antigravity, Copilot, Qwen — switchable by voice/menu/settings, with every backend going through the same confirm gate, and automatic failover to the next available brain when one hits its usage limit.
+**Goal:** Make Veronica's brain a swappable backend — Codex (default), Antigravity, Claude, Copilot (Qwen dropped 2026-09-19 at the user's request; Task 6 is void) — switchable by voice/menu/settings, with every backend going through the same confirm gate, and automatic failover to the next available brain when one hits its usage limit.
 
 **Architecture:** The confirm/trust/pre-approval logic leaves the Claude-specific class and becomes `ToolGate`; the Claude backend calls it in-process, external CLIs reach it out-of-process over a Unix socket (`GateServer` ↔ `gateclient`) from two entry points: `veronica.tools.serve` (our MCP servers over stdio, gated per call) and `veronica.brain.hook` (the CLI's own shell/edit tools, via each CLI's pre-tool hook). External backends are subprocess-per-turn adapters (`CliBrain`) that parse the CLI's JSON stream into sentences and HUD tool cards. `BrainSwitcher` owns the active backend, availability checks, and failover.
 
@@ -1117,6 +1117,8 @@ stderr is drained to `workspace / "last-stderr.log"` by a side task.
 
 - [ ] **Step 4: Run base tests** → PASS
 
+**Verified facts for `agy` 1.2.7 (probed 2026-09-19, see the "agy findings" note handed to the implementer):** headless ignores `permissions.allow` and hook `allow` is inert, so Antigravity runs with `--dangerously-skip-permissions` and the hook is the gate; workspace `.agy/`/`.agents/` hooks are NOT loaded — only the user-level `~/.gemini/config/hooks.json` fires (merge our `PreToolUse` entry into it, never overwrite the user's other hooks; MCP servers via `agy mcp add` → `~/.gemini/config/mcp_config.json`); hook stdin is `{"conversationId", "stepIdx", "toolCall": {"name", "args"}, …}`; a deny is `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", …}}`. `agy` supports a **persistent stdin mode** — `--output-format stream-json --input-format stream-json --print= --dangerously-skip-permissions` emits `init{conversation_id}` first, then runs one turn per stdin line `{"event":"user","message":{"role":"user","content":[{"type":"text","text":…}]}}` — so `AntigravityBrain` keeps ONE long-lived child (respawned with `--conversation <id>` after a kill) and writes `<backend_dir>/active-conversation` before the first prompt; `brain/hook.py` gains `--scope-file <path>`: when given, the hook is a no-op (prints nothing) unless the payload's `conversationId` equals the file content, so the user's own interactive `agy` is never gated. `CliBrain` therefore supports two modes: `per_turn` (default: spawn per ask) and `persistent` (spawn once, write a line per ask, read until the turn's terminal event). Tool events: `step_update{step_type:"tool", state:"ACTIVE"|"DONE"|"ERROR", tool_name, tool_info.parameters}` (keys `CommandLine`, `TargetFile`, `AbsolutePath`); text: `step_update{step_type:"agent_response", text_delta}`; end: `result{status, response, denied_actions?}`. MCP calls appear as `tool_name:"call_mcp_tool"` — allow in the hook (gated in `tools.serve`), `native=False` for the canary.
+
 - [ ] **Step 5: Live probe + fixture capture for `agy`** (requires the user's `agy` login; skip-marked)
 
 `tests/test_brains_live.py` (create; add backends in later tasks):
@@ -1356,7 +1358,7 @@ class CodexBrain(CliBrain):
 
 ---
 
-### Task 6: `QwenBrain`
+### Task 6: `QwenBrain` — VOID (Qwen dropped; skip this task entirely)
 
 **Files:**
 - Create: `veronica/brain/backends/qwen.py`, `tests/test_backend_qwen.py`, `tests/fixtures/brains/qwen-plain.jsonl`, `qwen-tool.jsonl`
@@ -1389,7 +1391,7 @@ class BackendInfo:
     login_markers: tuple[str, ...]      # relative to home: files whose existence means "logged in"; "" = none checkable
     cls: type | None                    # ClaudeBrain / CodexBrain / ...
 
-BACKENDS: dict[str, BackendInfo]        # ordered: claude, codex, antigravity, copilot, qwen
+BACKENDS: dict[str, BackendInfo]        # ordered: codex, antigravity, claude, copilot
 
 @dataclass(frozen=True)
 class Availability:
@@ -1453,12 +1455,12 @@ def make_switcher(tmp_path, avail, now, **settings):
     factory = lambda name, settings, **kw: FakeBrain(name, limit=(name in settings_limits))
     ...
 ```
-Cases: `switch("codex")` when available → new brain, old closed, prefs override `brain_backend="codex"` saved, `on_backend("codex", standing_in=False)` called; unavailable → returns the Availability, brain unchanged, nothing saved; `failover("usage limit")` picks the next in `brain_failover_order` skipping unavailable and cooled-down ones, sets `limited_until[preferred] = now + cooldown*60`, says "Claude hit its usage limit — switching to Codex.", `standing_in` True, `status_label() == "Codex (for Claude)"`; second failover from Codex goes to Antigravity and never back to Claude while cooled; none available → says "Claude hit its usage limit and no other brain is ready." and returns None; `maybe_return()` before cooldown expiry does nothing, after expiry switches back silently (`on_backend` called, nothing said, `standing_in` False); manual `switch("claude")` clears `limited_until["claude"]`; `brain_failover=False` → `failover` returns None without switching.
+Cases: `start()` with preferred available → active == preferred, nothing said; `switch("codex")` when available → new brain, old closed, prefs override `brain_backend="codex"` saved, `on_backend("codex", standing_in=False)` called; unavailable → returns the Availability, brain unchanged, nothing saved; `failover("usage limit")` picks the next in `brain_failover_order` skipping unavailable and cooled-down ones, sets `limited_until[preferred] = now + cooldown*60`, says "Claude hit its usage limit — switching to Codex.", `standing_in` True, `status_label() == "Codex (for Claude)"`; second failover from Codex goes to Antigravity and never back to Claude while cooled; none available → says "Claude hit its usage limit and no other brain is ready." and returns None; `maybe_return()` before cooldown expiry does nothing, after expiry switches back silently (`on_backend` called, nothing said, `standing_in` False); manual `switch("claude")` clears `limited_until["claude"]`; `brain_failover=False` → `failover` returns None without switching.
 
-- [ ] **Step 2: Implement** `backends/__init__.py` and `switch.py` per the interfaces. `failover` does **not** re-run the user text itself — it only switches; the orchestrator (Task 8) re-runs. Settings added (all editable, `restart=False`, section "brain"):
-  - `brain_backend: str = "claude"` → `EditableField("choice", "Brain", "Which assistant runs the thinking. Each uses its own login.", choices=("claude","codex","antigravity","copilot","qwen"))`
+- [ ] **Step 2: Implement** `backends/__init__.py` and `switch.py` per the interfaces. `failover` does **not** re-run the user text itself — it only switches; the orchestrator (Task 8) re-runs. **Startup:** `BrainSwitcher.__init__` does not spawn anything; `async start()` (called from `run_forever`, Task 8) checks the preferred backend and, if unavailable, activates the first available one in `brain_failover_order`, sets `standing_in = True`, `reason = "not logged in"|"not installed"`, and says once `"Codex isn't logged in, so I'm on Claude for now."`; `maybe_return()` re-checks availability of the preferred backend at most every 60 s while standing in for that reason (a limit cooldown is time-based as before). Tests: preferred unavailable → stand-in chosen + line spoken; preferred becomes available → `maybe_return` switches back silently; nothing available → says `"No brain is ready — log into Codex, Antigravity or Claude."` and `brain` is a `NoBrain` whose `ask()` yields that same line. Settings added (all editable, `restart=False`, section "brain"):
+  - `brain_backend: str = "codex"` → `EditableField("choice", "Brain", "Which assistant runs the thinking. Each uses its own login.", choices=("codex","antigravity","claude","copilot"))`
   - `brain_failover: bool = True` → `("bool", "Switch brains on usage limits", "When the current brain hits its usage limit, hand the request to the next available one and come back later.")`
-  - `brain_failover_order: str = "claude,codex,antigravity,copilot,qwen"` → `("str", "Failover order", "Comma-separated backend names, tried in order.")`
+  - `brain_failover_order: str = "codex,antigravity,claude,copilot"` → `("str", "Failover order", "Comma-separated backend names, tried in order.")`
   - `brain_limit_cooldown_min: int = 60` → `("int", "Limit cooldown (minutes)", "How long to wait before trying a brain that hit its limit again.", min=5, max=1440)`
   Tests in `tests/test_config.py` for defaults + choice validation (`Settings(brain_backend="nope")` → `ValueError` via a `field_validator`).
 
@@ -1483,7 +1485,7 @@ def match_brain_intent(text: str) -> BrainAction | None
 # "back to claude" / "go back to claude" / Hinglish "codex pe switch karo", "copilot use karo" -> ("switch", name)
 # "which brain are you on" / "which brain is this" / "which model are you using" / "who am i talking to" -> ("which", None)
 ```
-Orchestrator: constructor gains `switcher: BrainSwitcher | None = None` (when given, `self.brain` becomes a property returning `self.switcher.brain`; `__main__` passes both). New `_brain_switch_turn(action)`; `run_forever` starts `GateServer(self.gate, self.s.gate_socket)` and stops it on exit; `_brain_turn` calls `await self.switcher.maybe_return()` first and catches `LimitError` around `handle_text`: `new = await self.switcher.failover(str(e))`; if `new`: `self._emit("tool", {"summary": f"{old_label}: usage limit — on {new_label}", "decision": "limit"})` and re-run `handle_text(text, images, lang=lang)` once (a second `LimitError` → failover again, at most `len(BACKENDS)` hops, then say the "no other brain is ready" line). `on_backend` callback → `self._emit("hud", {"backend": label})`, also emitted once at `run_forever` start.
+Orchestrator: constructor gains `switcher: BrainSwitcher | None = None`; `run_forever` awaits `self.switcher.start()` before the first turn (when given, `self.brain` becomes a property returning `self.switcher.brain`; `__main__` passes both). New `_brain_switch_turn(action)`; `run_forever` starts `GateServer(self.gate, self.s.gate_socket)` and stops it on exit; `_brain_turn` calls `await self.switcher.maybe_return()` first and catches `LimitError` around `handle_text`: `new = await self.switcher.failover(str(e))`; if `new`: `self._emit("tool", {"summary": f"{old_label}: usage limit — on {new_label}", "decision": "limit"})` and re-run `handle_text(text, images, lang=lang)` once (a second `LimitError` → failover again, at most `len(BACKENDS)` hops, then say the "no other brain is ready" line). `on_backend` callback → `self._emit("hud", {"backend": label})`, also emitted once at `run_forever` start.
 
 - [ ] **Step 1: Failing intent tests** (`tests/test_intents.py`):
 ```python

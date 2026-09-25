@@ -9,7 +9,8 @@ from veronica.audio.input_level import InputLevelGuard
 from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
 from veronica.audio.wake import make_wake
-from veronica.brain.agent import Brain
+from veronica.brain.gate import ToolGate
+from veronica.brain.switch import BrainSwitcher
 from veronica.config import Settings, settings, setup_logging
 from veronica.memory.store import MemoryStore
 from veronica.orchestrator import ConfirmResult, Orchestrator
@@ -140,13 +141,23 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         )
     player = Player()
     register_for_refresh(player)
+    # One confirm gate for every brain; the switcher builds the backends on
+    # it lazily (orch.start_brain activates the preferred one) and speaks
+    # through the orchestrator when it fails over or can't start.
+    gate = ToolGate(s, confirm, on_tool=on_tool)
+    switcher = BrainSwitcher(
+        s, gate=gate, on_tool=on_tool, memory=store,
+        say=lambda t: holder["orch"].say(t),
+        on_backend=lambda label, standing_in: holder["orch"].backend_changed(label, standing_in),
+    )
     orch = Orchestrator(
         s,
         wake=make_wake(s) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=stt,
         partial_stt=partial_stt,
-        brain=Brain(s, confirm=confirm, on_tool=on_tool, memory=store),
+        brain=switcher.brain,
+        switcher=switcher,
         tts=Synthesizer(saved_voice, s.models_dir, speed=saved_speed, hindi_voice=saved_hindi_voice),
         player=player,
         store=store,
@@ -189,12 +200,19 @@ async def _text_mode(text: str) -> None:
         ok = answer.strip().lower() in ("y", "yes")
         print(f"[tool] {summary} -> {'allowed' if ok else 'declined'}")
         return ok
-    orch.brain._confirm = confirm
+    orch.gate._confirm = confirm
     try:
         print("[text mode] safe tools run automatically; risky tools ask y/N on this terminal")
-        for sent in await orch.handle_text(text):
+        # Picks the brain (or says which stand-in it's on) and opens the
+        # gate socket the external brains ask on — run_forever's job in
+        # the app.
+        await orch.start_brain()
+        # _brain_turn, not handle_text: a usage limit fails over to the next
+        # brain here exactly as it does for a spoken turn.
+        for sent in await orch._brain_turn(text):
             print(sent)
     finally:
+        await orch.stop_brain()
         await orch.brain.close()
         orch.player.close()
         store = getattr(orch, "store", None)

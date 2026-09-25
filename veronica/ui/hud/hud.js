@@ -31,6 +31,7 @@
   const statusLabelEl = statusEl.querySelector('.label');
   const statusLevelEl = statusEl.querySelector('.level i');
   statusEl.dataset.state = 'idle';
+  const brainEl = $('brain');
   const captionEl = $('caption');
   const captionMsgEl = captionEl.querySelector('.msg');
   captionEl.dataset.state = 'idle';
@@ -46,7 +47,7 @@
     captionEl.classList.toggle('hidden', !text);
   }
 
-  const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined', redirected: 'redirected', preapproved: 'pre-approved'};
+  const PILL_TEXT = {auto: 'auto', ask: 'waiting', allowed: 'done', declined: 'declined', redirected: 'redirected', preapproved: 'pre-approved', limit: 'limit'};
 
   // Hide an empty bubble/row (no awkward blank box in the card) and show it
   // once it has content.
@@ -172,7 +173,7 @@
             model.tool = t;
             actionEl.classList.remove('hidden');
             badgeEl.className = 'badge ' + decision;
-            badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕', redirected:'↪', preapproved:'⚡'}[decision] || '';
+            badgeEl.textContent = {auto:'⚡', ask:'?', allowed:'✓', declined:'✕', redirected:'↪', preapproved:'⚡', limit:'⏳'}[decision] || '';
             toolTitleEl.textContent = summary.length > 60 ? summary.slice(0, 59) + '…' : summary;
             // The final allowed/declined/redirected event doesn't repeat `detail` — keep
             // whatever the preceding 'ask' event already put there instead
@@ -226,6 +227,15 @@
           case 'mic': model.mic = Math.max(0, Math.min(1, +payload || 0)); break;
           case 'voice': model.voice = payload; model.voiceStart = performance.now(); break;
           case 'warm': model.ready = !!(payload && payload.ready); break;
+          case 'hud': {
+            // Which brain is answering ("Codex", "Claude (for Codex)" while
+            // standing in). The mode/config payloads are handled by the
+            // window itself and never reach here.
+            if (payload && typeof payload === 'object' && typeof payload.backend === 'string') {
+              brainEl.textContent = payload.backend ? 'Brain: ' + payload.backend : '';
+            }
+            break;
+          }
         }
       } catch (err) {
         console.error('hud.push failed', err);

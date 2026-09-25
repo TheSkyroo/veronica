@@ -18,8 +18,12 @@ from veronica import version
 from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
 from veronica.brain import quick
+from veronica.brain.backends import BACKENDS
+from veronica.brain.backends.cli import LimitError
+from veronica.brain.gate import GateServer
 from veronica.brain.intents import (
     is_stop_dictation,
+    match_brain_intent,
     match_dictation_intent,
     match_intent,
     match_language_intent,
@@ -282,8 +286,14 @@ class Orchestrator:
                  updater_update: Callable[[Any], str] | None = None,
                  relaunch: Callable[[], bool] | None = None,
                  can_relaunch: Callable[[], bool] | None = None,
-                 version_describe: Callable[[], str] | None = None) -> None:
+                 version_describe: Callable[[], str] | None = None,
+                 switcher=None) -> None:
         self.s = settings
+        # Optional veronica.brain.switch.BrainSwitcher: owns the active
+        # brain (`self.brain` reads through to it), manual switches and the
+        # usage-limit failover. None (tests, older callers) pins `brain`.
+        self.switcher = switcher
+        self._gate_server: GateServer | None = None
         # Self-update (D3): `updater_check()` -> UpdateStatus, `updater_update(
         # status)` -> log text, `relaunch()` restarts the app (and quits this
         # process). All three are injected by the menu bar app; None (tests,
@@ -410,6 +420,7 @@ class Orchestrator:
 
     async def warmup(self) -> None:
         """Load models before the first turn so the first answer isn't slow."""
+        self._loop = asyncio.get_running_loop()
         self._emit("warm", {"ready": False})
         self._set("warming")
         t0 = time.monotonic()
@@ -422,6 +433,33 @@ class Orchestrator:
         self.ready = True
         self._set("idle")
         self._emit("warm", {"ready": True})
+
+    @property
+    def brain(self):
+        return self.switcher.brain if self.switcher is not None else self._brain
+
+    @brain.setter
+    def brain(self, value) -> None:
+        self._brain = value
+        if self.switcher is not None:
+            self.switcher.brain = value
+
+    @property
+    def gate(self):
+        """The shared ToolGate (None with the bare test brains)."""
+        if self.switcher is not None:
+            return self.switcher.gate
+        return getattr(self._brain, "gate", None)
+
+    def _brain_label(self) -> str:
+        if self.switcher is not None:
+            return self.switcher.status_label()
+        info = BACKENDS.get(getattr(self.brain, "name", "claude"))
+        return info.label if info else "Claude"
+
+    def backend_changed(self, label: str, standing_in: bool) -> None:
+        """BrainSwitcher.on_backend: the HUD and menu bar show the label."""
+        self._emit("hud", {"backend": label})
 
     def _set(self, state: str) -> None:
         self.state = state
@@ -685,8 +723,18 @@ class Orchestrator:
         turn was answered with something other than yes/no, the brain got
         it in the deny message and has usually re-planned in its reply
         already; if it said nothing after the deny, run the answer as the
-        next request in the same session."""
-        spoken = await self.handle_text(text, images, lang=lang)
+        next request in the same session.
+
+        A brain that hits its usage limit raises LimitError out of ask();
+        the switcher moves to the next ready brain (and says so) and the
+        same request is re-run there once per hop, at most one hop per
+        backend so a chain of limits can't loop. The redirect re-run goes
+        through the same path — a limit there is a limit like any other."""
+        if self.switcher is not None:
+            await self.switcher.maybe_return()
+        spoken = await self._ask_with_failover(text, images, lang=lang)
+        if spoken is None:
+            return []
         heard = getattr(self.brain, "pending_redirect", None)
         if not heard:
             return spoken
@@ -694,11 +742,105 @@ class Orchestrator:
         self._emit("heard", heard)
         log.info("heard=%r (redirected from confirm)", heard)
         if not spoken:
-            return await self.handle_text(heard, lang=lang)
+            return await self._ask_with_failover(heard, lang=lang) or []
         # The brain already answered the redirect inside this turn (the deny
         # message carried it), and handle_text stored that reply — no
         # second memory row with the same reply.
         return spoken
+
+    async def _ask_with_failover(self, text: str, images: list[bytes] = (), *,
+                                 lang: str | None = None) -> list[str] | None:
+        """handle_text, retried on the next ready brain each time one reports
+        its usage limit. None = nothing left to say (no brain is ready)."""
+        for _hop in range(len(BACKENDS)):
+            try:
+                return await self.handle_text(text, images, lang=lang)
+            except LimitError as e:
+                if self.switcher is None:
+                    await self.say(f"{self._brain_label()} hit its usage limit.")
+                    return None
+                old = self._brain_label()
+                new = await self.switcher.failover(str(e))
+                if new is None:
+                    return None     # the switcher said "no other brain is ready"
+                self._emit("tool", {"summary": f"{old}: usage limit — on {BACKENDS[new].label}",
+                                    "decision": "limit"})
+        return None
+
+    # -- brains -----------------------------------------------------------------
+    async def _brain_switch_turn(self, action: tuple[str, str | None]) -> None:
+        """Local fast path for "switch to codex" / "which brain are you on":
+        the switcher does the switch (or says why it can't); a switch first
+        interrupts whatever the current brain is doing and drops any
+        screen-control trust. Also run by the menu bar's Brain submenu and
+        the settings page."""
+        kind, name = action
+        sw = self.switcher
+        if sw is None:
+            await self.say("I can only use Claude right now.")
+            return
+        if kind == "which":
+            label = self._brain_label()
+            if sw.standing_in and sw.brain.name in BACKENDS:
+                until = sw.limited_until.get(sw.preferred, 0.0)
+                mins = max(1, round((until - sw._clock()) / 60))
+                pref = BACKENDS[sw.preferred].label
+                if until > sw._clock():
+                    await self.say(f"I'm on {BACKENDS[sw.brain.name].label} — {pref} hit its limit, "
+                                   f"I'll try it again in {mins} minutes.")
+                else:
+                    await self.say(f"I'm on {BACKENDS[sw.brain.name].label} — {pref} isn't ready.")
+            elif sw.brain.name in BACKENDS:
+                await self.say(f"I'm on {label}.")
+            else:
+                await self.say("No brain is ready right now.")
+            return
+        if name not in BACKENDS:
+            await self.say(f"I don't know a brain called {name}.")
+            return
+        if sw.brain.name == name and not sw.standing_in:
+            await self.say(f"Already on {BACKENDS[name].label}.")
+            return
+        await self.brain.interrupt()
+        getattr(self.brain, "clear_trust", lambda: None)()
+        avail = await sw.switch(name)
+        await self.say(f"Switched to {BACKENDS[name].label}." if avail.ok else avail.hint)
+
+    def request_brain_switch(self, name: str) -> None:
+        """Menu bar / settings: run the "switch to <name>" turn on the
+        orchestrator loop. Safe to call from the AppKit thread."""
+        async def _turn():
+            self.player.reset()
+            await self._brain_switch_turn(("switch", name))
+
+        try:
+            here = asyncio.get_running_loop()
+        except RuntimeError:
+            here = None
+        loop = self._loop
+        if here is not None:
+            here.create_task(_turn())                    # called on the loop itself
+        elif loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(_turn(), loop)   # the AppKit thread
+        else:
+            log.warning("brain switch to %s requested before the loop started; ignored", name)
+
+    async def start_brain(self) -> None:
+        """Activate the brain (the switcher picks the preferred one or a
+        stand-in) and open the gate socket the external brains' processes
+        ask for permission on. run_forever does this; --text mode calls it."""
+        if self.switcher is not None:
+            await self.switcher.start()
+        self._emit("hud", {"backend": self._brain_label()})
+        gate = self.gate
+        if gate is not None and self._gate_server is None:
+            self._gate_server = GateServer(gate, self.s.gate_socket)
+            await self._gate_server.start()
+
+    async def stop_brain(self) -> None:
+        server, self._gate_server = self._gate_server, None
+        if server is not None:
+            await server.stop()
 
     # -- screen awareness -------------------------------------------------------
     async def _screen_turn(self, text: str) -> list[str]:
@@ -1582,14 +1724,19 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit)
                 else match_proactive_intent(text)
             )
-            quick_hit = (
+            brain_action = (
                 None
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None)
+                else match_brain_intent(text)
+            )
+            quick_hit = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or brain_action is not None)
                 else quick.match_quick(text, lang=self._utterance_lang)
             )
             dictation_intent = (
                 False
-                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or quick_hit is not None)
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or brain_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
             if intent in ("hud_mini", "hud_full"):
@@ -1668,6 +1815,9 @@ class Orchestrator:
             elif proactive_action is not None:
                 self.player.reset()
                 await self._proactive_turn(proactive_action)
+            elif brain_action is not None:
+                self.player.reset()
+                await self._brain_switch_turn(brain_action)
             elif quick_hit is not None:
                 self.player.reset()
                 await self._quick_turn(quick_hit, text)
@@ -1764,7 +1914,7 @@ class Orchestrator:
                 self.player.reset()
                 detail = f"{type(exc).__name__} {exc}".lower()
                 if any(k in detail for k in ("login", "logged in", "authenticat")):
-                    message = "Claude Code isn't logged in."
+                    message = f"{self._brain_label()} isn't logged in."
                 else:
                     message = "Something went wrong, check the log."
                 await self.say(message)
@@ -1805,6 +1955,13 @@ class Orchestrator:
     async def run_forever(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._set("idle")
+        await self.start_brain()
+        try:
+            await self._run_forever()
+        finally:
+            await self.stop_brain()
+
+    async def _run_forever(self) -> None:
         if self.proactive is not None:
             await self.proactive.start()
         self._start_input_guard()

@@ -211,7 +211,9 @@ def test_state_has_every_section_and_key(h):
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
             "input_volume_floor"} <= set(st["listening"])
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording"}
+    assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
+                                "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
+                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -848,3 +850,94 @@ def test_callable_store_is_resolved_per_call():
     assert h.bridge.history(query="wea", limit=10, offset=5)["ok"] is True
     assert h.bridge.forget_turn(1)["ok"] is True
     assert h.bridge.clear_history()["ok"] is True
+
+
+# -- brains: brain_backend switches through the orchestrator ---------------------
+from veronica.brain.backends import Availability
+
+
+class _FakeSwitcher:
+    def __init__(self, label="Codex"):
+        self.label = label
+
+    def status_label(self):
+        return self.label
+
+
+def _brain_harness(avail=True, label="Codex"):
+    h = Harness()
+    h.orch.switcher = _FakeSwitcher(label)
+    h.orch.calls = []
+
+    async def _brain_switch_turn(action):
+        h.orch.calls.append(("brain", action))
+        h.orch.switcher.label = action[1].title()
+
+    h.orch._brain_switch_turn = _brain_switch_turn
+    checks = []
+
+    def check(name):
+        checks.append(name)
+        return Availability(True, "ok") if avail else Availability(
+            False, "not logged in", "Codex isn't logged in — run codex login in a terminal.")
+
+    h.bridge._check_backend = check
+    return h, checks
+
+
+def test_state_brain_label_comes_from_the_switcher():
+    h, _ = _brain_harness(label="Claude (for Codex)")
+    st = h.bridge.get_state()
+    assert st["brain"]["brain_label"] == "Claude (for Codex)"
+    assert st["brain"]["brain_backend"] == "codex"
+    assert st["brain"]["brain_failover"] is True and st["brain"]["codex_native_tools"] is True
+    assert st["meta"]["fields"]["brain_backend"]["choices"] == ["codex", "antigravity", "claude", "copilot"]
+
+
+def test_state_brain_label_empty_without_switcher(h):
+    assert h.bridge.get_state()["brain"]["brain_label"] == ""
+
+
+def test_set_brain_backend_runs_the_switch_turn_and_pushes_after():
+    h, checks = _brain_harness()
+    res = h.bridge.set("brain", "brain_backend", "claude")
+    assert res["ok"] is True
+    assert checks == ["claude"]
+    assert h.orch.calls == [("brain", ("switch", "claude"))]
+    # the switcher persists the preference itself; the bridge doesn't double-save
+    assert ("brain_backend", "claude") not in h.prefs.overrides
+    assert h.orch.s.brain_backend == "codex"   # only the (fake) switcher would change it
+    assert len(h.states) == 1 and h.states[0]["brain"]["brain_label"] == "Claude"
+
+
+def test_set_brain_backend_unavailable_fails_with_hint():
+    h, _ = _brain_harness(avail=False)
+    res = h.bridge.set("brain", "brain_backend", "codex")
+    assert res["ok"] is False
+    assert res["message"] == "Codex isn't logged in — run codex login in a terminal."
+    assert h.orch.calls == [] and h.states == []
+
+
+def test_set_brain_backend_rejects_unknown_name():
+    h, checks = _brain_harness()
+    res = h.bridge.set("brain", "brain_backend", "gemini")
+    assert res["ok"] is False and "brain_backend" in res["message"]
+    assert checks == []
+
+
+def test_set_brain_backend_without_switcher_says_starting_up(h):
+    res = h.bridge.set("brain", "brain_backend", "claude")
+    assert res["ok"] is False and res["message"] == "Still starting up, try again in a moment."
+
+
+def test_set_brain_failover_fields_are_live(h):
+    assert h.bridge.set("brain", "brain_failover", "off")["ok"]
+    assert h.orch.s.brain_failover is False
+    assert ("brain_failover", False) in h.prefs.overrides
+    assert h.bridge.set("brain", "brain_limit_cooldown_min", 1)["ok"]
+    assert h.orch.s.brain_limit_cooldown_min == 5           # clamped to the field's min
+    assert h.bridge.set("brain", "brain_failover_order", "claude,codex")["ok"]
+    assert h.orch.s.brain_failover_order == "claude,codex"
+    assert h.bridge.set("brain", "copilot_native_tools", False)["ok"]
+    assert h.orch.s.copilot_native_tools is False
+    assert h.bridge.get_state()["brain"]["copilot_native_tools"] is False
