@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     interrupt_drain_s: float = 3
     effort: str = "low"
     max_turns: int | None = None
+    # A Claude session is resumed until it reaches this age; the CLI replays
+    # the whole transcript on resume, so an old one gets slow. 0 = never retire.
+    brain_session_max_age_h: int = 48
     brain_cwd: Path = Field(default_factory=Path.home)
     # Seconds after one approved screen action during which further
     # confirm-class computer actions in the SAME app are auto-allowed. 0 = off.
@@ -241,6 +244,10 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
     "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
+    "brain_session_max_age_h": EditableField(
+        "int", "Start a fresh conversation after (hours)",
+        "A long-running conversation gets slower to resume. 0 = keep it forever.",
+        min=0, max=720, restart=False),
     "computer_trust_s": EditableField(
         "int", "Screen-control trust window (seconds)",
         "After you approve one click/type, further screen actions in the same app are allowed "

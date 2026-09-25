@@ -215,7 +215,7 @@ def test_state_has_every_section_and_key(h):
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",
-                                "local_ctx", "local_port", "brain_label"}
+                                "local_ctx", "local_port", "brain_session_max_age_h", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
