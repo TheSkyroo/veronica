@@ -371,6 +371,14 @@ class Orchestrator:
         # Brain turns are numbered per handle_text call; the brain gets the
         # id (begin_turn) so a pre-approval can be pinned to one turn.
         self._turn_id = 0
+        # F3: the current turn's tool calls as a checklist ({summary, state}),
+        # rebuilt per brain turn. `_plan_turn` is True only inside one, so a
+        # local intent's card can't append to a turn that is already over;
+        # `_plan_shown` records whether the HUD is currently showing a card
+        # (it only ever is once a turn made more than one call).
+        self._plan: list[dict] = []
+        self._plan_turn = False
+        self._plan_shown = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._partial_task: asyncio.Task | None = None
         # Push-to-talk is a *signal* into run_forever / the in-flight turn,
@@ -477,12 +485,83 @@ class Orchestrator:
         self._emit("state", state)
 
     def _emit(self, kind: str, payload) -> None:
-        if self._on_event is None:
+        if self._on_event is not None:
+            try:
+                self._on_event(kind, payload)
+            except Exception:
+                log.exception("on_event failed for %s", kind)
+        # The plan card is a *view* of the tool cards, so fold every one into
+        # the turn's checklist — after the card itself has gone out, so a
+        # listener sees the action before the plan that contains it.
+        if kind == "tool" and isinstance(payload, dict):
+            self._plan_note(str(payload.get("summary") or ""), str(payload.get("decision") or ""))
+
+    # -- plan card (F3) -------------------------------------------------------
+    # A turn that makes more than one tool call shows them as a checklist
+    # instead of one card at a time. Nothing here decides anything: the steps
+    # ARE the decisions ToolGate already reported (through tool_card) plus the
+    # ones confirm() already emitted, so the card can never show an action the
+    # gate didn't allow, and the gate never learns the card exists.
+
+    # A decision that starts a step, and the state it starts in: an auto or
+    # pre-approved call is already executing, an asked one waits on the user.
+    _PLAN_START = {"auto": "running", "preapproved": "running", "ask": "pending"}
+    # ...and how confirm()'s answer settles the step its "ask" started. A
+    # redirect is a decline of *this* action (whatever the user said instead
+    # comes back as its own request).
+    _PLAN_SETTLE = {"allowed": "running", "declined": "declined", "redirected": "declined"}
+
+    def tool_card(self, summary: str, decision: str) -> None:
+        """ToolGate's on_tool hook: the cards it reports (auto, trusted,
+        pre-approved) go out through here rather than straight to the HUD, so
+        they land in the plan alongside the ones confirm() emits."""
+        self._emit("tool", {"summary": summary, "decision": decision})
+
+    def _plan_reset(self) -> None:
+        """Top of a brain turn: the checklist is per turn, never cumulative."""
+        self._plan = []
+        self._plan_turn = True
+        if self._plan_shown:
+            # A card from the previous turn can still be on screen (a turn
+            # that never passed through 'heard' — an announcement, --text
+            # mode — doesn't clear the HUD by itself), so empty it explicitly.
+            self._plan_shown = False
+            self._emit("plan", {"steps": []})
+
+    def _plan_note(self, summary: str, decision: str) -> None:
+        """Fold one tool decision into the turn's checklist."""
+        if not self._plan_turn:
+            return          # a local intent's card outside a brain turn isn't a step
+        state = self._PLAN_START.get(decision)
+        if state is not None:
+            # A new call is proof the previous one finished: the gate only
+            # sees the next tool once the brain has the last one's result.
+            for step in self._plan:
+                if step["state"] == "running":
+                    step["state"] = "done"
+            self._plan.append({"summary": summary, "state": state})
+        elif decision in self._PLAN_SETTLE and self._plan:
+            self._plan[-1]["state"] = self._PLAN_SETTLE[decision]
+        else:
+            return          # "limit" and the like: swapping brains is not a step
+        self._plan_emit()
+
+    def _plan_emit(self) -> None:
+        """Only a multi-step turn gets a card: one tool call keeps the plain
+        action card it has always had."""
+        if len(self._plan) < 2:
             return
-        try:
-            self._on_event(kind, payload)
-        except Exception:
-            log.exception("on_event failed for %s", kind)
+        self._plan_shown = True
+        self._emit("plan", {"steps": [dict(step) for step in self._plan]})
+
+    def _plan_finish(self) -> None:
+        """End of the turn, however it ended: nothing is still running."""
+        self._plan_turn = False
+        if any(step["state"] == "running" for step in self._plan):
+            for step in self._plan:
+                if step["state"] == "running":
+                    step["state"] = "done"
+            self._plan_emit()
 
     # -- speaking -------------------------------------------------------------
     def _finished_speaking(self, text: str) -> None:
@@ -613,6 +692,7 @@ class Orchestrator:
         self._drop_paused_tail("a new turn started")
         self._turn_id += 1
         getattr(self.brain, "begin_turn", lambda _tid: None)(self._turn_id)
+        self._plan_reset()
         t0 = time.monotonic()
         spoken: list[str] = []
         first = True
@@ -765,6 +845,9 @@ class Orchestrator:
             if ack is not None:
                 with contextlib.suppress(BaseException):
                     await ack
+            # The turn is over — including when it was cancelled out from
+            # under us — so no step of it can still be running.
+            self._plan_finish()
         if not spoken:
             # A brain that stopped right after a redirected confirm isn't
             # speechless — the redirect is about to be run as the next

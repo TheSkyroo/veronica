@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -4835,3 +4836,145 @@ async def test_ack_off_when_zero():
     o.brain = SlowFirstBrain()
     await o.handle_text("q")
     assert o.tts.said == ["Answer.", "More."]
+
+
+# ---- F3: the plan card ----------------------------------------------------
+
+class GateBrain:
+    """A turn that is a sequence of tool calls through the real ToolGate,
+    then one sentence — the shape the plan card is built from. The gate's
+    on_tool goes to orch.tool_card, exactly as __main__ wires it."""
+
+    def __init__(self, orch, calls):
+        from veronica.brain.gate import ToolGate
+        self.gate = ToolGate(orch.s, orch.confirm, on_tool=orch.tool_card)
+        self.calls = list(calls)
+        self.decisions = []
+
+    async def ask(self, text):
+        for tool, inp in self.calls:
+            self.decisions.append(await self.gate.decide(tool, inp))
+        yield "Done."
+
+
+def build_plan(calls, answers=()):
+    """`answers` is one transcript per confirm the calls will raise."""
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16) for _ in answers], stt_texts=answers)
+    o.brain = GateBrain(o, calls)
+    return o, ev
+
+
+def plans(ev):
+    return [[(s["summary"], s["state"]) for s in p["steps"]] for k, p in ev if k == "plan"]
+
+
+READ_A, READ_B = ("Read", {"file_path": "/a"}), ("Read", {"file_path": "/b"})
+RM = ("Bash", {"command": "rm x"})
+
+
+async def test_plan_card_not_shown_for_a_single_tool_call():
+    """One call keeps the plain action card: no plan event at all."""
+    o, ev = build_plan([READ_A])
+    await o.handle_text("read it")
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["auto"]
+    assert plans(ev) == []
+
+
+async def test_plan_appears_on_the_second_tool_call():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    assert plans(ev) == [
+        # the second call is proof the first finished...
+        [("Read: /a", "done"), ("Read: /b", "running")],
+        # ...and the end of the turn is proof the last one did
+        [("Read: /a", "done"), ("Read: /b", "done")],
+    ]
+
+
+async def test_plan_event_follows_the_tool_card_it_describes():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    kinds = [k for k, _ in ev if k in ("tool", "plan")]
+    assert kinds == ["tool", "tool", "plan", "plan"]
+
+
+async def test_plan_step_waits_while_the_confirm_is_out_then_runs():
+    o, ev = build_plan([READ_A, RM], answers=["yes"])
+    await o.handle_text("clean up")
+    assert plans(ev) == [
+        [("Read: /a", "done"), ("Bash: rm x", "pending")],
+        [("Read: /a", "done"), ("Bash: rm x", "running")],
+        [("Read: /a", "done"), ("Bash: rm x", "done")],
+    ]
+
+
+async def test_plan_marks_a_declined_step():
+    o, ev = build_plan([READ_A, RM], answers=["no"])
+    await o.handle_text("clean up")
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Bash: rm x", "declined")]
+
+
+async def test_plan_marks_a_redirected_step_declined():
+    """"open it in Safari instead" is a no to *this* action; what the user
+    said instead comes back as its own request."""
+    o, ev = build_plan([READ_A, RM], answers=["open it in Safari instead"])
+    await o.handle_text("clean up")
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Bash: rm x", "declined")]
+
+
+async def test_plan_resets_at_the_start_of_each_turn():
+    o, ev = build_plan([READ_A, READ_B])
+    await o.handle_text("read both")
+    ev.clear()
+    o.brain = GateBrain(o, [("Read", {"file_path": "/c"}), ("Read", {"file_path": "/d"})])
+    await o.handle_text("read two more")
+    # the stale card is emptied first, and nothing from the old turn survives
+    assert plans(ev)[0] == []
+    assert plans(ev)[-1] == [("Read: /c", "done"), ("Read: /d", "done")]
+
+
+async def test_plan_reset_is_silent_when_no_card_was_shown():
+    o, ev = build_plan([READ_A])
+    await o.handle_text("read it")
+    ev.clear()
+    o.brain = GateBrain(o, [READ_B])
+    await o.handle_text("read another")
+    assert plans(ev) == []
+
+
+async def test_tool_card_outside_a_brain_turn_is_not_a_plan_step():
+    """A local intent ("look at the screen") cards itself without a brain
+    turn; it must not append to a plan that is already over."""
+    o, _, ev = build3()
+    o.tool_card("Look at screen", "auto")
+    o.tool_card("Pause music", "auto")
+    assert plans(ev) == []
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["auto", "auto"]
+
+
+async def test_usage_limit_card_is_not_a_plan_step():
+    o, ev = build_plan([READ_A, READ_B])
+    o._plan_reset()
+    o._emit("tool", {"summary": "Codex: usage limit — on Claude", "decision": "limit"})
+    o._emit("tool", {"summary": "Read: /a", "decision": "auto"})
+    o._emit("tool", {"summary": "Read: /b", "decision": "auto"})
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "running")]
+
+
+async def test_plan_finishes_running_steps_when_the_turn_is_cancelled():
+    o, ev = build_plan([READ_A, READ_B])
+
+    class Stuck(GateBrain):
+        async def ask(self, text):
+            for tool, inp in self.calls:
+                await self.gate.decide(tool, inp)
+            await asyncio.sleep(10)
+            yield "never"
+
+    o.brain = Stuck(o, [READ_A, READ_B])
+    turn = asyncio.create_task(o.handle_text("read both"))
+    await asyncio.sleep(0.05)
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "done")]

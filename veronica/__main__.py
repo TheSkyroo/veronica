@@ -35,7 +35,11 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         return await holder["orch"].confirm(summary, detail)
 
     on_level = (lambda v: on_event("mic", v)) if (on_event and audio) else None
-    on_tool = (lambda su, d: on_event("tool", {"summary": su, "decision": d})) if on_event else None
+    # Routed through the orchestrator rather than straight to on_event so the
+    # gate's own cards (auto, trusted, pre-approved) join the turn's plan card
+    # alongside the ones confirm() emits; it only ever fires while a brain is
+    # running a tool, long after holder["orch"] is set.
+    on_tool = (lambda su, d: holder["orch"].tool_card(su, d)) if on_event else None
     # Memory is built for both voice and text mode: text mode still runs
     # local remember/forget intents and logs turns, and the brain still
     # wants facts/recent injected into its system prompt.
