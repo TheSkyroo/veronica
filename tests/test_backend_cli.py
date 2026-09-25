@@ -176,7 +176,7 @@ async def test_canary_kills_and_disables_native_tools(tmp_path, monkeypatch):
         return procs[-1]
 
     b = EchoBrain(s, ToolGate(s, None), spawn=spawn)
-    b.canary_grace_s = 0.1
+    b.canary_grace_s = b.canary_start_grace_s = 0.1
     out = await collect(b, "list files")
     # no hook.log line for key "ls" -> canary trips
     assert out[0] == "Hooks aren't running on Echo, so I've turned off its shell. Tools still work."
@@ -218,9 +218,55 @@ async def test_canary_ignores_stale_log_lines(tmp_path, monkeypatch):
 
     s = Settings(home=tmp_path)
     b = EchoBrain(s, ToolGate(s, None), spawn=spawn)
-    b.canary_grace_s = 0.1
+    b.canary_grace_s = b.canary_start_grace_s = 0.1
     out = await collect(b, "x")
     assert out[0].startswith("Hooks aren't running on Echo")
+
+
+async def test_canary_trips_at_tool_start_not_only_at_tool_end(tmp_path, monkeypatch):
+    """The hook logs before the tool runs, so an unlogged call can be caught at
+    ToolStart — the child dies before a long command finishes."""
+    monkeypatch.setattr(cli.prefs, "save_settings_override", lambda k, v: None)
+    first = [
+        ev("ToolStart", call_id="9", tool="run_command", input={"command": "sleep 300"}, native=True),
+        ev("Text", delta="This should never be spoken."),
+        ev("ToolEnd", call_id="9"),
+        ev("Done", final_text="done"),
+    ]
+    second = [ev("Done", final_text="fallback answer")]
+    s = Settings(home=tmp_path)
+    object.__setattr__(s, "echo_native_tools", True)
+    runs = []
+
+    async def spawn(argv, cwd, env):
+        runs.append(argv)
+        return FakeProc(first if len(runs) == 1 else second)
+
+    b = EchoBrain(s, ToolGate(s, None), spawn=spawn)
+    b.canary_grace_s = b.canary_start_grace_s = 0.1
+    out = await collect(b, "x")
+    assert "This should never be spoken." not in out     # killed before the ToolEnd
+    assert out[0].startswith("Hooks aren't running on Echo") and out[-1] == "fallback answer"
+
+
+async def test_canary_is_off_when_native_tools_are_off(tmp_path, monkeypatch):
+    """Second pass: the CLI's own read-only/deny mode is the enforcement, so a
+    native tool start must not trip the canary again and kill the answer."""
+    monkeypatch.setattr(cli.prefs, "save_settings_override", lambda k, v: None)
+    lines = [
+        ev("ToolStart", call_id="9", tool="run_command", input={"command": "ls"}, native=True),
+        ev("ToolEnd", call_id="9"),
+        ev("Done", final_text="tools-off answer"),
+    ]
+    s = Settings(home=tmp_path)
+    object.__setattr__(s, "echo_native_tools", False)
+
+    async def spawn(argv, cwd, env):
+        return FakeProc(lines)
+
+    b = EchoBrain(s, ToolGate(s, None), spawn=spawn)
+    b.canary_grace_s = b.canary_start_grace_s = 0.1
+    assert await collect(b, "x") == ["tools-off answer"]
 
 
 async def test_default_native_key_prefers_command_then_file(tmp_path):

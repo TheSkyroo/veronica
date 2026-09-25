@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from tests.brains_fakes import FakeProc
-from veronica.brain import hook
+from veronica.brain import gateclient, hook
 from veronica.brain.backends import cli
 from veronica.brain.backends.antigravity import AntigravityBrain
 from veronica.brain.gate import ToolGate
@@ -67,6 +67,9 @@ def test_workspace_files_and_hook_merge(tmp_path):
     assert pre[0]["hooks"][0]["command"] == "/usr/bin/true"
     cmd = pre[1]["hooks"][0]["command"]
     assert pre[1]["matcher"] == "*" and cmd == b.hook_command()
+    # agy's own default is 30 s; ours is explicit and above the gate budget
+    assert pre[1]["hooks"][0]["timeout"] == gateclient.HOOK_TIMEOUT_S
+    assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
     assert cmd.startswith(f"{sys.executable} -m veronica.brain.hook antigravity --sock {b.s.gate_socket} ")
     assert f"--log {b.hook_log}" in cmd and cmd.endswith(f"--scope-file {b.workspace / 'active-conversation'}")
     # idempotent
@@ -197,3 +200,42 @@ async def test_resume_argv_after_interrupt(tmp_path):
     [x async for x in b.ask("two")]
     assert "--conversation" not in spawned[0]
     assert spawned[1][spawned[1].index("--conversation") + 1] == conv_id("antigravity-plain.jsonl")
+
+
+def test_hook_entry_is_replaced_not_accumulated(tmp_path):
+    """A different sys.executable (dev worktree vs app bundle, or an upgrade)
+    must not leave a second entry of ours behind in the user's file."""
+    b, _, _ = make(tmp_path)
+    b.prepare_workspace("P", native=True)
+    stale = json.loads(b.hooks_file.read_text())
+    stale["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+        "/old/python -m veronica.brain.hook antigravity --sock /old/sock --log /old/log")
+    stale["hooks"]["PreToolUse"].insert(0, {"matcher": "run_command", "hooks": [
+        {"type": "command", "command": "/usr/bin/true"}]})
+    b.hooks_file.write_text(json.dumps(stale))
+    b.prepare_workspace("P", native=True)
+    pre = json.loads(b.hooks_file.read_text())["hooks"]["PreToolUse"]
+    ours = [e for e in pre if any("veronica.brain.hook antigravity" in h["command"] for h in e["hooks"])]
+    assert len(ours) == 1 and ours[0]["hooks"][0]["command"] == b.hook_command()
+    assert len(pre) == 2 and pre[0]["hooks"][0]["command"] == "/usr/bin/true"
+
+
+async def test_close_removes_our_hook_entry(tmp_path):
+    b, _, _ = make(tmp_path)
+    b.hooks_file.parent.mkdir(parents=True)
+    b.hooks_file.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "run_command", "hooks": [
+        {"type": "command", "command": "/usr/bin/true"}]}]}, "other": 1}))
+    b.prepare_workspace("P", native=True)
+    await b.close()
+    data = json.loads(b.hooks_file.read_text())
+    assert data["other"] == 1
+    assert [e["hooks"][0]["command"] for e in data["hooks"]["PreToolUse"]] == ["/usr/bin/true"]
+    await b.close()                                # idempotent
+
+
+def test_hook_command_quotes_paths(tmp_path):
+    b, _, _ = make(tmp_path)
+    b.workspace = tmp_path / "with space"
+    b.hook_log = b.workspace / "hook.log"
+    b.scope_file = b.workspace / "active-conversation"
+    assert f"'{b.hook_log}'" in b.hook_command() and f"'{b.scope_file}'" in b.hook_command()

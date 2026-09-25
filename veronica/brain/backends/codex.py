@@ -52,6 +52,7 @@ from veronica.brain.backends.cli import (
     ToolEnd,
     ToolStart,
 )
+from veronica.brain.gateclient import HOOK_TIMEOUT_S
 
 BYPASS_NOTICE = "--dangerously-bypass-hook-trust` is enabled"
 
@@ -136,8 +137,11 @@ class CodexBrain(CliBrain):
         self._prompt = prompt_text
         d = self.workspace / ".codex"
         d.mkdir(exist_ok=True)
-        hooks = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": self.hook_command()}]}]}}
+        # codex 0.155 reads a per-hook timeout as `timeout` (seconds) on the
+        # handler and `timeoutSec` on the matcher group; both are set so the
+        # gate's answer can never outlive it.
+        hooks = {"hooks": {"PreToolUse": [{"matcher": "*", "timeoutSec": HOOK_TIMEOUT_S, "hooks": [
+            {"type": "command", "command": self.hook_command(), "timeout": HOOK_TIMEOUT_S}]}]}}
         (d / "hooks.json").write_text(json.dumps(hooks, indent=2) + "\n")
 
     # -- stream -------------------------------------------------------------------

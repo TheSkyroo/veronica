@@ -16,9 +16,12 @@ the saved session id through `argv`.
 The canary: with the vendor CLI in auto-approve mode, our hook is the
 only gate on its own shell/file tools. Every native, non-read-only tool
 call therefore has to show up in `hook.log` (the hook writes a line
-before it asks the gate). A call that finishes without one means the
-hook didn't fire — the child is killed, the backend's native tools are
-switched off (persisted), and the turn is retried tools-off."""
+before it asks the gate), checked when the call starts and again when it
+ends. A call without one means the hook didn't fire — the child is
+killed, the backend's native tools are switched off (persisted), and the
+turn is retried tools-off. That second pass runs with native tools off,
+where the CLI's own read-only/deny mode is the gate, so the canary is
+not armed there: tripping it twice would kill the turn silently."""
 import asyncio
 import datetime as dt
 import json
@@ -108,6 +111,12 @@ class CliBrain:
     # canary dead. The hook writes before the tool runs, so by the time
     # the CLI reports the call finished the line is normally there.
     canary_grace_s: float = 0.5
+    # Same check at ToolStart, to cut the window in which an ungated call
+    # runs: a long command would otherwise finish before the ToolEnd check
+    # sees anything. Its grace is the longer of the two because at that
+    # point the hook may still be starting up (a Python process spawn); it
+    # only ever waits when the line is missing, i.e. on the way to a trip.
+    canary_start_grace_s: float = 3.0
 
     def __init__(
         self,
@@ -346,8 +355,13 @@ class CliBrain:
             return []
 
     # -- canary -----------------------------------------------------------------
-    async def _hook_logged(self, key: str, since: float) -> bool:
-        deadline = self._clock() + self.canary_grace_s
+    async def _trip_canary(self, key: str, out: _Outcome) -> None:
+        log.error("%s: hook never logged native call %r; canary tripped", self.name, key)
+        await self._kill()
+        out.kind = "canary"
+
+    async def _hook_logged(self, key: str, since: float, grace: float | None = None) -> bool:
+        deadline = self._clock() + (self.canary_grace_s if grace is None else grace)
         while True:
             try:
                 for line in self.hook_log.read_text().splitlines():
@@ -425,14 +439,19 @@ class CliBrain:
                     if ev.tool in hook.READONLY_TOOLS:
                         if self._on_tool:
                             self._on_tool(self.readonly_summary(ev.tool, ev.input), "auto")
-                    else:
-                        pending[ev.call_id] = self.native_key(ev.tool, ev.input)
+                    elif native:
+                        # With native tools off there is nothing for the hook to
+                        # gate: the CLI's own read-only/deny mode is the
+                        # enforcement, and tripping here would kill the fallback
+                        # turn and leave the user with no answer at all.
+                        key = pending[ev.call_id] = self.native_key(ev.tool, ev.input)
+                        if not await self._hook_logged(key, turn_start, self.canary_start_grace_s):
+                            await self._trip_canary(key, out)
+                            return
                 elif isinstance(ev, ToolEnd):
                     key = pending.pop(ev.call_id, None)
                     if key is not None and not await self._hook_logged(key, turn_start):
-                        log.error("%s: hook never logged native call %r; canary tripped", self.name, key)
-                        await self._kill()
-                        out.kind = "canary"
+                        await self._trip_canary(key, out)
                         return
                 elif isinstance(ev, Session):
                     self._save_session(ev.id)

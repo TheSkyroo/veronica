@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.brains_fakes import FakeProc
-from veronica.brain import hook
+from veronica.brain import gateclient, hook
 from veronica.brain.backends import cli
 from veronica.brain.backends.codex import CodexBrain, toml_str, unwrap_shell
 from veronica.brain.gate import ToolGate
@@ -94,6 +94,10 @@ def test_workspace_hooks_json(tmp_path):
     cmd = entry["hooks"][0]["command"]
     assert cmd == b.hook_command()
     assert cmd == f"{sys.executable} -m veronica.brain.hook codex --sock {b.s.gate_socket} --log {b.hook_log}"
+    # An explicit hook timeout, so the gate answer can't outlive it (codex 0.155
+    # reads `timeout` on the handler and `timeoutSec` on the matcher group).
+    assert entry["timeoutSec"] == entry["hooks"][0]["timeout"] == gateclient.HOOK_TIMEOUT_S
+    assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
     b.prepare_workspace("SYS2", native=False)     # rewritten every turn, still one entry
     assert len(json.loads((b.workspace / ".codex" / "hooks.json").read_text())["hooks"]["PreToolUse"]) == 1
     assert b._prompt.startswith("SYS2")

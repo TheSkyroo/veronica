@@ -18,8 +18,9 @@ How it runs (verified on this Mac, 2026-09-19):
   written before every turn as `{"version":1,"hooks":{"preToolUse":[{
   "type":"command","bash":<cmd>,"timeoutSec":600}]}}` and scoped with
   `--scope-cwd <workspace>` (the payload's `cwd` is the realpath). The
-  timeout matters: a hook that times out FAILS OPEN, and 600 s covers a
-  slow voice confirm. The payload is `{sessionId,timestamp,cwd,toolName,
+  timeout matters: a hook that times out FAILS OPEN, so it is set to
+  `HOOK_TIMEOUT_S` and `ask_gate` answers well inside it. The payload is
+  `{sessionId,timestamp,cwd,toolName,
   toolArgs}`; the decision is `{permissionDecision,permissionDecisionReason}`
   and a deny fails the call with "Denied by preToolUse hook: <reason>".
   Native tools OFF: the shell/edit/agent tools are hidden from the model
@@ -58,13 +59,13 @@ from veronica.brain.backends.cli import (
     ToolEnd,
     ToolStart,
 )
+from veronica.brain.gateclient import HOOK_TIMEOUT_S
 
 # Copilot's own tools that act (run, edit, spawn); hidden with
 # --excluded-tools when native tools are off. What remains (view, rg,
 # glob, web_fetch, ...) is read-only.
 NATIVE_ACTION_TOOLS = ("bash", "read_bash", "stop_bash", "list_bash", "apply_patch", "task",
                        "write_agent", "sql", "session_store_sql", "skill")
-HOOK_TIMEOUT_S = 600
 
 
 class CopilotBrain(CliBrain):

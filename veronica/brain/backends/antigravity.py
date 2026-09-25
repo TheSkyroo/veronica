@@ -27,10 +27,12 @@ How it runs (verified on this Mac, 2026-09-19):
   `~/.gemini/config/mcp_config.json`) and called through `call_mcp_tool`.
 """
 import json
+import shlex
 import sys
 from pathlib import Path
 
 from veronica.brain import hook
+from veronica.brain.gateclient import HOOK_TIMEOUT_S
 from veronica.brain.backends.cli import (
     CliBrain,
     Done,
@@ -79,9 +81,15 @@ class AntigravityBrain(CliBrain):
         self.scope_file.write_text(session_id)
 
     # -- workspace ----------------------------------------------------------------
+    # What identifies OUR entry in the user's hooks file, whatever the paths in
+    # it: a dev worktree, the app bundle and an upgrade all write a different
+    # command string for the same hook.
+    HOOK_MARKER = "-m veronica.brain.hook antigravity"
+
     def hook_command(self) -> str:
-        return (f"{sys.executable} -m veronica.brain.hook antigravity --sock {self.s.gate_socket} "
-                f"--log {self.hook_log} --scope-file {self.scope_file}")
+        # agy runs the command through `sh -c`, so the paths are quoted.
+        return (f"{shlex.quote(sys.executable)} {self.HOOK_MARKER} --sock {shlex.quote(str(self.s.gate_socket))} "
+                f"--log {shlex.quote(str(self.hook_log))} --scope-file {shlex.quote(str(self.scope_file))}")
 
     def prepare_workspace(self, prompt_text: str, native: bool) -> None:
         if not native:
@@ -91,24 +99,52 @@ class AntigravityBrain(CliBrain):
         self._merge_hook()
         self._register_mcp()
 
-    def _merge_hook(self) -> None:
-        """Ensure our PreToolUse entry is in the user-level hooks file,
-        keeping everything else in it. Idempotent."""
+    def _read_hooks(self) -> dict:
         try:
             data = json.loads(self.hooks_file.read_text()) if self.hooks_file.exists() else {}
         except ValueError:
             data = {}
-        if not isinstance(data, dict):
-            data = {}
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _is_ours(cls, entry: object) -> bool:
+        return isinstance(entry, dict) and any(
+            cls.HOOK_MARKER in str(h.get("command") or "")
+            for h in entry.get("hooks", []) if isinstance(h, dict))
+
+    def _write_hooks(self, data: dict, pre: list) -> None:
         hooks = data.setdefault("hooks", {})
-        pre = hooks.setdefault("PreToolUse", [])
-        cmd = self.hook_command()
-        for entry in pre:
-            if any(h.get("command") == cmd for h in entry.get("hooks", []) if isinstance(h, dict)):
-                return
-        pre.append({"matcher": "*", "hooks": [{"type": "command", "command": cmd}]})
+        if pre:
+            hooks["PreToolUse"] = pre
+        else:
+            hooks.pop("PreToolUse", None)
         self.hooks_file.parent.mkdir(parents=True, exist_ok=True)
         self.hooks_file.write_text(json.dumps(data, indent=2) + "\n")
+
+    def _merge_hook(self) -> None:
+        """Ensure our PreToolUse entry is in the user-level hooks file,
+        keeping everything else in it. Matched on the marker, not on the
+        whole command, so a new interpreter path (dev worktree vs app
+        bundle, or an upgrade) replaces our entry instead of adding a
+        second one that would then gate the user's own agy forever."""
+        data = self._read_hooks()
+        pre = [e for e in data.get("hooks", {}).get("PreToolUse", []) if not self._is_ours(e)]
+        # agy's own default is 30 s; ours is explicit so the gate answer fits.
+        pre.append({"matcher": "*", "hooks": [
+            {"type": "command", "command": self.hook_command(), "timeout": HOOK_TIMEOUT_S}]})
+        self._write_hooks(data, pre)
+
+    def _remove_hook(self) -> None:
+        """Take our entry back out of the user's file when we're done with it."""
+        data = self._read_hooks()
+        pre = data.get("hooks", {}).get("PreToolUse", [])
+        kept = [e for e in pre if not self._is_ours(e)]
+        if len(kept) != len(pre):
+            self._write_hooks(data, kept)
+
+    async def close(self) -> None:
+        await super().close()
+        self._remove_hook()
 
     def _register_mcp(self) -> None:
         """`agy mcp add` is add-or-update; run once per process."""

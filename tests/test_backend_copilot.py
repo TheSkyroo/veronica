@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.brains_fakes import FakeProc
-from veronica.brain import hook
+from veronica.brain import gateclient, hook
 from veronica.brain.backends import cli
 from veronica.brain.backends.copilot import (
     HOOK_TIMEOUT_S,
@@ -105,7 +105,9 @@ def test_workspace_instructions_and_user_level_hook(tmp_path):
     hooks = json.loads(b.hooks_file.read_text())
     assert hooks["version"] == 1 and list(hooks["hooks"]) == ["preToolUse"]
     [entry] = hooks["hooks"]["preToolUse"]
-    assert entry["type"] == "command" and entry["timeoutSec"] == HOOK_TIMEOUT_S == 600   # a timeout fails OPEN
+    # a timeout fails OPEN, so the gate answer budget stays well under it
+    assert entry["type"] == "command" and entry["timeoutSec"] == gateclient.HOOK_TIMEOUT_S
+    assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
     assert entry["bash"] == b.hook_command()
     assert entry["bash"] == (f"{sys.executable} -m veronica.brain.hook copilot --sock {b.s.gate_socket} "
                              f"--log {b.hook_log} --scope-cwd {b.workspace}")
