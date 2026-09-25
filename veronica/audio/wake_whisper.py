@@ -67,8 +67,6 @@ class WhisperWake:
         self._frames = frames or self._mic_frames
         self._model = self._model_cls(settings.wake_whisper_model, device="cpu", compute_type="int8")
         self._stop = threading.Event()
-        self._strict = False
-        self._prompt = " ".join(p.strip().capitalize() + "." for p in settings.wake_phrases if p.strip()) or None
         self._window_samples = int(settings.wake_window_s * settings.sample_rate)
         self._hop_samples = int(settings.wake_hop_s * settings.sample_rate)
         self._buf = np.zeros(0, dtype=np.int16)
@@ -117,11 +115,12 @@ class WhisperWake:
             vad_filter=False,
             condition_on_previous_text=False,
             word_timestamps=True,
-            # Bias the decoder toward the name so slow or low-pitched
-            # speech doesn't come back as "very nicer". Not while barging:
-            # priming mid-turn audio with the name makes ordinary words
-            # decode as it, which cancels the answer the user is waiting for.
-            initial_prompt=None if self._strict else self._prompt,
+            # No initial_prompt: priming the decoder with the wake phrases
+            # makes tiny.en spell them out of room noise ("Hi. Veronika. Hi.
+            # Veronika. ..." from a hop of −45 dB hiss), which both wakes her
+            # when nobody spoke and costs ~4 s a hop instead of 0.1 s, so the
+            # loop falls behind the mic and skips the hop the user really did
+            # say her name in. wake_window_s is what carries slow speech.
         )
         return list(segments)
 
@@ -156,9 +155,6 @@ class WhisperWake:
         return p
 
     def _wait(self, suppress: Callable[[], str] | None = None, strict: bool = False) -> bool:
-        # read by _transcribe (kept out of its signature so tests can patch
-        # it with a plain one-argument stub)
-        self._strict = strict
         self._buf = np.zeros(0, dtype=np.int16)
         since_hop = 0
         for frame in self._frames():

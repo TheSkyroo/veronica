@@ -371,18 +371,46 @@ def test_strict_match_drops_fuzzy_near_misses():
     assert _matches("hey veronica stop", phrases, strict=True) is True
 
 
-def test_barge_wait_is_strict_and_unprimed():
-    """The barge listener (the only caller that passes a threshold) must not
-    prime the decoder with the name, and _matches must reject near misses."""
-    from veronica.audio.wake_whisper import WhisperWake
+def test_transcribe_never_primes_the_decoder(monkeypatch):
+    """Priming tiny.en with the wake phrases makes it spell them out of room
+    noise (a false wake) and turns a 0.1 s hop into a ~4 s one, so the loop
+    falls behind the mic and skips the hop the name was really in."""
     seen = {}
 
-    w = WhisperWake.__new__(WhisperWake)
-    w._prompt = "Veronica."
-    w._model = type("M", (), {"transcribe": lambda self, audio, **kw: (seen.update(kw), ([], None))[1]})()
-    w._strict = False
+    class Recorder:
+        def transcribe(self, audio, **kw):
+            seen.update(kw)
+            return [], None
+
+    monkeypatch.setattr(WhisperWake, "_model_cls", staticmethod(lambda *a, **k: Recorder()))
+    w = WhisperWake(Settings(), frames=silence_frames)
     w._transcribe(np.zeros(16000, dtype=np.int16))
-    assert seen["initial_prompt"] == "Veronica."
-    w._strict = True
-    w._transcribe(np.zeros(16000, dtype=np.int16))
-    assert seen["initial_prompt"] is None
+    assert seen.get("initial_prompt") is None
+
+
+@pytest.mark.asyncio
+async def test_noise_only_a_primed_decoder_hears_as_the_name_never_wakes(monkeypatch):
+    """The live false wakes: room noise came back as "Hi. Veronika. Hi.
+    Veronika. ..." only because the decoder had been handed the phrases."""
+    class Primed:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def transcribe(self, audio, **kw):
+            if kw.get("initial_prompt"):
+                return [FakeSegment("Hi. Veronika. Hi. Veronika.")], None
+            return [], None
+
+    monkeypatch.setattr(WhisperWake, "_model_cls", staticmethod(Primed))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    task = asyncio.ensure_future(w.wait())
+    await asyncio.sleep(0.2)
+    w.stop()
+    assert await _wait_for(task, 3) is False
+
+
+@pytest.mark.asyncio
+async def test_spoken_name_still_wakes_without_the_bias(monkeypatch):
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["", "veronica"]))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    assert await _wait_for(w.wait(), 3) is True
