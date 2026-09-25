@@ -2,6 +2,7 @@ import sqlite3
 
 import pytest
 
+from veronica.memory import store as store_mod
 from veronica.memory.store import MemoryStore, _fts_match_expr, infer_kind
 
 
@@ -319,7 +320,7 @@ def test_facts_by_kind_skips_empty_kinds_and_keeps_kind_order(store):
 def test_near_duplicate_fact_replaces_instead_of_adding(store):
     store.add_fact("likes tea in the morning")
     fact_id, replaced = store.remember("Likes tea in the mornings")
-    assert replaced is True
+    assert replaced == "likes tea in the morning"
     assert [f[2] for f in store.facts()] == ["Likes tea in the mornings"]
     assert [f[0] for f in store.facts()] == [fact_id]
 
@@ -327,8 +328,16 @@ def test_near_duplicate_fact_replaces_instead_of_adding(store):
 def test_distinct_facts_are_both_kept(store):
     store.add_fact("likes tea in the morning")
     _id, replaced = store.remember("allergic to peanuts")
-    assert replaced is False
+    assert replaced == ""
     assert len(store.facts()) == 2
+
+
+def test_remember_reports_the_exact_text_it_overwrote(store):
+    """The dedupe is fuzzy, so it can be wrong — "March 8" replacing
+    "March 3". Saying what went makes that audible instead of silent."""
+    store.add_fact("Anna's birthday is March 3")
+    _id, replaced = store.remember("Anna's birthday is March 8")
+    assert replaced == "Anna's birthday is March 3"
 
 
 def test_replacing_a_fact_reinfers_its_kind_and_updates_search(store):
@@ -348,6 +357,24 @@ def test_delete_facts_about_topic_counts_and_spares_others(store):
     store.add_fact("likes tea")
     assert store.delete_facts_about("the office") == 3
     assert [f[2] for f in store.facts()] == ["likes tea"]
+
+
+def test_delete_facts_about_will_not_sweep_a_word_that_merely_starts_the_same(store):
+    """A four-letter stem is far too loose for a one-word topic: "insurance"
+    is not "insulin", and "work" is not "workout"."""
+    store.add_fact("takes insulin before dinner")
+    store.add_fact("works out on Tuesdays and does a workout video")
+    assert store.delete_facts_about("insurance") == 0
+    assert store.delete_facts_about("work") == 0
+    assert len(store.facts()) == 2
+    assert store.delete_facts_about("insulin") == 1
+
+
+def test_delete_facts_about_a_phrase_needs_every_word(store):
+    store.add_fact("the office wifi password is hunter2")
+    store.add_fact("the gym is on Church Street")
+    assert store.delete_facts_about("office wifi") == 1
+    assert [f[2] for f in store.facts()] == ["the gym is on Church Street"]
 
 
 def test_delete_facts_about_ignores_stopword_only_topics(store):
@@ -395,5 +422,36 @@ def test_migrates_a_pre_f5_facts_table(tmp_path):
         assert by_kind["place"] == ["the office is in Bandra"]
         # last_used was backfilled from ts, so prompt order is newest-first.
         assert s.facts_for_prompt(10) == ["the office is in Bandra", "likes tea"]
+    finally:
+        s.close()
+
+
+def test_a_migration_that_dies_half_way_is_done_again_next_open(tmp_path, monkeypatch):
+    """ALTER TABLE commits as it goes: without a transaction of its own, a
+    crash between the new column and its backfill would leave every fact
+    typed 'other' for good, since the next open sees the column and skips
+    the work."""
+    path = tmp_path / "memory.db"
+    conn = sqlite3.connect(str(path))
+    with conn:
+        conn.execute(
+            "CREATE TABLE facts (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts TEXT NOT NULL, text TEXT NOT NULL)"
+        )
+        conn.execute("INSERT INTO facts (ts, text) VALUES (?, ?)",
+                     ("2026-01-01T00:00:00", "likes tea"))
+    conn.close()
+
+    def boom(_text):
+        raise RuntimeError("power cut")
+
+    monkeypatch.setattr(store_mod, "infer_kind", boom)
+    with pytest.raises(RuntimeError):
+        MemoryStore(path)
+    monkeypatch.undo()
+
+    s = MemoryStore(path)
+    try:
+        assert s.facts_by_kind()["preference"] == ["likes tea"]
     finally:
         s.close()

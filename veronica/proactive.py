@@ -167,6 +167,7 @@ class Proactive:
     USER_NAME = "Manik"
     BATTERY_PCT = 15
     BRIEFING_MAX_TITLES = 4
+    HELD_MAX = 10
     REMINDERS_MAX = 3
 
     def __init__(
@@ -190,6 +191,7 @@ class Proactive:
         # a restart is a fresh start.
         self.hold_until: dt.datetime | None = None
         self._held: list[tuple[str, dt.datetime | None]] = []
+        self._dropped_held = 0
         self._task: asyncio.Task | None = None
         self._last_briefing_date: dt.date | None = None
         self._nudged: set[tuple[str, dt.datetime]] = set()
@@ -232,17 +234,25 @@ class Proactive:
 
     async def _announce_or_hold(self, text: str, expires_at: dt.datetime | None = None) -> None:
         if self.holding(self._now()):
-            self._held.append((text, expires_at))
+            # A long snooze must not queue up a monologue for the moment it
+            # ends: past HELD_MAX she only says how many she sat on.
+            if len(self._held) < self.HELD_MAX:
+                self._held.append((text, expires_at))
+            else:
+                self._dropped_held += 1
             return
         await self._announce(text, expires_at=expires_at)
 
     async def _flush_held(self, now: dt.datetime) -> None:
         held, self._held = self._held, []
+        dropped, self._dropped_held = self._dropped_held, 0
         live = [(t, x) for t, x in held if x is None or x >= now]
         for i, (text, expires_at) in enumerate(live):
             if i == 0 and len(live) > 1:
                 text = f"While you were away: {text}"
             await self._announce(text, expires_at=expires_at)
+        if dropped:
+            await self._announce(f"And {dropped} more I held back.")
         if len(live) != len(held):
             log.info("dropped %d held announcement(s) whose moment had passed", len(held) - len(live))
 

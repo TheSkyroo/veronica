@@ -257,6 +257,22 @@ async def test_quiet_hours_drop_held_item_whose_moment_passed():
     assert said == [] and calls["expires"] == []       # the meeting is long over
 
 
+async def test_held_announcements_are_capped():
+    """A long snooze must not queue up an unbounded monologue for the
+    moment it ends."""
+    p, said, clock, _ = make(pr.Schedule(), now=dt.datetime(2026, 9, 16, 22, 0))
+    p.hold_until = dt.datetime(2026, 9, 16, 23, 0)
+    for i in range(pr.Proactive.HELD_MAX + 5):
+        await p._announce_or_hold(f"Thing {i}.")
+    assert said == []
+    clock.t = dt.datetime(2026, 9, 16, 23, 1)
+    await p._flush_held(clock.t)
+    assert len(said) == pr.Proactive.HELD_MAX + 1
+    assert said[0] == "While you were away: Thing 0."
+    assert said[-1] == "And 5 more I held back."
+    assert p._held == []
+
+
 async def test_quiet_hours_off_by_default_speaks_at_night():
     ev = "23:30–23:45  Standup (Work)"
     p, said, clock, _ = make(pr.Schedule(nudges_enabled=True), events=ev, now=dt.datetime(2026, 9, 16, 23, 26))

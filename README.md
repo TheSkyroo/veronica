@@ -157,10 +157,12 @@ credits, overloaded …) and **Settings → Brain → Switch brains on usage lim
 on, she says "Codex hit its usage limit — switching to Antigravity.", puts the failed brain in a cooldown of
 **Limit cooldown (minutes)** (`brain_limit_cooldown_min`, default 60) and re-runs the same request once on the
 next brain in **Failover order** (`brain_failover_order`, default `codex,antigravity,claude,copilot`; the
-preferred brain is implicitly first) that is installed, logged in and not cooling down. If none is: "Codex hit
-its usage limit and no other brain is ready." With failover off she just says "Codex hit its usage limit." A
-stand-in that hits its own limit fails over again down the order, each with its own cooldown, and a brain
-already cooling down is never retried in the same chain. The preference is not changed by failover: the HUD
+preferred brain is implicitly first) that is installed, logged in and not cooling down. The local model is never
+picked automatically — a usage limit, or a brain that isn't logged in, is no reason to drop to the 3B weights;
+only a dead wire is (see Offline). If none is: "Codex hit its usage limit and no other brain is ready." With
+failover off she just says "Codex hit its usage limit." A stand-in that hits its own limit fails over again
+down the order, each with its own cooldown, and a brain already cooling down is never retried in the same
+chain. The preference is not changed by failover: the HUD
 shows "Brain: Antigravity (for Codex)", the menu item reads "Antigravity — standing in for Codex", "which brain
 are you on" answers "I'm on Antigravity — Codex hit its limit, I'll try it again in 42 minutes.", and once the
 cooldown passes she returns to the preferred brain **silently** before the next turn (the label updates; the
@@ -254,7 +256,8 @@ search when the local Python's sqlite3 build has it, otherwise a plain substring
 - **Remember a fact** — "remember that I take my coffee black" / "remember I'm allergic to peanuts": stored as a
   fact and said back as "Got it." This is a local intent (matched before the brain runs), so it works even offline
   and doesn't cost a Claude turn. Say roughly the same thing again and the old wording is *replaced* rather than
-  kept twice — she says "Updated that." when that happened.
+  kept twice — she says "Updated — that replaces 'I take my coffee black'.", naming what went, because the match
+  is fuzzy enough to get it wrong ("March 8" over "March 3") and that has to be audible.
 - Every fact is filed under a kind — preference, person, place, routine or other — worked out from its wording when
   it is written (cue words, no model call). `facts_list` reads them back grouped under those headings.
 - **Forget a fact** — "forget that I take my coffee black" / "forget the peanut thing": removes any matching fact
@@ -444,7 +447,8 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
   "turn off nudges" / "stop the meeting nudges" turns them off.
 - **Quiet hours** — off by default; once switched on in Settings (default 22:00–08:00), anything that comes due inside
   the window waits instead of being dropped and is spoken when it ends, the first one prefixed "While you were away:"
-  if more than one waited. A nudge whose moment has passed by then (the meeting already happened) is dropped.
+  if more than one waited. A nudge whose moment has passed by then (the meeting already happened) is dropped, and
+  at most ten wait at once — past that she just adds "And 4 more I held back."
 - **Snooze** — "snooze notifications for an hour" / "mute nudges until 5" / "notifications rok do" holds
   announcements until then ("Okay, quiet until 5 pm."); "resume notifications" / "unsnooze" releases them. A snooze
   lasts an hour by default and doesn't survive a restart.

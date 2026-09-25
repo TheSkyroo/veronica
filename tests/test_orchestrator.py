@@ -1911,7 +1911,7 @@ class FakeStore:
         return self.remember(text)[0]
 
     def remember(self, text):
-        replaced = text in self.facts
+        replaced = text if text in self.facts else ""
         if not replaced:
             self.facts.append(text)
         return (self.facts.index(text) + 1, replaced)
@@ -2005,14 +2005,16 @@ async def test_forget_intent_no_match_says_didnt_have_that():
     assert "I didn't have that." in o.tts.said
 
 
-async def test_remember_intent_says_updated_when_it_replaced_a_fact():
+async def test_remember_intent_names_the_fact_it_replaced():
+    """The dedupe is fuzzy ("March 8" for "March 3"), so what it overwrote
+    is spoken — a wrong match has to be audible."""
     store = FakeStore()
     store.facts = ["I like tea"]
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["remember that I like tea"])
     o.store = store
     await o.one_turn()
     assert store.facts == ["I like tea"]
-    assert "Updated that." in o.tts.said
+    assert "Updated \u2014 that replaces 'I like tea'." in o.tts.said
 
 
 async def test_forget_topic_intent_deletes_by_topic_and_counts():

@@ -2085,12 +2085,14 @@ class Orchestrator:
                 self.player.reset()
                 if kind == "remember":
                     # A rewording of something she already has replaces it
-                    # (MemoryStore.remember); say which happened, so "no,
-                    # the OTHER thing" is obviously not what she heard.
-                    replaced = False
+                    # (MemoryStore.remember). The match is fuzzy, so say
+                    # what went: "March 8" quietly eating "March 3" is the
+                    # one failure the user can't otherwise hear.
+                    replaced = ""
                     if self.store is not None:
                         _id, replaced = self.store.remember(arg)
-                    await self.say("Updated that." if replaced else "Got it.")
+                    await self.say(
+                        f"Updated — that replaces '{replaced}'." if replaced else "Got it.")
                 elif kind == "forget_topic":
                     n = self.store.delete_facts_about(arg) if self.store is not None else 0
                     await self.say(

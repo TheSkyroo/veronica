@@ -134,6 +134,10 @@ def _stems(text: str) -> set[str]:
     return {w[:_STEM] for w in re.findall(r"\w+", (text or "").lower())}
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", (text or "").lower()))
+
+
 def _key_words(text: str) -> list[str]:
     """The words of a fact that could identify it in a spoken reply: the
     generic ones carry no signal."""
@@ -189,19 +193,34 @@ class MemoryStore:
         """Bring a pre-F5 `facts` table (ts, text) up to date in place: the
         kind is backfilled by running the same inference over the rows that
         are already there, and "last used" starts at the row's own
-        timestamp so an untouched memory still orders newest-first. Runs
-        inside _create_schema's transaction; no-op once both columns exist."""
+        timestamp so an untouched memory still orders newest-first. No-op
+        once both columns exist.
+
+        All of it in one transaction of its own: ALTER TABLE commits as it
+        goes, so a crash between adding `kind` and backfilling it would
+        leave every fact typed 'other' for good — the next open would see
+        the column and skip the work."""
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)")}
-        if "kind" not in have:
-            self._conn.execute("ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'other'")
-            rows = self._conn.execute("SELECT id, text FROM facts").fetchall()
-            self._conn.executemany(
-                "UPDATE facts SET kind = ? WHERE id = ?",
-                [(infer_kind(text), fact_id) for fact_id, text in rows],
-            )
-        if "last_used" not in have:
-            self._conn.execute("ALTER TABLE facts ADD COLUMN last_used TEXT NOT NULL DEFAULT ''")
-            self._conn.execute("UPDATE facts SET last_used = ts WHERE last_used = ''")
+        if "kind" in have and "last_used" in have:
+            return
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "kind" not in have:
+                self._conn.execute(
+                    "ALTER TABLE facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'other'")
+                rows = self._conn.execute("SELECT id, text FROM facts").fetchall()
+                self._conn.executemany(
+                    "UPDATE facts SET kind = ? WHERE id = ?",
+                    [(infer_kind(text), fact_id) for fact_id, text in rows],
+                )
+            if "last_used" not in have:
+                self._conn.execute(
+                    "ALTER TABLE facts ADD COLUMN last_used TEXT NOT NULL DEFAULT ''")
+                self._conn.execute("UPDATE facts SET last_used = ts WHERE last_used = ''")
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
 
     # -- turns --------------------------------------------------------------
     def add_turn(self, heard: str, reply: str) -> int:
@@ -309,19 +328,25 @@ class MemoryStore:
             return cur.rowcount
 
     # -- facts --------------------------------------------------------------
-    def remember(self, text: str) -> tuple[int, bool]:
-        """Store `text` as a fact and return (id, replaced). A near-duplicate
-        of a fact already there (ratio >= DUPLICATE_RATIO on the folded text)
-        is rewritten in place — same row, fresh wording, re-inferred kind —
+    def remember(self, text: str) -> tuple[int, str]:
+        """Store `text` as a fact and return (id, replaced): the exact text
+        that was overwritten, or "" for a new fact. A near-duplicate of a
+        fact already there (ratio >= DUPLICATE_RATIO on the folded text) is
+        rewritten in place — same row, fresh wording, re-inferred kind —
         rather than left as a second near-copy the facts block then pays for
-        twice."""
+        twice. The match is fuzzy and so can be wrong ("March 8" for
+        "March 3"), which is why the caller gets the old wording to say."""
         text = _normalize_ws(text)
         kind = infer_kind(text)
         now, used = _now(), _now_used()
         with self._lock, self._conn:
             fact_id = self._near_duplicate_id(text)
-            replaced = fact_id is not None
-            if replaced:
+            rewrite = fact_id is not None
+            replaced = ""
+            if rewrite:
+                row = self._conn.execute(
+                    "SELECT text FROM facts WHERE id = ?", (fact_id,)).fetchone()
+                replaced = row[0] if row else ""
                 self._conn.execute(
                     "UPDATE facts SET ts = ?, text = ?, kind = ?, last_used = ? WHERE id = ?",
                     (now, text, kind, used, fact_id),
@@ -333,7 +358,7 @@ class MemoryStore:
                 )
                 fact_id = cur.lastrowid
             if self.fts_enabled:
-                if replaced:
+                if rewrite:
                     self._conn.execute("DELETE FROM facts_fts WHERE rowid = ?", (fact_id,))
                 self._conn.execute(
                     "INSERT INTO facts_fts (rowid, text) VALUES (?, ?)", (fact_id, text)
@@ -412,20 +437,28 @@ class MemoryStore:
 
     def delete_facts_about(self, topic: str) -> int:
         """"Forget everything about X": delete every fact the topic turns up
-        in and return the count. Looser than delete_fact_matching on purpose
-        — one shared content word is enough — but it keeps the same
-        stopword guard, so "forget everything about it" deletes nothing."""
+        in and return the count. Looser than delete_fact_matching on purpose,
+        and it keeps the same stopword guard, so "forget everything about it"
+        deletes nothing.
+
+        A four-character stem is too loose to be the whole test: it makes
+        "insurance" sweep "insulin" and "work" sweep "workout". So a
+        one-word topic has to be a whole word of the fact, and a longer one
+        has to have *every* word in it (by stem, or as a phrase)."""
         folded = _fold(topic)
         words = [w for w in folded.split() if w not in FORGET_STOPWORDS]
         if not words:
             return 0
         wanted = {w[:_STEM] for w in words}
+
+        def hits(text: str) -> bool:
+            if len(words) == 1:
+                return words[0] in _words(text)
+            return folded in _fold(text) or wanted <= _stems(text)
+
         with self._lock:
             rows = self._conn.execute("SELECT id, text FROM facts").fetchall()
-            ids = [
-                fid for fid, text in rows
-                if folded in _fold(text) or (wanted & _stems(text))
-            ]
+            ids = [fid for fid, text in rows if hits(text)]
             if not ids:
                 return 0
             with self._conn:

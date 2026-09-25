@@ -18,12 +18,12 @@ class FakeStore:
         return self.remember(t)[0]
 
     def remember(self, t):
-        replaced = any(f[2] == t for f in self._facts)
-        if replaced:
-            return next(f[0] for f in self._facts if f[2] == t), True
+        hit = next((f for f in self._facts if f[2] == t), None)
+        if hit is not None:
+            return hit[0], hit[2]
         self._facts.append((self._next_id, "2026-09-16T00:00:00", t))
         self._next_id += 1
-        return self._next_id - 1, False
+        return self._next_id - 1, ""
 
     def facts(self):
         return list(self._facts)
@@ -145,8 +145,10 @@ async def test_facts_list_groups_by_kind():
     )
 
 
-async def test_fact_add_says_when_it_replaced_one():
+async def test_fact_add_says_what_it_replaced():
+    """The dedupe is fuzzy, so the brain has to be told what went, not just
+    that something did."""
     memory_tools.bind(FakeStore())
     await memory_tools.fact_add.handler({"text": "likes tea"})
     res = await memory_tools.fact_add.handler({"text": "likes tea"})
-    assert text(res) == "Updated: likes tea"
+    assert text(res) == "Updated: likes tea \u2014 that replaces 'likes tea'"

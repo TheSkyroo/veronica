@@ -173,7 +173,9 @@ async def run_shortcut(args: dict) -> dict:
     names, problem = await asyncio.to_thread(_installed_shortcuts)
     if names is None:
         return _err(f"couldn't read the shortcuts list: {problem}")
-    match = next((n for n in names if n.lower() == name.lower()), None)
+    # casefold(), matching policy._shortcut_allowed: with lower() on this
+    # side the gate could allow one shortcut and this could run another.
+    match = next((n for n in names if n.strip().casefold() == name.casefold()), None)
     if match is None:
         # Spoken back to the user, so it has to read as a sentence rather
         # than as the CLI's "Couldn't find shortcut".

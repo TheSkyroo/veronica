@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from veronica.brain import policy
 from veronica.tools import mac
 
 
@@ -235,6 +236,16 @@ async def test_run_shortcut_runs_an_installed_one(fake_shortcuts):
 async def test_run_shortcut_matches_the_installed_spelling(fake_shortcuts):
     await mac.run_shortcut.handler({"name": "  pay rent "})
     assert fake_shortcuts.calls[1][0] == ["shortcuts", "run", "Pay Rent"]
+
+
+async def test_run_shortcut_folds_case_the_way_the_gate_does(fake_shortcuts):
+    """The allowlist check in policy compares with casefold(); matching the
+    installed name with lower() lets the gate and the tool resolve two
+    different shortcuts."""
+    fake_shortcuts.state["installed"] = "Stra\u00dfe\n"
+    assert policy._shortcut_allowed("STRASSE", ["stra\u00dfe"])
+    await mac.run_shortcut.handler({"name": "STRASSE"})
+    assert fake_shortcuts.calls[1][0] == ["shortcuts", "run", "Stra\u00dfe"]
 
 
 async def test_run_shortcut_passes_input_through_a_temp_file(fake_shortcuts):

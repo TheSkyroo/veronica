@@ -87,7 +87,11 @@ async def fact_add(args: dict) -> dict:
     if not text:
         return _err("text is required")
     _id, replaced = await asyncio.to_thread(store.remember, text)
-    return _ok(f"{'Updated' if replaced else 'Remembered'}: {text}")
+    if replaced:
+        # The dedupe is fuzzy: name what it overwrote, so a wrong match comes
+        # back to the brain (and so to the user) instead of going unnoticed.
+        return _ok(f"Updated: {text} — that replaces {replaced!r}")
+    return _ok(f"Remembered: {text}")
 
 
 @tool("fact_delete", "Forget a previously remembered fact matching the given text", {"text": str})
