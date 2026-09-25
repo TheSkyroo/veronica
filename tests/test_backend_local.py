@@ -485,3 +485,19 @@ async def test_live_tool_turn(capsys):
             assert said
     finally:
         await brain.close()
+
+
+async def test_catch_all_tools_are_not_offered_to_the_local_model():
+    """A 3B model treats applescript / screen control as an escape hatch when
+    no tool fits, so the user gets a confirm out of nowhere. They're hidden."""
+    import veronica.brain.backends.local as local_mod
+
+    local_mod._tools = None
+    try:
+        schemas, index = await local_mod.tool_catalog()
+    finally:
+        local_mod._tools = None
+    names = {s["function"]["name"] for s in schemas}
+    assert "mcp__mac__applescript" not in names and "mcp__mac__applescript" not in index
+    assert not any(n.startswith("mcp__computer__") for n in names)
+    assert "mcp__mac__volume_get" in names        # ordinary tools still offered

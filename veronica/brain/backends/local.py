@@ -57,6 +57,15 @@ IDLE_SHUTDOWN_S = 600.0
 # Tool rounds per turn. Small models loop ("call it once more") far more
 # readily than the hosted ones, so this is a hard stop, not a budget.
 MAX_TOOL_ROUNDS = 4
+
+# A small local model reaches for the most general tool it can see when
+# nothing fits, which means an out-of-nowhere "Run AppleScript…?" confirm
+# for a question like "what's the battery at". These stay out of its
+# catalogue: every one is either a catch-all or needs judgement the bigger
+# brains have. Hiding them changes nothing about the gate — they are simply
+# not offered.
+HIDDEN_FROM_LOCAL = frozenset({"mcp__mac__applescript"})
+HIDDEN_SERVERS_FOR_LOCAL = frozenset({"computer"})
 # History budget. Rough on purpose: a token is ~3.5 characters of English,
 # and the system prompt, the 40-odd tool schemas and the reply need most of
 # the window, so history gets a share of what is left.
@@ -79,6 +88,8 @@ async def tool_catalog() -> tuple[list[dict], dict[str, tuple[object, str]]]:
         listed = await inst.get_request_handler("tools/list").handler(None, None)
         for t in listed.tools:
             full = f"mcp__{srv}__{t.name}"
+            if full in HIDDEN_FROM_LOCAL or srv in HIDDEN_SERVERS_FOR_LOCAL:
+                continue
             schemas.append({"type": "function", "function": {
                 "name": full,
                 "description": t.description or "",
