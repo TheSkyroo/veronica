@@ -105,6 +105,9 @@ def test_summarize_detail_pim_tools():
     assert summarize_detail("mcp__pim__mail_unread", {}) == "Read unread mail"
     assert summarize_detail("mcp__pim__mail_search", {"query": "invoice"}) == "Search mail: invoice"
     assert summarize_detail("mcp__pim__mail_send", {"to": "a@b.com"}) == "Send mail to a@b.com"
+    assert summarize_detail("mcp__pim__message_send", {"to": "Priya", "body": "on my way"}) == "Message Priya: on my way"
+    # long bodies are cut to the first 40 characters, so the confirm stays short
+    assert summarize_detail("mcp__pim__message_send", {"to": "Priya", "body": "x" * 60}) == "Message Priya: " + "x" * 40
     assert summarize_detail("mcp__pim__reminder_create", {"title": "Buy milk"}) == "Create reminder Buy milk"
     assert summarize_detail("mcp__pim__reminders_due", {}) == "Check reminders"
     assert summarize_detail("mcp__pim__timer_set", {"minutes": 5}) == "Set timer 5 min"
@@ -561,6 +564,7 @@ def test_summarize_mac_tools():
     assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
     assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
     assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__mac__run_shortcut", {"name": "Morning"}) == "Run the shortcut 'Morning'"
     assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
 
 
@@ -1287,6 +1291,7 @@ async def test_preapproval_not_applied_to_auto_tools_or_redirects(tmp_home):
 
 @pytest.mark.parametrize("tool,inp,front", [
     ("mcp__pim__mail_send", {"to": "a@b.c"}, _FINDER),
+    ("mcp__pim__message_send", {"to": "Priya", "body": "on my way"}, _FINDER),
     ("Bash", {"command": "rm -rf build"}, _FINDER),
     ("Bash", {"command": "git push --force"}, _FINDER),
     ("Bash", {"command": "shutdown -h now"}, _FINDER),

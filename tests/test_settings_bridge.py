@@ -213,7 +213,7 @@ def test_state_has_every_section_and_key(h):
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                                     "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                                     "unread_enabled", "unread_time"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
+    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",
@@ -970,3 +970,15 @@ def test_set_brain_failover_fields_are_live(h):
     assert h.bridge.set("brain", "copilot_native_tools", False)["ok"]
     assert h.orch.s.copilot_native_tools is False
     assert h.bridge.get_state()["brain"]["copilot_native_tools"] is False
+
+
+def test_shortcut_allowlist_is_editable_and_has_a_row(h):
+    # the list field takes a comma-separated string from the window
+    assert h.bridge.set("brain", "shortcut_allowlist", "Morning, Pay Rent")["ok"]
+    assert h.orch.s.shortcut_allowlist == ["Morning", "Pay Rent"]
+    assert ("shortcut_allowlist", ["Morning", "Pay Rent"]) in h.prefs.overrides
+    assert h.bridge.get_state()["brain"]["shortcut_allowlist"] == ["Morning", "Pay Rent"]
+    assert EDITABLE_SETTINGS["shortcut_allowlist"].kind == "list"
+    # ...and settings.js hand-lists a row for it, or the window can't reach it
+    js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
+    assert "settingRow('brain', 'shortcut_allowlist'" in js

@@ -296,6 +296,7 @@
       frag.push(settingRow('brain', 'brain_session_max_age_h'));
       frag.push(settingRow('brain', 'computer_trust_s'));
       frag.push(settingRow('brain', 'preapprove_by_wording'));
+      frag.push(settingRow('brain', 'shortcut_allowlist', {wide: true}));
       return frag;
     },
     history() {

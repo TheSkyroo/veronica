@@ -98,7 +98,7 @@ class ToolGate:
         if redirect is not None:
             log.info("tool redirected: %s -> %s", summary, redirect)
             return Decision(False, "redirect", redirect)
-        if classify(tool_name, input) == "allow":
+        if classify(tool_name, input, self.s.shortcut_allowlist) == "allow":
             log.info("auto-allow: %s", summary)
             self._card(summary, "auto")
             return Decision(True, "auto")

@@ -98,6 +98,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return "Copy to clipboard: " + str(input.get("text", ""))[:60]
         if short == "applescript":
             return "AppleScript: " + str(input.get("script", ""))[:60]
+        if short == "run_shortcut":
+            return f"Run the shortcut '{input.get('name', '')}'"
         return short
     if tool_name.startswith(PIM_PREFIX):
         short = tool_name[len(PIM_PREFIX):]
@@ -111,6 +113,8 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return f"Search mail: {input.get('query', '')}"
         if short == "mail_send":
             return f"Send mail to {input.get('to', '')}"
+        if short == "message_send":
+            return f"Message {input.get('to', '')}: " + str(input.get("body", ""))[:40]
         if short == "reminder_create":
             return f"Create reminder {input.get('title', '')}"
         if short == "reminders_due":

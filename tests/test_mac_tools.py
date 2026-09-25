@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import os
 import subprocess
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -194,7 +196,7 @@ def test_server_and_names():
     assert mac.mac_server["name"] == "mac"
     assert set(mac.MAC_TOOL_NAMES) == {
         "open_app", "open_url", "clipboard_read", "clipboard_write",
-        "notify", "volume_get", "volume_set", "applescript",
+        "notify", "volume_get", "volume_set", "applescript", "run_shortcut",
     }
 
 
@@ -202,3 +204,77 @@ def test_server_and_names():
 async def test_live_open_finder():
     res = await mac.open_app.handler({"name": "Finder"})
     assert not res.get("is_error")
+
+
+# -- run_shortcut ---------------------------------------------------------------
+
+@pytest.fixture
+def fake_shortcuts(monkeypatch):
+    """subprocess.run stubbed per `shortcuts` subcommand: `list` returns the
+    installed names, `run` succeeds. Returns the call log plus knobs."""
+    calls = []
+    state = {"installed": "Morning\nPay Rent\n", "list_rc": 0, "run_rc": 0, "run_err": ""}
+
+    def run(argv, **kw):
+        calls.append((argv, kw))
+        if argv[:2] == ["shortcuts", "list"]:
+            return Done(rc=state["list_rc"], out=state["installed"], err="shortcuts: no access")
+        return Done(rc=state["run_rc"], err=state["run_err"])
+
+    monkeypatch.setattr(mac.subprocess, "run", run)
+    return SimpleNamespace(calls=calls, state=state)
+
+
+async def test_run_shortcut_runs_an_installed_one(fake_shortcuts):
+    res = await mac.run_shortcut.handler({"name": "Morning"})
+    assert [c[0] for c in fake_shortcuts.calls] == [["shortcuts", "list"], ["shortcuts", "run", "Morning"]]
+    assert fake_shortcuts.calls[1][1]["timeout"] == mac.SHORTCUT_TIMEOUT_S
+    assert text(res) == "Ran Morning" and not res.get("is_error")
+
+
+async def test_run_shortcut_matches_the_installed_spelling(fake_shortcuts):
+    await mac.run_shortcut.handler({"name": "  pay rent "})
+    assert fake_shortcuts.calls[1][0] == ["shortcuts", "run", "Pay Rent"]
+
+
+async def test_run_shortcut_passes_input_through_a_temp_file(fake_shortcuts):
+    await mac.run_shortcut.handler({"name": "Morning", "input": "hello"})
+    argv = fake_shortcuts.calls[1][0]
+    assert argv[:3] == ["shortcuts", "run", "Morning"] and argv[3] == "--input-path"
+    path = argv[4]
+    assert not os.path.exists(path)          # cleaned up after the run
+
+
+async def test_run_shortcut_unknown_name_is_a_spoken_error(fake_shortcuts):
+    res = await mac.run_shortcut.handler({"name": "Nope"})
+    assert res["is_error"] and "no shortcut called 'Nope'" in text(res)
+    assert [c[0] for c in fake_shortcuts.calls] == [["shortcuts", "list"]]   # never ran
+
+
+async def test_run_shortcut_no_shortcuts_installed(fake_shortcuts):
+    fake_shortcuts.state["installed"] = ""
+    res = await mac.run_shortcut.handler({"name": "Morning"})
+    assert res["is_error"] and "no shortcut called" in text(res)
+
+
+async def test_run_shortcut_reports_a_broken_cli(fake_shortcuts):
+    fake_shortcuts.state["list_rc"] = 1
+    res = await mac.run_shortcut.handler({"name": "Morning"})
+    assert res["is_error"] and "couldn't read the shortcuts list" in text(res)
+
+
+async def test_run_shortcut_reports_a_failed_run(fake_shortcuts):
+    fake_shortcuts.state["run_rc"] = 1
+    fake_shortcuts.state["run_err"] = "Error: the shortcut failed"
+    res = await mac.run_shortcut.handler({"name": "Morning"})
+    assert res["is_error"] and "the shortcut failed" in text(res)
+
+
+async def test_run_shortcut_requires_a_name(fake_shortcuts):
+    res = await mac.run_shortcut.handler({"name": "  "})
+    assert res["is_error"] and fake_shortcuts.calls == []
+
+
+async def test_run_shortcut_rejects_a_flag_name(fake_shortcuts):
+    res = await mac.run_shortcut.handler({"name": "--help"})
+    assert res["is_error"] and fake_shortcuts.calls == []

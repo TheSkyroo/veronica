@@ -32,7 +32,7 @@ def fixture_state(**over) -> dict:
                       "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
         "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
-                  "preapprove_by_wording": True, "brain_backend": "codex", "brain_failover": True,
+                  "preapprove_by_wording": True, "shortcut_allowlist": [], "brain_backend": "codex", "brain_failover": True,
                   "brain_failover_order": "codex,antigravity,claude,copilot", "brain_limit_cooldown_min": 60,
                   "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
                   "brain_offline_fallback": True, "local_server_bin": "/opt/llama-server",

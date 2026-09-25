@@ -91,6 +91,34 @@ async def test_preapproval_never_for_always_confirm():
     assert d.kind == "approved" and len(calls) == 1
 
 
+async def test_allowlisted_shortcut_runs_without_asking():
+    g, calls, cards = make([], shortcut_allowlist=["Morning", "Pay Rent"])
+    d = await g.decide("mcp__mac__run_shortcut", {"name": "morning"})
+    assert d.allow and d.kind == "auto" and calls == []
+    assert cards[-1] == ("Run the shortcut 'morning'", "auto")
+
+
+async def test_unlisted_shortcut_asks():
+    g, calls, _ = make([True], shortcut_allowlist=["Morning"])
+    d = await g.decide("mcp__mac__run_shortcut", {"name": "Wipe Disk"})
+    assert d.allow and d.kind == "approved"
+    assert calls[0][0] == "Run the shortcut 'Wipe Disk'"
+
+
+async def test_shortcuts_ask_by_default():
+    g, calls, _ = make([True])
+    assert (await g.decide("mcp__mac__run_shortcut", {"name": "Morning"})).kind == "approved"
+    assert len(calls) == 1
+
+
+async def test_message_send_is_asked_even_when_preapproved():
+    now = [10.0]
+    g, calls, _ = make([True], now=now)
+    g.begin_turn(1); g.preapprove(1, until=30.0)
+    d = await g.decide("mcp__pim__message_send", {"to": "Priya", "body": "on my way"})
+    assert d.kind == "approved" and calls[0][0] == "Message Priya: on my way"
+
+
 # -- GateServer: the socket front for out-of-process callers ------------------
 import asyncio
 import json

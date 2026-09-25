@@ -42,6 +42,10 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "volume_get": "allow",
         "volume_set": "allow",
         "applescript": "confirm",
+        # A shortcut is arbitrary user-written automation, so it is
+        # confirm-class by default; `classify` upgrades it to "allow" only
+        # for the names the user put on the Settings allowlist.
+        "run_shortcut": "confirm",
     },
     "pim": {
         "calendar_events": "allow",
@@ -49,6 +53,9 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "mail_unread": "allow",
         "mail_search": "allow",
         "mail_send": "confirm",
+        # Listed for completeness; `always_confirm` below keeps it asked
+        # every time, whatever this says.
+        "message_send": "confirm",
         "reminder_create": "confirm",
         "reminders_due": "allow",
         # Append-only and harmless (a mistaken note is trivially deleted in
@@ -220,7 +227,17 @@ def _bash_is_safe(command: str) -> bool:
     return head in SAFE_BASH
 
 
-def classify(tool_name: str, tool_input: dict) -> Decision:
+def _shortcut_allowed(name: str, allowlist) -> bool:
+    """True iff `name` is one the user marked safe in Settings. Compared
+    case- and whitespace-insensitively, the way Shortcuts itself treats a
+    name; an empty allowlist (the default) allows nothing."""
+    wanted = str(name or "").strip().casefold()
+    if not wanted:
+        return False
+    return any(str(entry).strip().casefold() == wanted for entry in allowlist or ())
+
+
+def classify(tool_name: str, tool_input: dict, shortcut_allowlist=()) -> Decision:
     if tool_name in ALLOW_TOOLS:
         return "allow"
     if tool_name == "Bash":
@@ -228,6 +245,8 @@ def classify(tool_name: str, tool_input: dict) -> Decision:
     if tool_name.startswith("mcp__"):
         rest = tool_name[len("mcp__"):]
         server, _, short = rest.partition("__")
+        if server == "mac" and short == "run_shortcut":
+            return "allow" if _shortcut_allowed(tool_input.get("name", ""), shortcut_allowlist) else "confirm"
         risk_table = MCP_TOOL_RISK.get(server)
         if risk_table is not None:
             return risk_table.get(short, "confirm")
@@ -319,9 +338,15 @@ def _bash_always_confirms(command: str) -> bool:
     return False
 
 
+# Tools that put something in front of another person. Named here so the
+# rule is explicit, with the pattern below still catching future ones.
+SEND_TOOLS = frozenset({"mail_send", "message_send"})
+
+
 def _is_send_tool(server: str, short: str) -> bool:
-    """mail_send today; any future messages/mail send on any server."""
-    if short == "mail_send":
+    """mail_send and message_send today; any future messages/mail send on
+    any server."""
+    if short in SEND_TOOLS:
         return True
     return (short.endswith("_send") and "message" in short) or (server == "messages" and short == "send")
 

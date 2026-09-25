@@ -234,6 +234,23 @@ async def test_mail_send_requires_to(fake_run):
     assert res["is_error"] and fake_run == []
 
 
+# -- message_send ---------------------------------------------------------------
+
+async def test_message_send_argv_and_escaping(fake_run):
+    res = await pim.message_send.handler({"to": "+15551234567", "body": 'say "hi"'})
+    argv = argv_of(fake_run)
+    assert 'service whose service type = iMessage' in argv[2]
+    assert 'buddy "+15551234567"' in argv[2]
+    assert '\\"hi\\"' in argv[2]
+    assert not res.get("is_error") and "Sent to +15551234567" in text(res)
+
+
+async def test_message_send_requires_to_and_body(fake_run):
+    assert (await pim.message_send.handler({"to": "", "body": "b"}))["is_error"]
+    assert (await pim.message_send.handler({"to": "+1555", "body": ""}))["is_error"]
+    assert fake_run == []
+
+
 # -- reminder_create --------------------------------------------------------------
 
 async def test_reminder_create_no_when(fake_run):
@@ -457,7 +474,7 @@ def test_server_and_names():
     assert pim.pim_server["name"] == "pim"
     assert set(pim.PIM_TOOL_NAMES) == {
         "calendar_events", "calendar_create",
-        "mail_unread", "mail_search", "mail_send",
+        "mail_unread", "mail_search", "mail_send", "message_send",
         "reminder_create", "reminders_due",
         "notes_create",
         "timer_set", "timer_list", "timer_cancel",

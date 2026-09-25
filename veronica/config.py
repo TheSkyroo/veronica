@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     # ahead skips the yes/no for the ONE confirm-class action it produces
     # (never for always-confirm tools, see policy.always_confirm).
     preapprove_by_wording: bool = True
+    # Shortcuts the user has marked safe: `run_shortcut` runs these without
+    # asking. Everything else is confirm-class, so an empty list (the
+    # default) means every shortcut is asked about.
+    shortcut_allowlist: list[str] = Field(default_factory=list)
     # External brains: may the vendor CLI use its own shell/file tools
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.
@@ -275,6 +279,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "bool", 'Pre-approve when I say "do it"',
         "If your request already says do it / go ahead, skip the yes/no for that one action "
         "(never for sending mail, deleting, shutdown, or Enter).",
+        restart=False,
+    ),
+    "shortcut_allowlist": EditableField(
+        "list", "Shortcuts she may run without asking",
+        "Comma-separated shortcut names, exactly as they're named in Shortcuts. "
+        "Anything not listed still asks first.",
         restart=False,
     ),
     "brain_backend": EditableField(

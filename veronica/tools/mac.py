@@ -1,11 +1,16 @@
 """Typed macOS actions exposed to Claude as in-process MCP tools."""
 import asyncio
+import os
 import re
 import subprocess
+import tempfile
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 TIMEOUT_S = 10
+# A shortcut is a user-written program (it can wait on a network call or a
+# device), so it gets its own, far longer budget than the one-shot commands.
+SHORTCUT_TIMEOUT_S = 120
 
 
 def _ok(text: str = "ok") -> dict:
@@ -16,16 +21,17 @@ def _err(text: str) -> dict:
     return {"content": [{"type": "text", "text": f"error: {text}"}], "is_error": True}
 
 
-def run(argv: list[str], stdin: str | None = None, ok_text: str | None = None) -> dict:
+def run(argv: list[str], stdin: str | None = None, ok_text: str | None = None,
+        timeout: int = TIMEOUT_S) -> dict:
     """Run argv (never a shell string) and map the result to MCP content.
 
     On success, `ok_text` (if given) is returned verbatim instead of stdout —
     used by tools where stdout is not meaningful output (e.g. `open`).
     """
     try:
-        done = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=TIMEOUT_S)
+        done = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return _err(f"timed out after {TIMEOUT_S}s")
+        return _err(f"timed out after {timeout}s")
     except Exception as exc:  # e.g. FileNotFoundError
         return _err(str(exc))
     if done.returncode != 0:
@@ -137,6 +143,66 @@ async def applescript(args: dict) -> dict:
     return await asyncio.to_thread(run, ["osascript", "-e", str(args.get("script", ""))], None)
 
 
+# -- Shortcuts -----------------------------------------------------------------
+def _installed_shortcuts() -> tuple[list[str] | None, str]:
+    """(names, error): the shortcuts `shortcuts list` reports, or (None, msg)
+    when the CLI itself failed (missing binary, Shortcuts not set up). An
+    empty list is a real answer — none are installed."""
+    res = run(["shortcuts", "list"])
+    if res.get("is_error"):
+        return None, res["content"][0]["text"].removeprefix("error: ")
+    out = res["content"][0]["text"]
+    names = [ln.strip() for ln in out.split("\n") if ln.strip()]
+    # `run` turns empty stdout into "ok"; that means "no shortcuts", not one
+    # named "ok".
+    if names == ["ok"]:
+        names = []
+    return names, ""
+
+
+@tool("run_shortcut", "Run a Shortcuts.app shortcut by name, optionally with text input",
+      {"name": str, "input": str})
+@_guard
+async def run_shortcut(args: dict) -> dict:
+    name = str(args.get("name", "") or "").strip()
+    text_in = str(args.get("input", "") or "")
+    if not name:
+        return _err("name is required")
+    if name.startswith("-"):
+        return _err("shortcut name must not start with '-'")
+    names, problem = await asyncio.to_thread(_installed_shortcuts)
+    if names is None:
+        return _err(f"couldn't read the shortcuts list: {problem}")
+    match = next((n for n in names if n.lower() == name.lower()), None)
+    if match is None:
+        # Spoken back to the user, so it has to read as a sentence rather
+        # than as the CLI's "Couldn't find shortcut".
+        return _err(f"there's no shortcut called {name!r} on this Mac")
+    return await asyncio.to_thread(_run_shortcut, match, text_in)
+
+
+def _run_shortcut(name: str, text_in: str) -> dict:
+    """`shortcuts run` has no stdin: input is a file handed over with
+    --input-path, so text input goes through a temp file we clean up."""
+    argv = ["shortcuts", "run", name]
+    path = ""
+    try:
+        if text_in:
+            fd, path = tempfile.mkstemp(prefix="veronica-shortcut-", suffix=".txt")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text_in)
+            argv += ["--input-path", path]
+        # The CLI prints nothing on success (output needs --output-path), so
+        # the confirmation is ours.
+        return run(argv, None, ok_text=f"Ran {name}", timeout=SHORTCUT_TIMEOUT_S)
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def _keystroke_argv(text: str) -> list[str]:
     """Build the `osascript` argv that types `text` into the frontmost app
     via System Events (Accessibility permission required). Splits on
@@ -162,6 +228,7 @@ def dictate_type(text: str) -> dict:
     return run(_keystroke_argv(text))
 
 
-TOOLS = [open_app, open_url, clipboard_read, clipboard_write, notify, volume_get, volume_set, applescript]
+TOOLS = [open_app, open_url, clipboard_read, clipboard_write, notify, volume_get, volume_set,
+         applescript, run_shortcut]
 MAC_TOOL_NAMES = [t.name for t in TOOLS]
 mac_server = create_sdk_mcp_server(name="mac", version="1.0.0", tools=TOOLS)
