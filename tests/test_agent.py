@@ -181,7 +181,7 @@ def brain(tmp_home, monkeypatch):
 async def test_ask_yields_sentences_and_saves_session(brain, tmp_home):
     out = [s async for s in brain.ask("hi")]
     assert out == ["Hello there.", "How are you?"]
-    assert (tmp_home / "session").read_text() == "sess-1"
+    assert (tmp_home / "session").read_text().split("\n")[0] == "sess-1"
     assert FakeClient.instances[0].queries == ["hi"]
 
 
@@ -1332,3 +1332,46 @@ async def test_begin_turn_resets_confirm_count_but_not_the_preapproval(tmp_home)
     res = await t.brain._can_use_tool("Write", {"file_path": "/b"}, None)
     assert res.behavior == "allow" and t.asked == ["Write file /a"]
     assert t.tools == [("Write file /b", "preapproved")]
+
+
+def test_session_is_retired_once_it_is_too_old(tmp_home):
+    """A Claude session is replayed in full on every resume, so an old one
+    makes a cold turn slower than the brain timeout: it ages out."""
+    import time as _time
+    from veronica.brain.backends.claude import ClaudeBrain
+    from veronica.brain.gate import ToolGate
+    from veronica.config import Settings
+
+    async def confirm(summary, detail=""):
+        return True
+
+    s = Settings(brain_session_max_age_h=48)
+    b = ClaudeBrain(s, gate=ToolGate(s, confirm))
+    b._save_session("sid-1")
+    assert b._load_session() == "sid-1"
+    # saving the same id again keeps the original start time
+    b._save_session("sid-1")
+    assert b._load_session() == "sid-1"
+    s.session_file.write_text(f"sid-1\n{_time.time() - 49 * 3600:.0f}")
+    assert b._load_session() is None
+    assert not s.session_file.exists()
+    # 0 disables retirement
+    s.brain_session_max_age_h = 0
+    s.session_file.write_text(f"sid-2\n{_time.time() - 500 * 3600:.0f}")
+    assert b._load_session() == "sid-2"
+
+
+def test_session_file_in_the_old_plain_format_is_dated_not_dropped(tmp_home):
+    from veronica.brain.backends.claude import ClaudeBrain
+    from veronica.brain.gate import ToolGate
+    from veronica.config import Settings
+
+    async def confirm(summary, detail=""):
+        return True
+
+    s = Settings()
+    b = ClaudeBrain(s, gate=ToolGate(s, confirm))
+    s.session_file.parent.mkdir(parents=True, exist_ok=True)
+    s.session_file.write_text("legacy-sid")
+    assert b._load_session() == "legacy-sid"
+    assert "\n" in s.session_file.read_text()     # now dated

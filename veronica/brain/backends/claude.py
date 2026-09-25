@@ -92,12 +92,46 @@ class ClaudeBrain:
 
     # -- session persistence --------------------------------------------------
     def _load_session(self) -> str | None:
+        """The session to resume, or None to start a fresh one. A session
+        that has been resumed for days grows without bound (the CLI replays
+        the whole transcript on resume), and a cold resume of a big one can
+        outlast brain_timeout_s — so one is retired once it reaches
+        brain_session_max_age_h. The file is `<id>` (old format) or
+        `<id>\n<unix seconds when it was started>`."""
         f = self.s.session_file
-        return f.read_text().strip() or None if f.exists() else None
+        if not f.exists():
+            return None
+        parts = f.read_text().split("\n")
+        sid = parts[0].strip()
+        if not sid:
+            return None
+        try:
+            started = float(parts[1]) if len(parts) > 1 and parts[1].strip() else None
+        except ValueError:
+            started = None
+        if started is None:
+            # written before sessions were dated: date it from now, so it
+            # still ages out — one extra long-lived session at most.
+            self._save_session(sid)
+            return sid
+        max_age_s = self.s.brain_session_max_age_h * 3600
+        if max_age_s > 0 and time.time() - started > max_age_s:
+            log.info("retiring Claude session %s (older than %sh)", sid, self.s.brain_session_max_age_h)
+            self._clear_session()
+            return None
+        return sid
 
     def _save_session(self, sid: str) -> None:
         self.s.session_file.parent.mkdir(parents=True, exist_ok=True)
-        self.s.session_file.write_text(sid)
+        started = time.time()
+        if self.s.session_file.exists():
+            old = self.s.session_file.read_text().split("\n")
+            if old and old[0].strip() == sid and len(old) > 1 and old[1].strip():
+                try:
+                    started = float(old[1])   # same session: keep its start
+                except ValueError:
+                    pass
+        self.s.session_file.write_text(f"{sid}\n{started:.0f}")
 
     def _clear_session(self) -> None:
         if self.s.session_file.exists():

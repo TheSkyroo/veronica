@@ -278,6 +278,7 @@
       frag.push(settingRow('brain', 'effort'));
       frag.push(settingRow('brain', 'memory_enabled'));
       frag.push(settingRow('brain', 'brain_cwd', {wide: true}));
+      frag.push(settingRow('brain', 'brain_session_max_age_h'));
       frag.push(settingRow('brain', 'computer_trust_s'));
       frag.push(settingRow('brain', 'preapprove_by_wording'));
       return frag;
