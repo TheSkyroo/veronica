@@ -14,7 +14,7 @@ local model in when the probe in `veronica.net` says the wire is dead, and
 `maybe_return` goes back — silently — when it is alive again."""
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from veronica import net, prefs
 from veronica.brain.backends import BACKENDS, Availability, check_backend, make_brain
@@ -86,7 +86,7 @@ class BrainSwitcher:
         clock: Callable[[], float] = time.monotonic,
         say: Callable[[str], object] | None = None,
         on_backend: Callable[[str, bool], None] | None = None,
-        is_online: Callable[[str], bool] | None = None,
+        is_online: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.s = settings
         self.gate = gate
@@ -126,6 +126,13 @@ class BrainSwitcher:
                 out.append(n)
         return out
 
+    def _candidates(self) -> list[str]:
+        """`_order()` without the local model. Standing in for a brain that
+        isn't logged in, or moving off one that hit its usage limit, must
+        never drop the user onto the 3B model: that is `maybe_offline`'s
+        job alone, and `switch("local")` is still there for asking."""
+        return [n for n in self._order() if n != LOCAL]
+
     def _cooling(self, name: str) -> bool:
         return self.limited_until.get(name, 0.0) > self._clock()
 
@@ -152,8 +159,8 @@ class BrainSwitcher:
     async def _stand_in(self, why: str, *, announce: bool) -> None:
         """Preferred is unavailable for `why`: activate the first available
         alternative (or NoBrain) and schedule the next availability check."""
-        for n in self._order()[1:]:
-            if self._check(n).ok:
+        for n in self._candidates():
+            if n != self.preferred and self._check(n).ok:
                 await self._activate(n)
                 if announce:
                     # why is "not installed" / "not logged in" -> "isn't installed"
@@ -220,7 +227,7 @@ class BrainSwitcher:
             return None
         log.warning("brain: %s usage limit: %s", current, reason)
         self.limited_until[current] = self._clock() + self.s.brain_limit_cooldown_min * 60
-        for n in self._order():
+        for n in self._candidates():
             if n == current or self._cooling(n) or not self._check(n).ok:
                 continue
             await self._speak(f"{label} hit its usage limit — switching to {_label(n)}.")
@@ -240,7 +247,7 @@ class BrainSwitcher:
         now = self._clock()
         if self._standin_reason == "offline":
             # net.online is itself cached, so this costs nothing most turns.
-            if not self._is_online(self.preferred):
+            if not await self._is_online(self.preferred):
                 return
         elif self._standin_reason == "limit":
             if self._cooling(self.preferred):
@@ -270,7 +277,7 @@ class BrainSwitcher:
         current = self.brain.name
         if current == LOCAL or current not in BACKENDS:
             return
-        if self._is_online(current):
+        if await self._is_online(current):
             return
         if not self._check(LOCAL).ok:
             log.warning("brain: offline and the local model isn't set up")
@@ -284,7 +291,7 @@ class BrainSwitcher:
     def online_candidate(self) -> str | None:
         """The first ready brain that isn't the local one — what "go online"
         goes back to."""
-        for n in self._order():
-            if n != LOCAL and self._check(n).ok:
+        for n in self._candidates():
+            if self._check(n).ok:
                 return n
         return None

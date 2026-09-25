@@ -346,7 +346,10 @@ async def test_clock_is_reachable_for_which_brain_wording(tmp_path, monkeypatch)
 
 def wire_up(sw, wire):
     """Point the switcher's reachability probe at a dict the test flips."""
-    sw._is_online = lambda name: wire["up"]
+    async def probe(name):
+        return wire["up"]
+
+    sw._is_online = probe
 
 
 async def test_no_internet_stands_the_local_model_in(tmp_path, monkeypatch):
@@ -409,6 +412,33 @@ async def test_a_manual_local_preference_is_left_alone(tmp_path, monkeypatch):
     await sw.start()
     await sw.maybe_offline()
     assert sw.brain.name == "local" and sw.standing_in is False and said == []
+
+
+async def test_a_start_stand_in_never_drops_onto_the_local_model(tmp_path, monkeypatch):
+    """The local model is for a dead wire only. A vendor brain that isn't
+    logged in yet must not quietly put the 3B model in its place."""
+    sw, said, *_ = make_switcher(
+        tmp_path, monkeypatch, {n: "not logged in" for n in LABELS if n != "local"})
+    await sw.start()
+    assert sw.brain.name == "none" and said == [NO_BRAIN_LINE]
+
+
+async def test_failover_never_lands_on_the_local_model(tmp_path, monkeypatch):
+    """A usage limit on a fully online session is not a reason to go local."""
+    sw, said, *_ = make_switcher(
+        tmp_path, monkeypatch,
+        {n: "not installed" for n in ("antigravity", "claude", "copilot")},
+        limits=("codex",))
+    await sw.start()
+    assert await sw.failover("usage limit") is None
+    assert sw.brain.name == "codex"
+    assert said == ["Codex hit its usage limit and no other brain is ready."]
+
+
+async def test_local_is_still_reachable_by_asking_for_it(tmp_path, monkeypatch):
+    sw, *_ = make_switcher(tmp_path, monkeypatch, {})
+    assert (await sw.switch("local")).ok
+    assert sw.brain.name == "local" and sw.preferred == "local"
 
 
 async def test_online_candidate_skips_the_local_model(tmp_path, monkeypatch):

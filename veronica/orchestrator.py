@@ -74,6 +74,15 @@ def _count_word(n: int) -> str:
     return _COUNT_WORDS[n] if 0 <= n < len(_COUNT_WORDS) else str(n)
 
 
+def _cancel_or_reap(fut: asyncio.Future) -> None:
+    """Cancel a not-yet-done synth future; for one that already completed
+    (possibly with an exception) before we got to it, retrieve the result
+    instead so asyncio doesn't complain about an exception nobody read."""
+    if not fut.cancel():
+        with contextlib.suppress(BaseException):
+            fut.exception()
+
+
 @dataclass(frozen=True)
 class ConfirmResult:
     """What confirm() heard: "approved" (a yes), "denied" (a no, or
@@ -702,7 +711,6 @@ class Orchestrator:
         self._drop_paused_tail("a new turn started")
         self._turn_id += 1
         getattr(self.brain, "begin_turn", lambda _tid: None)(self._turn_id)
-        self._plan_reset()
         t0 = time.monotonic()
         spoken: list[str] = []
         first = True
@@ -739,25 +747,18 @@ class Orchestrator:
             finally:
                 await queue.put(None)
 
-        def _cancel_or_reap(fut: asyncio.Future) -> None:
-            # Cancel a not-yet-done synth future; for one that already
-            # completed (possibly with an exception) before we got to it,
-            # retrieve the result instead so asyncio doesn't complain about
-            # an exception that was never retrieved.
-            if not fut.cancel():
-                with contextlib.suppress(BaseException):
-                    fut.exception()
-
         def _drain(q: asyncio.Queue, keep: list | None = None) -> None:
             # `keep` is the pause tail: with one, queued sentences are moved
-            # into it (futures left running) instead of being cancelled.
+            # into it (futures left running) instead of being cancelled. A
+            # future that is already dead is never parked — "continue" would
+            # only trip over it.
             while True:
                 try:
                     item = q.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 if item is not None:
-                    if keep is None:
+                    if keep is None or item[1].cancelled():
                         _cancel_or_reap(item[1])
                     else:
                         keep.append(item)
@@ -779,6 +780,7 @@ class Orchestrator:
             if self.s.ack_after_s > 0 else None
         )
         try:
+            self._plan_reset()
             while True:
                 item = await queue.get()
                 try:
@@ -786,7 +788,11 @@ class Orchestrator:
                         break
                     sent, fut = item
                     unspoken = item
-                    samples, sr = await fut
+                    # Shielded: a barge landing in here cancels this turn,
+                    # and the synth has to survive that — it is exactly the
+                    # sentence "continue" would speak. The finally below
+                    # cancels it when nothing is going to.
+                    samples, sr = await asyncio.shield(fut)
                     if first:
                         first = False
                         self._set("speaking")
@@ -834,8 +840,13 @@ class Orchestrator:
             # so "continue" can pick up exactly there. Anything other than
             # "continue" drops the lot — see _drop_paused_tail.
             tail: list | None = [] if self._barged else None
-            if tail is not None and unspoken is not None:
-                tail.append(unspoken)
+            if unspoken is not None:
+                if tail is not None and not unspoken[1].cancelled():
+                    tail.append(unspoken)
+                else:
+                    # Nobody will await it: shield() kept it alive past the
+                    # cancellation, so stop it here rather than orphan it.
+                    _cancel_or_reap(unspoken[1])
             prod.cancel()
             # Drain BEFORE awaiting prod: if the queue was full, the
             # producer's own `finally: await queue.put(None)` would block
@@ -922,13 +933,22 @@ class Orchestrator:
             while rest:
                 sent, fut = rest[0]
                 try:
-                    samples, sr = await fut
+                    samples, sr = await asyncio.shield(fut)
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise     # a barge is tearing this resume down
+                    # The parked synth died with the turn that started it.
+                    # One lost sentence is not worth taking the listening
+                    # loop down for, so skip it like any other failure.
+                    log.warning("parked synthesis was cancelled for %r", sent)
+                    rest.pop(0)
+                    continue
                 except Exception:
                     log.exception("parked synthesis failed for %r", sent)
                     rest.pop(0)
                     continue
                 if self.muted:
-                    rest.clear()
                     break
                 async with self._speech_lock:
                     self._emit("voice", {"step_ms": 50, "levels": envelope(samples, sr)})
@@ -943,6 +963,11 @@ class Orchestrator:
             if self._barged and rest:
                 self._paused_tail = rest
                 log.info("barge parked %d unspoken sentence(s)", len(rest))
+            else:
+                # Muted part way through, or the resume ended some other
+                # way: these futures have no reader left.
+                for _sent, fut in rest:
+                    _cancel_or_reap(fut)
 
     async def _brain_turn(self, text: str, images: list[bytes] = (), *, lang: str | None = None) -> list[str]:
         """handle_text plus the confirm redirect: if a confirmation in this

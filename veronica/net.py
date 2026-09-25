@@ -5,6 +5,7 @@ Deliberately not an HTTP request: a connect (DNS + SYN) is enough to tell
 "the Wi-Fi is off / the cafe portal ate it" from "we're online", and it
 fails fast. A captive portal that answers the SYN looks online here — the
 brain's own error then handles it, as before."""
+import asyncio
 import logging
 import socket
 import time
@@ -37,7 +38,7 @@ def _connect(host: str, timeout: float) -> bool:
         return False
 
 
-def online(
+async def online(
     host: str | None = None,
     *,
     timeout: float = 1.5,
@@ -45,13 +46,18 @@ def online(
     clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """True if `host` (default: OpenAI's, see VENDOR_HOSTS) accepts a TCP
-    connection within `timeout`. Cached per host for CACHE_S seconds."""
+    connection within `timeout`. Cached per host for CACHE_S seconds.
+
+    The connect runs on a worker thread: it is asked once a turn, it costs
+    the full timeout when the wire is dead, and `timeout` doesn't bound
+    getaddrinfo anyway — on the loop it would stall the audio, the HUD and
+    the barge listener right along with it."""
     host = host or DEFAULT_HOST
     now = clock()
     hit = _cache.get(host)
     if hit is not None and now - hit[0] < CACHE_S:
         return hit[1]
-    result = connect(host, timeout)
+    result = await asyncio.to_thread(connect, host, timeout)
     _cache[host] = (now, result)
     return result
 

@@ -4871,6 +4871,55 @@ async def test_pause_phrase_with_nothing_parked_is_a_normal_request():
     assert o.brain.asked == ["wait"]
 
 
+class SlowSecondTTS(IndexedTTS):
+    """"Two." takes a moment to synthesise, so a barge can land while the
+    consumer is sitting in `await fut` — the window the parked tail is
+    actually taken from on a real machine."""
+    async def asynth(self, text, lang=None):
+        if text == "Two.":
+            await asyncio.sleep(0.02)
+        return await super().asynth(text, lang)
+
+
+def build_slow_pause(stt_texts, captures):
+    """build_pause, but with playback instant and the second synthesis slow:
+    the barge lands on the unfinished synth rather than mid-playback."""
+    o, states = build_pause(stt_texts, captures=captures)
+    o.tts = SlowSecondTTS()
+    o.player = HeardPlayer(o.tts, dur=0)
+    return o, states
+
+
+async def test_a_pause_never_parks_a_cancelled_synth():
+    o, _ = build_slow_pause(["do the thing", "hold on"], captures=2)
+    await o.one_turn()
+    assert [s for s, _ in o._paused_tail] == ["Two.", "Three."]
+    assert not any(fut.cancelled() for _s, fut in o._paused_tail)
+
+
+async def test_continue_survives_a_barge_that_landed_on_an_unfinished_synth():
+    o, _ = build_slow_pause(["do the thing", "hold on", "continue"], captures=3)
+    await o.one_turn()
+    assert o.player.heard == ["One.", "Two.", "Three."]
+    assert o._paused_tail is None
+    assert sorted(o.tts.said) == ["One.", "Three.", "Two."]   # no re-synthesis
+
+
+async def test_resume_skips_a_parked_synth_that_came_back_cancelled():
+    """Belt and braces for the same thing: whatever put a dead future in the
+    tail, speaking the rest must not take the listening loop down."""
+    o, _ = build()
+    o.tts = IndexedTTS()
+    o.player = HeardPlayer(o.tts, dur=0)
+    dead = asyncio.ensure_future(asyncio.sleep(1))
+    dead.cancel()
+    await asyncio.sleep(0)
+    good = asyncio.ensure_future(o.tts.asynth("Three."))
+    await o._resume_tail([("Two.", dead), ("Three.", good)])
+    assert o.player.heard == ["Three."]
+    assert o._paused_tail is None
+
+
 # -- the acknowledgement -------------------------------------------------------
 
 class SlowFirstBrain:
@@ -5056,3 +5105,18 @@ async def test_plan_finishes_running_steps_when_the_turn_is_cancelled():
     with contextlib.suppress(asyncio.CancelledError):
         await turn
     assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "done")]
+
+
+async def test_a_turn_that_never_gets_going_leaves_no_plan_latched():
+    """If anything between the reset and the turn's own try/finally raises,
+    `_plan_turn` must not stay True — every later local card would be
+    folded into a plan that is long over."""
+    o, ev = build_plan([READ_A])
+
+    class DeadPlayer(Player):
+        def reset(self): raise RuntimeError("audio device vanished")
+
+    o.player = DeadPlayer()
+    with pytest.raises(RuntimeError):
+        await o.handle_text("read it")
+    assert o._plan_turn is False
