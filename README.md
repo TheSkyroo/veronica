@@ -411,6 +411,16 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 - **Meeting nudges** — "warn me 10 minutes before my meetings" / "remind me before my meetings" / "turn on nudges"
   announces "Heads up, <event> starts in 10 minutes." before each timed calendar event (1–60 minutes, default 5);
   "turn off nudges" / "stop the meeting nudges" turns them off.
+- **Quiet hours** — off by default; once switched on in Settings (default 22:00–08:00), anything that comes due inside
+  the window waits instead of being dropped and is spoken when it ends, the first one prefixed "While you were away:"
+  if more than one waited. A nudge whose moment has passed by then (the meeting already happened) is dropped.
+- **Snooze** — "snooze notifications for an hour" / "mute nudges until 5" / "notifications rok do" holds
+  announcements until then ("Okay, quiet until 5 pm."); "resume notifications" / "unsnooze" releases them. A snooze
+  lasts an hour by default and doesn't survive a restart.
+- **Low battery** — off by default: below 15% on battery she says "Battery's at 12 percent.", once per discharge
+  (plugging in arms it again).
+- **Unread mail** — off by default: "You have 7 unread since this morning." once a day at the hour set in Settings
+  (default 11:00), silent when the inbox is clear.
 
 Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
 fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.

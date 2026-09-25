@@ -423,8 +423,14 @@ def match_voice_intent(text: str) -> VoiceAction | None:
 # morning at 8", "stop the morning briefing", "warn me 10 minutes before my
 # meetings", "turn off nudges". Carries a payload (the briefing time as
 # "HH:MM", or the nudge lead in minutes) so it has its own function.
+# "snooze notifications for an hour" / "mute nudges until 5" / "resume
+# notifications" ride along here too (F4): the payload is the snooze length
+# in minutes, or an "HH:MM" it runs until — with a trailing "?" when the
+# hour was spoken without am/pm, so the orchestrator takes the next one
+# either way round.
 ProactiveAction = tuple[
-    Literal["brief_now", "briefing_on", "briefing_off", "nudges_on", "nudges_off"], str | int | None
+    Literal["brief_now", "briefing_on", "briefing_off", "nudges_on", "nudges_off", "snooze", "resume"],
+    str | int | None,
 ]
 
 _BRIEF_NOW_PHRASES = frozenset({
@@ -477,6 +483,80 @@ def parse_clock_time(s: str) -> str | None:
     return f"{h:02d}:{mm:02d}"
 
 
+# Snooze: "for"/"until" carries either a length or a clock time; the
+# Hinglish form puts it up front ("ek ghante ke liye notifications band karo").
+_NOTIFICATIONS = r"(?:notifications?|nudges?|announcements?|alerts?)"
+_SNOOZE_RE = re.compile(
+    rf"^(?:snooze|mute|pause|silence)\s+(?:the |my )?{_NOTIFICATIONS}"
+    r"(?:\s+(?:for|until|till)\s+(.+))?$"
+)
+_SNOOZE_BARE_RE = re.compile(r"^(?:snooze|mute|pause|silence)\s+(?:for|until|till)\s+(.+)$")
+_SNOOZE_HI_RE = re.compile(
+    rf"^(?:(.+?)\s+(?:ke liye|tak)\s+)?{_NOTIFICATIONS}\s+(?:band karo|band kar do|rok do|chup karo)$"
+)
+_RESUME_RE = re.compile(
+    rf"^(?:unsnooze|unpause|(?:resume|restart|turn on)\s+(?:the |my )?{_NOTIFICATIONS}"
+    rf"|turn\s+(?:the |my )?{_NOTIFICATIONS}\s+back on"
+    rf"|{_NOTIFICATIONS}\s+(?:shuru karo|chalu karo|wapas chalu karo))$"
+)
+_HALF_HOUR = frozenset({"half an hour", "half hour", "aadha ghanta", "aadhe ghante", "adha ghanta"})
+_DURATION_WORDS = {"a": 1, "an": 1, "one": 1, "ek": 1, "two": 2, "do": 2, "three": 3, "teen": 3,
+                   "four": 4, "char": 4, "five": 5, "paanch": 5}
+_DURATION_RE = re.compile(r"^(\d{1,3}|[a-z]+)\s*(hours?|hrs?|ghante|ghanta|minutes?|mins?)$")
+
+
+def parse_duration_minutes(s: str) -> int | None:
+    """"an hour" / "30 minutes" / "ek ghante" / "half an hour" -> minutes,
+    or None if it isn't a length of time (up to 12 hours)."""
+    s = (s or "").strip().lower()
+    if s in _HALF_HOUR:
+        return 30
+    m = _DURATION_RE.match(s)
+    if not m:
+        return None
+    n = int(m[1]) if m[1].isdigit() else _DURATION_WORDS.get(m[1])
+    if not n:
+        return None
+    minutes = n * 60 if m[2].startswith(("hour", "hr", "ghant")) else n
+    return minutes if 1 <= minutes <= 720 else None
+
+
+def _snooze_payload(rest: str | None) -> int | str | None | Literal[False]:
+    """The "for …"/"until …" tail -> minutes, an "HH:MM"("?"), or None for a
+    bare snooze; False when it parsed as neither (leave it to the brain)."""
+    if rest is None:
+        return None
+    rest = rest.strip()
+    minutes = parse_duration_minutes(rest)
+    if minutes is not None:
+        return minutes
+    clock = parse_clock_time(rest)
+    if clock is None:
+        return False
+    if int(clock[:2]) < 12 and rest not in ("noon", "midnight") and not re.search(r"\b[ap]m\b", rest):
+        return clock + "?"
+    return clock
+
+
+def _match_snooze_candidate(candidate: str) -> ProactiveAction | None:
+    if _RESUME_RE.match(candidate):
+        return ("resume", None)
+    m = _SNOOZE_RE.match(candidate) or _SNOOZE_BARE_RE.match(candidate)
+    if m:
+        payload = _snooze_payload(m.group(1))
+        return None if payload is False else ("snooze", payload)
+    m = _SNOOZE_HI_RE.match(candidate)
+    if m:
+        when = (m.group(1) or "").strip()
+        if when.endswith("baje"):          # "5 baje tak" — a clock time, not a length
+            when = when[: -len("baje")].strip()
+            clock = parse_clock_time(when)
+            return ("snooze", clock + "?" if clock and int(clock[:2]) < 12 else clock) if clock else None
+        payload = _snooze_payload(when or None)
+        return None if payload is False else ("snooze", payload)
+    return None
+
+
 def _match_proactive_candidate(candidate: str) -> ProactiveAction | None:
     if candidate in _BRIEF_NOW_PHRASES:
         return ("brief_now", None)
@@ -496,7 +576,7 @@ def _match_proactive_candidate(candidate: str) -> ProactiveAction | None:
         if "before" not in candidate and "nudges" not in candidate:
             return None
         return ("nudges_on", int(m.group(1)) if m.group(1) else None)
-    return None
+    return _match_snooze_candidate(candidate)
 
 
 def match_proactive_intent(text: str) -> ProactiveAction | None:

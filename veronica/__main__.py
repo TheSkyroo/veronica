@@ -17,7 +17,7 @@ from veronica.orchestrator import ConfirmResult, Orchestrator
 from veronica.speech import voices
 from veronica.speech.stt import Transcriber, stt_spec
 from veronica.speech.tts import Synthesizer
-from veronica.tools import memory_tools, pim
+from veronica.tools import mac as mac_tools, memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
@@ -124,6 +124,10 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     async def _rem(days: int) -> str:
         return _text_or_raise(await pim.reminders_due.handler({"days": days}))
 
+    async def _battery() -> tuple[int | None, str | None]:
+        # pmset shells out: off the loop, like the battery quick reply.
+        return await asyncio.to_thread(mac_tools.read_battery)
+
     pro = None
     if audio:
         # holder["orch"] is set right after construction, and announce() is
@@ -132,7 +136,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         pro = proactive.Proactive(
             proactive.Schedule.from_prefs(saved.get("proactive", {})),
             announce=lambda t, expires_at=None: holder["orch"].announce(t, expires_at=expires_at),
-            calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem,
+            calendar_events=_cal, mail_unread_count=_mail_count, reminders_due=_rem, battery=_battery,
         )
     guard = None
     if audio:

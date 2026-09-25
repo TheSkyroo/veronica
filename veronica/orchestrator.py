@@ -1410,6 +1410,19 @@ class Orchestrator:
             # _brief_now_turn), so a long briefing can be cut off.
             await self._brief_now_turn()
             return
+        if kind in ("snooze", "resume"):
+            # A snooze only holds announcements (the ticker keeps running and
+            # queues them), so it never touches the saved schedule.
+            if kind == "resume":
+                self.proactive.hold_until = None
+                reply = "Okay, notifications back on."
+            else:
+                until = proactive_mod.resolve_hold_until(dt.datetime.now(), 60 if arg is None else arg)
+                self.proactive.hold_until = until
+                reply = f"Okay, quiet until {self._time_spoken(until.strftime('%H:%M'))}."
+            self._emit("tool", {"summary": f"{kind.capitalize()} notifications", "decision": "auto"})
+            await self.say(reply)
+            return
         if kind == "briefing_on":
             sched.briefing_enabled = True
             if isinstance(arg, str):

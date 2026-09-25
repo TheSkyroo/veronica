@@ -3102,6 +3102,7 @@ from veronica import proactive as pr_mod
 class FakeProactive:
     def __init__(self):
         self.schedule = pr_mod.Schedule()
+        self.hold_until = None
         self.started = 0
     async def start(self): self.started += 1
     def stop(self): pass
@@ -3227,6 +3228,29 @@ async def test_nudges_on_out_of_range_minutes_keeps_stored(monkeypatch):
     await o.one_turn()
     assert p.schedule.nudges_enabled and p.schedule.nudge_minutes == 7
     assert o.tts.said[-1] == "Okay, I'll warn you 7 minutes before each event."
+
+
+async def test_snooze_sets_hold_until_and_confirms(monkeypatch):
+    import datetime as dt
+
+    o, p, saved, ev = build_pro(["snooze notifications for an hour"], monkeypatch)
+    before = dt.datetime.now()
+    await o.one_turn()
+    assert 59 <= (p.hold_until - before).total_seconds() / 60 <= 61
+    assert o.tts.said[-1].startswith("Okay, quiet until ")
+    assert ("tool", {"summary": "Snooze notifications", "decision": "auto"}) in ev
+    assert saved == []                                  # a snooze isn't part of the schedule
+
+
+async def test_snooze_until_a_clock_time_and_resume(monkeypatch):
+    o, p, _, _ = build_pro(["mute nudges until 5 pm"], monkeypatch)
+    await o.one_turn()
+    assert p.hold_until.hour == 17 and p.hold_until.minute == 0
+    assert o.tts.said[-1] == "Okay, quiet until 5 pm."
+
+    o.stt = STT(["resume notifications"]); o.recorder = Rec([np.zeros(1, np.int16), None])
+    await o.one_turn()
+    assert p.hold_until is None and o.tts.said[-1] == "Okay, notifications back on."
 
 
 async def test_proactive_intent_without_proactive_says_unavailable(monkeypatch):

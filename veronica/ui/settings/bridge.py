@@ -61,7 +61,10 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
               "brain_offline_fallback", "local_server_bin", "local_model", "local_ctx", "local_port"),
 }
 HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
-BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes")
+BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
+                 "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
+                 "unread_enabled", "unread_time")
+BRIEFING_TIME_KEYS = ("briefing_time", "quiet_from", "quiet_to", "unread_time")
 
 
 def _inline(fn: Callable[[], None]) -> None:
@@ -418,16 +421,16 @@ class SettingsBridge:
         sched = getattr(pro, "schedule", None) if pro is not None else None
         if sched is None:
             return _fail("Briefings aren't available right now.")
-        if key == "briefing_time":
+        if key in BRIEFING_TIME_KEYS:
             text = str(value or "").strip()
             if not proactive._TIME_RE.match(text):
                 return _fail("Time must be HH:MM (24-hour)")
-            sched.briefing_time = text
+            setattr(sched, key, text)
         elif key == "nudge_minutes":
             if isinstance(value, bool):
                 raise TypeError("nudge_minutes must be a number")
             sched.nudge_minutes = max(1, min(60, int(value)))
-        else:  # briefing_enabled / nudges_enabled
+        else:  # the on/off flags
             setattr(sched, key, _to_bool(value))
         proactive.save_schedule(sched, save=self._prefs.save)
         return _ok()

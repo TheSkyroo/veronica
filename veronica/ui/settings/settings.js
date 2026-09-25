@@ -254,6 +254,14 @@
         row('briefings', 'briefing_time', {kind: 'str', label: 'Briefing time', help: '24-hour HH:MM.', placeholder: '08:00'}, b.briefing_time),
         row('briefings', 'nudges_enabled', {kind: 'bool', label: 'Reminder nudges'}, b.nudges_enabled),
         row('briefings', 'nudge_minutes', {kind: 'int', label: 'Nudge ahead (minutes)', help: 'How early before an event she speaks up.', min: 1, max: 60}, b.nudge_minutes == null ? 5 : b.nudge_minutes),
+        el('h3', {text: 'Quiet hours'}),
+        row('briefings', 'quiet_enabled', {kind: 'bool', label: 'Quiet hours', help: 'Anything due in the window waits and is spoken when it ends.'}, b.quiet_enabled),
+        row('briefings', 'quiet_from', {kind: 'str', label: 'Quiet from', help: '24-hour HH:MM.', placeholder: '22:00'}, b.quiet_from),
+        row('briefings', 'quiet_to', {kind: 'str', label: 'Quiet until', help: '24-hour HH:MM.', placeholder: '08:00'}, b.quiet_to),
+        el('h3', {text: 'Other nudges'}),
+        row('briefings', 'battery_enabled', {kind: 'bool', label: 'Low battery', help: 'Once per discharge, below 15%.'}, b.battery_enabled),
+        row('briefings', 'unread_enabled', {kind: 'bool', label: 'Unread mail nudge'}, b.unread_enabled),
+        row('briefings', 'unread_time', {kind: 'str', label: 'Unread nudge time', help: '24-hour HH:MM.', placeholder: '11:00'}, b.unread_time),
       ];
     },
     brain() {

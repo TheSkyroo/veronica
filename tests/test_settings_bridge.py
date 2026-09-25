@@ -210,7 +210,9 @@ def test_state_has_every_section_and_key(h):
     assert {"followup_window_s", "confirm_listen_s", "wake_min_rms", "wake_phrases",
             "vad_silence_ms", "max_utterance_s", "wake_window_s", "wake_hop_s",
             "input_volume_floor"} <= set(st["listening"])
-    assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes"}
+    assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
+                                    "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
+                                    "unread_enabled", "unread_time"}
     assert set(st["brain"]) == {"effort", "memory_enabled", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
@@ -542,6 +544,19 @@ def test_set_briefings_mutates_schedule_and_saves(h):
         True, "07:45", True, 60)
     assert h.prefs.saved[-1] == {"proactive": sched.to_prefs()}
     assert h.orch.calls == []  # silent
+
+
+def test_set_quiet_hours_and_trigger_rows(h):
+    assert h.bridge.set("briefings", "quiet_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "quiet_from", "23:00")["ok"]
+    assert h.bridge.set("briefings", "quiet_to", "07:15")["ok"]
+    assert h.bridge.set("briefings", "battery_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "unread_enabled", True)["ok"]
+    assert h.bridge.set("briefings", "unread_time", "10:30")["ok"]
+    sched = h.orch.proactive.schedule
+    assert (sched.quiet_enabled, sched.quiet_from, sched.quiet_to) == (True, "23:00", "07:15")
+    assert (sched.battery_enabled, sched.unread_enabled, sched.unread_time) == (True, True, "10:30")
+    assert h.bridge.set("briefings", "quiet_from", "11 pm")["ok"] is False
 
 
 def test_set_briefing_time_validated(h):

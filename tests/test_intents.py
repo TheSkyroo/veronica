@@ -337,6 +337,39 @@ def test_match_proactive_intent(text, expected):
     assert match_proactive_intent(text) == expected
 
 
+@pytest.mark.parametrize("s,expected", [
+    ("an hour", 60), ("1 hour", 60), ("2 hours", 120), ("30 minutes", 30), ("45 mins", 45),
+    ("half an hour", 30), ("ek ghanta", 60), ("do ghante", 120), ("aadhe ghante", 30),
+    ("20 minute", 20), ("", None), ("a while", None), ("5 days", None),
+])
+def test_parse_duration_minutes(s, expected):
+    from veronica.brain.intents import parse_duration_minutes
+    assert parse_duration_minutes(s) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("snooze notifications for an hour", ("snooze", 60)),
+    ("snooze notifications", ("snooze", None)),
+    ("snooze for 30 minutes", ("snooze", 30)),
+    ("mute nudges until 5", ("snooze", "05:00?")),
+    ("mute notifications until 5 pm", ("snooze", "17:00")),
+    ("pause notifications for 2 hours", ("snooze", 120)),
+    ("silence notifications till midnight", ("snooze", "00:00")),
+    ("ek ghante ke liye notifications band karo", ("snooze", 60)),
+    ("notifications rok do", ("snooze", None)),
+    ("5 baje tak nudges band karo", ("snooze", "05:00?")),
+    ("resume notifications", ("resume", None)),
+    ("unsnooze", ("resume", None)),
+    ("turn notifications back on", ("resume", None)),
+    ("notifications shuru karo", ("resume", None)),
+    ("snooze the alarm", None),
+    ("mute", None),
+    ("snooze notifications for a while", None),
+])
+def test_match_snooze_intent(text, expected):
+    assert match_proactive_intent(text) == expected
+
+
 @pytest.mark.parametrize("text,expected", [
     ("bas karo", "end"), ("theek hai bas", "end"), ("chup", "end"), ("chup raho", "end"),
     ("band karo", "end"), ("ruko", "end"), ("ruk jao", "end"),
