@@ -119,19 +119,37 @@ def _brain_dirs(which=shutil.which) -> list[str]:
         # resolve() follows the symlink chain: .../fnm_multishells/<pid>/bin/codex
         # -> .../node-versions/vX/installation/lib/node_modules/@openai/codex/bin/codex.js
         real = Path(found).resolve()
-        for candidate in ({str(real.parent)} if real.suffix != ".js" else _js_bin_dirs(real)) | {str(Path(found).parent)}:
-            if candidate not in dirs:
+        # Ordered, not a set: set iteration over strings is randomised per
+        # process, which would reorder PATH and change the signature from one
+        # build to the next — the very churn this function must not cause.
+        found_dirs = [str(Path(found).parent)]
+        found_dirs += [str(real.parent)] if real.suffix != ".js" else _js_bin_dirs(real)
+        for candidate in found_dirs:
+            if candidate not in dirs and not _ephemeral(candidate):
                 dirs.append(candidate)
     return dirs
 
 
-def _js_bin_dirs(real: Path) -> set[str]:
+# fnm builds a per-shell directory whose name carries the shell's pid
+# (…/fnm_multishells/85428_1790…/bin). Baking one in makes every build
+# differ, which changes the app's code signature — and macOS re-asks for
+# Microphone and Screen Recording whenever that changes. The real install
+# directory is added alongside it, so dropping these loses nothing.
+_EPHEMERAL_PARTS = ("fnm_multishells",)
+
+
+def _ephemeral(path: str) -> bool:
+    return any(part in path for part in _EPHEMERAL_PARTS)
+
+
+def _js_bin_dirs(real: Path) -> list[str]:
     """For a node CLI shim (…/lib/node_modules/<pkg>/bin/x.js) the directory
-    that matters is the node installation's own bin/, not the package's."""
-    out = {str(real.parent)}
+    that matters is the node installation's own bin/, not the package's.
+    Ordered so the baked PATH is the same on every build."""
+    out = [str(real.parent)]
     for parent in real.parents:
         if parent.name == "node_modules" and parent.parent.name == "lib":
-            out.add(str(parent.parent.parent / "bin"))
+            out.append(str(parent.parent.parent / "bin"))
             break
     return out
 
@@ -165,7 +183,11 @@ def _compile_with_clang(source: str, out: Path, defines: dict[str, str]) -> None
         )
     src = out.with_suffix(".c")
     src.write_text(source)
-    argv = [clang, "-O1", "-Wall", "-o", str(out), str(src)]
+    # Reproducible: without -no_uuid the linker stamps a fresh LC_UUID into
+    # every build, which changes the ad-hoc signature's cdhash — and macOS
+    # keys Microphone/Screen Recording grants on that hash, so every rebuild
+    # looked like a brand-new app and asked for permissions again.
+    argv = [clang, "-O1", "-Wall", "-Wl,-no_uuid", "-o", str(out), str(src)]
     for key, value in defines.items():
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         argv.append(f'-D{key}="{escaped}"')

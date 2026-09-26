@@ -224,7 +224,6 @@ def test_brain_dirs_follow_per_shell_symlinks(tmp_path):
 
     dirs = _brain_dirs(which=lambda n: str(shell_bin / "codex") if n == "codex" else None)
     assert str(install / "bin") in dirs      # survives the shell
-    assert str(shell_bin) in dirs            # still first choice while it exists
 
 
 def test_launcher_path_starts_with_the_brain_dirs():
@@ -237,3 +236,53 @@ def test_launcher_path_starts_with_the_brain_dirs():
     assert parts[0] == "/claude/bin" and "/node/bin" in parts
     assert len(parts) == len(set(parts))     # no duplicates
     assert parts[-4:] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+
+
+def test_a_per_shell_directory_is_never_baked_into_the_path(tmp_path):
+    """fnm's multishell dir carries the shell's pid, so baking it in makes
+    every build byte-different — and macOS then re-asks for Microphone and
+    Screen Recording, because TCC keys those grants on the signature."""
+    from scripts.build_app import _brain_dirs
+
+    install = tmp_path / "node-versions" / "v26" / "installation"
+    (install / "bin").mkdir(parents=True)
+    pkg_bin = install / "lib" / "node_modules" / "@openai" / "codex" / "bin"
+    pkg_bin.mkdir(parents=True)
+    (pkg_bin / "codex.js").write_text("#!/usr/bin/env node\n")
+    shell_bin = tmp_path / "fnm_multishells" / "85428_1790348230402" / "bin"
+    shell_bin.mkdir(parents=True)
+    (shell_bin / "codex").symlink_to(pkg_bin / "codex.js")
+
+    dirs = _brain_dirs(which=lambda n: str(shell_bin / "codex") if n == "codex" else None)
+    assert str(install / "bin") in dirs
+    assert not any("fnm_multishells" in d for d in dirs)
+
+
+def test_the_baked_path_is_the_same_on_every_build(tmp_path):
+    """Set iteration over strings is randomised per process; if the PATH
+    order wobbled, so would the launcher's bytes and the app's signature —
+    and macOS would ask for Microphone and Screen Recording all over again."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+        from pathlib import Path
+        from scripts.build_app import _brain_dirs
+        home = Path({str(tmp_path)!r})
+        bins = {{}}
+        for name in ("claude", "codex", "agy", "copilot"):
+            d = home / name / "bin"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / name).write_text("#!/bin/sh\\n")
+            bins[name] = str(d / name)
+        print(":".join(_brain_dirs(which=bins.get)))
+    """)
+    runs = {
+        subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       env={"PYTHONHASHSEED": str(seed), "PATH": "/usr/bin:/bin"}).stdout
+        for seed in (0, 1, 2, 3)
+    }
+    assert len(runs) == 1, runs
