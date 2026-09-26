@@ -4,7 +4,7 @@ import logging
 import os
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from veronica.brain.agent import (
@@ -19,6 +19,10 @@ from veronica.config import Settings
 from veronica.tools.computer_events import Front, frontmost, is_system_dialog
 
 log = logging.getLogger("veronica.brain")
+
+# (content blocks, is_error) for one allowed tool call, run in this process.
+RunTool = Callable[[str, dict], Awaitable[tuple[list[dict], bool]]]
+NO_RUNNER = "Veronica can't run tools right now"
 
 
 def _confirm_outcome(result) -> tuple[str, str]:
@@ -209,12 +213,23 @@ class ToolGate:
 class GateServer:
     """Unix-socket front for ToolGate.decide, for the out-of-process
     callers (tools.serve, brain.hook). One JSON line per request:
-    {"v": 1, "tool", "input", "origin": "mcp"|"hook", "backend"} in,
-    {"allow", "kind", "reason"} out. Confirms are serialized because the
-    orchestrator can only ask one question at a time."""
+    {"v": 1, "op", "tool", "input", "origin": "mcp"|"hook", "backend"} in,
+    {"allow", "kind", "reason"} out.
 
-    def __init__(self, gate: ToolGate, path: Path) -> None:
+    Two ops. "decide" (the default, and all brain.hook ever asks) answers
+    the permission question and leaves the caller to act on it. "call"
+    also RUNS the tool here, in the app process, and returns its MCP
+    content blocks — that is how an external brain's tools.serve child
+    gets a screenshot without macOS attributing the capture to the CLI
+    that spawned it. It needs `run_tool`; without one it fails closed.
+
+    Confirms are serialized because the orchestrator can only ask one
+    question at a time. Running a tool is not: a capture that waits a
+    minute on the user would otherwise wedge every other call behind it."""
+
+    def __init__(self, gate: ToolGate, path: Path, run_tool: RunTool | None = None) -> None:
         self.gate, self.path = gate, path
+        self._run_tool = run_tool
         self._server: asyncio.AbstractServer | None = None
         self._lock = asyncio.Lock()
 
@@ -240,16 +255,34 @@ class GateServer:
             try:
                 req = json.loads(line)
                 tool, inp = str(req["tool"]), dict(req.get("input") or {})
+                op = str(req.get("op") or "decide")
+                if op not in ("decide", "call"):
+                    raise ValueError(op)
             except Exception:
                 resp = {"allow": False, "kind": "denied", "reason": "bad request"}
             else:
-                log.info("gate request from %s/%s: %s", req.get("backend"), req.get("origin"), tool)
-                async with self._lock:
-                    d = await self.gate.decide(tool, inp)
-                resp = {"allow": d.allow, "kind": d.kind, "reason": d.message}
+                log.info("gate %s from %s/%s: %s", op, req.get("backend"), req.get("origin"), tool)
+                if op == "call" and self._run_tool is None:
+                    resp = {"allow": False, "kind": "denied", "reason": NO_RUNNER}
+                else:
+                    async with self._lock:              # the confirm, and only the confirm
+                        d = await self.gate.decide(tool, inp)
+                    resp = {"allow": d.allow, "kind": d.kind, "reason": d.message}
+                    if op == "call" and d.allow:
+                        content, is_error = await self._run(tool, inp)
+                        resp["content"], resp["is_error"] = content, is_error
             writer.write((json.dumps(resp) + "\n").encode())
             await writer.drain()
         except Exception:
             log.exception("gate request failed")
         finally:
             writer.close()
+
+    async def _run(self, tool: str, inp: dict) -> tuple[list[dict], bool]:
+        """Run an allowed tool. A runner that raises is reported to the
+        brain as an error result, never as a dropped call."""
+        try:
+            return await self._run_tool(tool, inp)
+        except Exception as exc:
+            log.exception("tool %s failed", tool)
+            return [{"type": "text", "text": f"error: {exc}"}], True

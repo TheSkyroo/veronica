@@ -7,10 +7,13 @@ import time
 
 import pytest
 
+from mcp.types import CallToolResult, TextContent
+
 from veronica.brain.backends import check_backend, local as local_mod
 from veronica.brain.backends.local import START_FAILED, LocalBrain
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
+from veronica.tools import registry
 
 
 # -- fakes ---------------------------------------------------------------------
@@ -109,8 +112,7 @@ class FakeToolServer:
     def get_request_handler(self, kind):
         async def handler(_ctx, params):
             self.calls.append((params.name, dict(params.arguments or {})))
-            content = [type("C", (), {"type": "text", "text": self.reply})()]
-            return type("R", (), {"content": content})()
+            return CallToolResult(content=[TextContent(type="text", text=self.reply)])
 
         return type("H", (), {"handler": staticmethod(handler)})()
 
@@ -136,8 +138,11 @@ def make_brain(tmp_path, *, rounds=(), health=(True,), confirm=None, **kw):
 def fake_catalog(monkeypatch, server, names=("mcp__mac__volume_get",)):
     schemas = [{"type": "function", "function": {"name": n, "description": "", "parameters": {}}}
                for n in names]
-    index = {n: (server, n.split("__")[-1]) for n in names}
-    monkeypatch.setattr(local_mod, "_tools", (schemas, index))
+    monkeypatch.setattr(local_mod, "_tools", (schemas, set(names)))
+    # The tool runs through the shared registry, so that is where the
+    # stand-in server has to be.
+    monkeypatch.setattr(registry, "SERVERS",
+                        {n.split("__")[1]: {"instance": server} for n in names})
 
 
 async def drain(brain, text="hi"):

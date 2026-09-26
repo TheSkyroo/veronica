@@ -1,8 +1,18 @@
 """`python -m veronica.tools.serve <name>`: one of Veronica's MCP servers
-over stdio for an external brain (Codex/Antigravity/Copilot/Qwen). Every
-tools/call first asks the gate socket (VERONICA_GATE_SOCK) the same
-question the in-process gate would ask: policy, trust window, voice
-confirm. stdout is the protocol; log to stderr only."""
+over stdio for an external brain (Codex/Antigravity/Copilot/Qwen).
+
+This process is a proxy, not an implementation. It advertises the server's
+tools (tools/list is pure, so it is answered from the same server objects
+the app uses) and forwards every tools/call over the gate socket
+(VERONICA_GATE_SOCK): the app asks the same question the in-process gate
+would — policy, trust window, voice confirm — and, when it allows, runs the
+tool ITSELF and sends the content back. Nothing here touches the screen,
+the keyboard or Apple Events, because macOS attributes what this process
+does to the CLI that spawned it, and that binary holds none of Veronica's
+TCC grants. Running the tool in the app is also why a timer set from an
+external brain announces like any other.
+
+stdout is the protocol; log to stderr only."""
 import asyncio
 import importlib
 import logging
@@ -11,9 +21,10 @@ import sys
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import CallToolRequestParams, CallToolResult, TextContent
+from mcp.types import CallToolRequestParams, CallToolResult, ContentBlock, TextContent
+from pydantic import TypeAdapter
 
-from veronica.brain.gateclient import ask_gate
+from veronica.brain.gateclient import call_gate
 
 log = logging.getLogger("veronica.tools.serve")
 
@@ -27,57 +38,47 @@ SERVERS = {
     "computer": "veronica.tools.computer",
 }
 
+_block = TypeAdapter(ContentBlock)
+
 
 def server_for(name: str) -> Server:
     mod = importlib.import_module(SERVERS[name])       # KeyError for unknown names
     return getattr(mod, f"{name}_server")["instance"]
 
 
-def gated_server(name: str, call_tool=None) -> Server:
-    """Wrap `name`'s tools/call handler so every call goes through the gate
-    first. `call_tool(tool, args) -> [content dict]` is a test seam that
-    stands in for the real handler."""
+def _content(blocks: list[dict]) -> list[ContentBlock]:
+    """The app's content dicts back as MCP blocks (text, and the image the
+    screenshot tool returns). A block we can't parse is described rather
+    than dropped, so the brain never gets a silently empty result."""
+    out: list[ContentBlock] = []
+    for b in blocks:
+        try:
+            out.append(_block.validate_python(b))
+        except Exception:
+            log.warning("unparseable content block %r", b.get("type"))
+            out.append(TextContent(type="text", text=f"error: unreadable {b.get('type')} result"))
+    return out
+
+
+def gated_server(name: str) -> Server:
+    """Wrap `name`'s tools/call handler so every call is gated and run by
+    the app instead of here."""
     inst = server_for(name)
-    original = inst.get_request_handler("tools/call").handler
     backend = os.environ.get("VERONICA_BRAIN", "external")
 
     async def gated(ctx, params: CallToolRequestParams) -> CallToolResult:
         tool, args = params.name, dict(params.arguments or {})
-        d = await asyncio.to_thread(ask_gate, f"mcp__{name}__{tool}", args, origin="mcp", backend=backend)
+        d, blocks, is_error = await asyncio.to_thread(
+            call_gate, f"mcp__{name}__{tool}", args, origin="mcp", backend=backend)
         if not d.allow:
             return CallToolResult(content=[TextContent(type="text", text=f"Not allowed: {d.message}")], is_error=True)
-        if call_tool is not None:
-            content = await call_tool(tool, args)
-            return CallToolResult(content=[TextContent(**c) for c in content])
-        return await original(ctx, params)
+        return CallToolResult(content=_content(blocks), is_error=is_error)
 
     inst.add_request_handler("tools/call", CallToolRequestParams, gated)
     return inst
 
 
-def _bind(name: str) -> None:
-    """The module-level services `__main__` binds in the app process. In a
-    stdio child there is nobody to speak, so timers set from an external
-    brain are recorded but never announce."""
-    if name == "memory":
-        from veronica.config import Settings
-        from veronica.memory.store import MemoryStore
-        from veronica.tools import memory_tools
-
-        memory_tools.bind(MemoryStore(Settings().memory_path))
-    elif name == "pim":
-        from veronica.tools import pim
-        from veronica.tools.timers import TimerService
-
-        async def _silent(_msg: str) -> None:
-            log.warning("timer fired in a tools.serve child; nothing to announce it")
-
-        pim.bind(TimerService(on_fire=_silent))
-        log.warning("timers set through an external brain don't announce")
-
-
 async def _main(name: str) -> None:
-    _bind(name)
     inst = gated_server(name)
     async with stdio_server() as (read, write):
         await inst.run(read, write, inst.create_initialization_options())

@@ -135,3 +135,56 @@ def test_ask_gate_timeout_env_overrides_the_budget(sock, monkeypatch):
         stop.set()
         t.join(2)
     assert not d.allow and d.message == gateclient.NO_ANSWER
+
+
+# -- call_gate: decide, then run the tool in the app process ------------------
+
+
+def test_call_gate_returns_the_tools_content(sock):
+    blocks = [{"type": "image", "data": "QUJD", "mimeType": "image/png"},
+              {"type": "text", "text": "Screenshot of the screen."}]
+    t, box = _serve_once(sock, {"allow": True, "kind": "auto", "reason": "",
+                                "content": blocks, "is_error": False})
+    d, content, is_error = gateclient.call_gate(
+        "mcp__screen__screenshot", {"region": "screen"}, origin="mcp", backend="codex", sock=str(sock))
+    t.join(2)
+    assert d.allow and content == blocks and not is_error
+    assert box["req"] == {"v": 1, "op": "call", "tool": "mcp__screen__screenshot",
+                          "input": {"region": "screen"}, "origin": "mcp", "backend": "codex"}
+
+
+def test_call_gate_deny_has_no_content(sock):
+    t, _ = _serve_once(sock, {"allow": False, "kind": "denied", "reason": "user declined"})
+    d, content, is_error = gateclient.call_gate(
+        "mcp__mac__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
+    t.join(2)
+    assert not d.allow and d.message == "user declined" and content == [] and is_error
+
+
+def test_call_gate_fails_closed_without_socket():
+    d, content, is_error = gateclient.call_gate(
+        "mcp__screen__screenshot", {}, origin="mcp", backend="codex", sock="missing.sock")
+    assert not d.allow and d.message == gateclient.UNREACHABLE and content == [] and is_error
+
+
+def test_call_gate_fails_closed_on_an_allow_without_content(sock):
+    t, _ = _serve_once(sock, {"allow": True, "kind": "auto", "reason": ""})
+    d, content, _ = gateclient.call_gate(
+        "mcp__screen__screenshot", {}, origin="mcp", backend="codex", sock=str(sock))
+    t.join(2)
+    assert not d.allow and content == []
+
+
+def test_call_gate_budget_covers_the_confirm_and_the_tool():
+    assert gateclient.GATE_CALL_BUDGET_S > gateclient.GATE_ANSWER_BUDGET_S
+
+
+def test_call_gate_denies_when_the_tool_takes_too_long(sock):
+    t, stop = _serve_silently(sock)
+    try:
+        d, content, _ = gateclient.call_gate(
+            "mcp__screen__screenshot", {}, origin="mcp", backend="codex", sock=str(sock), timeout=0.2)
+    finally:
+        stop.set()
+        t.join(2)
+    assert not d.allow and d.message == gateclient.NO_ANSWER and content == []
