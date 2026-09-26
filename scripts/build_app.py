@@ -172,6 +172,24 @@ def _launcher_defines(repo: Path, python: Path, claude_dir: str, build_json: Pat
     }
 
 
+SIGN_IDENTITY = "Veronica Local Signing"
+
+
+def signing_identity(run=subprocess.run) -> str:
+    """The self-signed identity from scripts/make_signing_cert.sh, or "-" for
+    ad-hoc. macOS keys Microphone/Screen Recording grants on the signature: an
+    ad-hoc one is a hash of the bundle, so any real change re-asks for
+    permission, while a certificate keys the grant on bundle id + certificate
+    and survives every rebuild. `VERONICA_SIGN_IDENTITY` overrides the name."""
+    name = os.environ.get("VERONICA_SIGN_IDENTITY", SIGN_IDENTITY)
+    try:
+        found = run(["security", "find-identity", "-v", "-p", "codesigning"],
+                    capture_output=True, text=True)
+    except OSError:
+        return "-"
+    return name if found.returncode == 0 and name in (found.stdout or "") else "-"
+
+
 def _compile_with_clang(source: str, out: Path, defines: dict[str, str]) -> None:
     """Default `compiler` for build_app: clang from the Xcode Command Line
     Tools. Each define becomes a C string literal."""
@@ -307,12 +325,17 @@ def build_app(
         if shutil.which("codesign") is None:
             print("build_app: codesign not available — skipping ad-hoc signing")
         else:
+            identity = signing_identity()
             subprocess.run(
-                ["codesign", "--force", "--deep", "-s", "-", str(app)],
+                ["codesign", "--force", "--deep", "-s", identity, str(app)],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
+            if identity == "-":
+                print("build_app: ad-hoc signed — macOS will ask for Microphone and Screen "
+                      "Recording again after a change. Run ./scripts/make_signing_cert.sh once "
+                      "to sign with a stable certificate instead.")
 
     return app
 

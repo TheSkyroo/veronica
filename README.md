@@ -539,6 +539,21 @@ Grant these to Veronica (or your terminal, if running with `uv run` instead of t
     uv run python -m veronica --text "hello"  # no audio, debug
 
 ## Install as an app
+### Permissions that stick
+
+macOS ties Microphone, Screen Recording and Accessibility grants to an app's
+code signature. Ad-hoc signing is just a hash of the bundle, so every rebuild
+asks again. Run this once:
+
+```bash
+./scripts/make_signing_cert.sh     # asks for your login password once
+make app
+```
+
+`make app` then signs with that certificate, the grant is keyed on the bundle
+id plus the certificate, and rebuilds keep it. Grant Microphone and Screen
+Recording one final time after the first certificate-signed build.
+
 
 Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a terminal:
 

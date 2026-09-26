@@ -318,3 +318,22 @@ def test_the_launcher_keeps_its_uuid(tmp_path):
     finally:
         monkey.undo()
     assert not any("no_uuid" in a for a in seen["argv"]), seen["argv"]
+
+
+def test_signing_prefers_the_stable_certificate_over_ad_hoc():
+    """Ad-hoc signing re-asks for Microphone and Screen Recording after every
+    change; the certificate keeps the grant. Use it whenever it exists."""
+    from scripts.build_app import SIGN_IDENTITY, signing_identity
+
+    class Done:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    assert signing_identity(run=lambda *a, **k: Done(f'  1) ABC "{SIGN_IDENTITY}"\n')) == SIGN_IDENTITY
+    assert signing_identity(run=lambda *a, **k: Done("     0 valid identities found\n")) == "-"
+    assert signing_identity(run=lambda *a, **k: Done("", rc=1)) == "-"
+
+    def missing(*a, **k):
+        raise OSError("no security tool")
+
+    assert signing_identity(run=missing) == "-"
