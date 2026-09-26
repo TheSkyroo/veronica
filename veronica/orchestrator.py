@@ -379,6 +379,8 @@ class Orchestrator:
         # must route a wake barge / PTT press to the capture instead of
         # tearing the turn down (which used to turn "yes" into a decline).
         self._confirm_listening = False
+        # monotonic seconds of the last "On it." — see ACK_MIN_GAP_S
+        self._last_ack_at = -1e9
         # F2: the sentences a barge stopped her before she could say them,
         # as the same (text, synth future) pairs handle_text's queue held —
         # kept alive so "continue" can speak them without re-synthesising.
@@ -889,16 +891,25 @@ class Orchestrator:
     # Deliberately tiny: the acknowledgement must read as "heard you, still
     # working", never as the answer itself.
     ACK_TEXT = {"en": "On it.", "hi": "एक सेकंड।"}
+    # A brain that habitually takes a few seconds would otherwise earn an
+    # "On it." on every single turn, which grates fast. It is for the
+    # unusually long wait, so it stays quiet for a while after each one.
+    ACK_MIN_GAP_S = 600.0
 
     async def _ack_if_slow(self, produced: Callable[[], bool], lang: str | None) -> None:
-        """Say a short "still here" line ack_after_s into a turn, but only
-        while the brain has produced nothing at all. Runs as its own task
+        """Say a short "still here" line ack_after_s into a turn — but only
+        while the brain has produced nothing at all, and not if one was
+        already said in the last ACK_MIN_GAP_S. Runs as its own task
         (handle_text cancels it when the turn ends), so it can only ever
         take the speech lock ahead of a sentence, never delay one that is
         already synthesised and waiting."""
         await asyncio.sleep(self.s.ack_after_s)
         if produced():
             return
+        now = time.monotonic()
+        if now - self._last_ack_at < self.ACK_MIN_GAP_S:
+            return
+        self._last_ack_at = now
         hindi = (lang or self._utterance_lang) == "hi"
         log.info("ack: brain silent for %.1fs", self.s.ack_after_s)
         await self.say(self.ACK_TEXT["hi" if hindi else "en"], lang="hi" if hindi else None)

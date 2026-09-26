@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     capture_extra_s: float = 3.0
     # How long a turn may stay silent before she says a short "On it." so a
     # slow brain doesn't feel like a dropped question. 0 turns the line off.
-    ack_after_s: float = 3.5
+    ack_after_s: float = 8.0   # only for an unusually long wait; see Orchestrator.ACK_MIN_GAP_S
 
     # wake word
     wake_engine: str = "whisper"

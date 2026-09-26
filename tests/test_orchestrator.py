@@ -5143,3 +5143,21 @@ async def test_switch_with_no_target_offers_the_ready_brains():
         orch_mod.check_backend = orig
     assert o.tts.said == ["Switch to which one — Antigravity or Claude?"]
     assert o.brain.asked == []
+
+
+async def test_the_ack_does_not_repeat_on_every_slow_turn():
+    """A brain that always takes a few seconds would earn an "On it." every
+    single turn, which grates. One is enough for a good while."""
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["hello"])
+    o.s.ack_after_s = 0.01
+
+    said = []
+    o.say = lambda text, **kw: said.append(text) or asyncio.sleep(0)
+
+    await o._ack_if_slow(lambda: False, "en")
+    assert said == ["On it."]
+    await o._ack_if_slow(lambda: False, "en")      # straight after: stays quiet
+    assert said == ["On it."]
+    o._last_ack_at -= o.ACK_MIN_GAP_S + 1          # long enough later: allowed again
+    await o._ack_if_slow(lambda: False, "en")
+    assert said == ["On it.", "On it."]
