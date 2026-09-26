@@ -4,6 +4,7 @@ real, and — for the hook tests — merge our PreToolUse entry into the
 user's own hook file (restored afterwards) and register our MCP servers
 with the CLI. They also refresh the captured fixtures under
 tests/fixtures/brains/ that the hermetic tests parse."""
+import os
 import json
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from veronica.brain.backends.claude import ClaudeBrain
 from veronica.brain.backends.codex import CodexBrain
 from veronica.brain.backends.copilot import CopilotBrain
 from veronica.brain.gate import GateServer, ToolGate
+from veronica.tools import registry, screen
 from veronica.brain.switch import BrainSwitcher
 from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
@@ -123,7 +125,7 @@ async def _gate_server(home, answers, cards, seen=None):
             return await decide(tool, inp)
 
         gate.decide = recording_decide
-    srv = GateServer(gate, s.gate_socket)
+    srv = GateServer(gate, s.gate_socket, run_tool=registry.call_tool)
     await srv.start()
     return s, gate, srv
 
@@ -291,6 +293,40 @@ async def test_codex_mcp_tool_through_serve(short_home):
         assert ("volume_get", "auto") in cards, cards                           # tools.serve gated it
     finally:
         (FIX / "codex-mcp.jsonl").write_text("\n".join(b.raw) + "\n")
+        await b.close()
+        await srv.stop()
+
+
+@needs_codex
+async def test_codex_screenshot_is_captured_by_this_process(short_home):
+    """The TCC bug: the capture must happen wherever the gate lives — in the
+    app, not in the `tools.serve` child the CLI spawned, which is a
+    different binary as far as macOS Screen Recording is concerned. Here
+    "the app" is pytest, so what this proves is that the capture ran on
+    THIS side of the socket and its image came back through Codex."""
+    cards, seen = [], []
+    here = os.getpid()
+    took = []
+    real = screen.capture_screenshot
+
+    def capture(region):
+        took.append(os.getpid())
+        return real(region)
+
+    s, gate, srv = await _gate_server(short_home, [True] * 5, cards, seen)
+    screen.capture_screenshot = capture
+    b = RecordingCodex(s, gate, on_tool=lambda su, d: cards.append((su, d)))
+    try:
+        [x async for x in b.ask("Call the veronica-screen MCP server's screenshot tool with "
+                                "region 'screen', then say in one short sentence what you see.")]
+        assert seen.count("mcp__screen__screenshot") == 1, seen
+        assert took == [here], took                       # captured in the gate's process
+        shots = [l for l in b.raw if "mcp_tool_call" in l and "screenshot" in l]
+        assert shots and "couldn't capture" not in "".join(shots).lower(), shots
+    finally:
+        # No fixture for this one: the stream carries a picture of the
+        # user's screen, which has no business in the repo.
+        screen.capture_screenshot = real
         await b.close()
         await srv.stop()
 

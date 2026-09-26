@@ -357,3 +357,41 @@ async def test_persistent_error_kills_child(tmp_path):
     ], brain_cls=PersistentEchoBrain)
     assert await collect(b, "x") == ["Echo returned an error, check the log."]
     assert b._proc is None
+
+
+# -- long stream lines (a screenshot's base64 rides in one) -------------------
+async def test_spawn_raises_the_stream_line_limit(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen.update(kw)
+        return FakeProc([])
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    s = Settings(home=tmp_path)
+    b = EchoBrain(s, ToolGate(s, None))
+    await b._subprocess_spawn(["echo-cli"], str(tmp_path), {})
+    assert seen["limit"] == cli.STDOUT_LINE_LIMIT > 1024 * 1024 - 1
+
+
+async def test_an_overlong_line_is_dropped_not_fatal(tmp_path):
+    """asyncio raises ValueError once the buffer passes the limit. Losing
+    that one event beats losing the turn."""
+    class Overlong(FakeProc):
+        def __init__(self):
+            super().__init__([ev("Text", delta="Here you go.")])
+            self._blew_up = False
+
+        async def readline(self):
+            if not self._blew_up:
+                self._blew_up = True
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+            return await super().readline()
+
+    b, _, _ = build(tmp_path, [])
+    b._spawn = lambda argv, cwd, env: _ready(Overlong())
+    assert [x async for x in b.ask("hi")] == ["Here you go."]
+
+
+async def _ready(proc):
+    return proc
