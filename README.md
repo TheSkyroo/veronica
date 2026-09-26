@@ -137,9 +137,13 @@ left off. The HUD's status area shows "Brain: Codex" and the settings page's Bra
 
 - *Veronica's tools* (`mac`, `pim` for calendar/mail/reminders/timers, `memory`, `screen`, `music`, `browser`,
   `computer`) are served to an external brain as MCP servers over stdio (`python -m veronica.tools.serve <name>`,
-  registered as `veronica-<name>`). Each call asks the app's gate socket (`~/.veronica/gate.sock`) the same
-  question the in-process gate asks Claude — policy, trust window, pre-approval, voice confirm — so "Run …?"
-  sounds and behaves exactly the same.
+  registered as `veronica-<name>`). That process is only a proxy: each call goes to the app's gate socket
+  (`~/.veronica/gate.sock`), which asks the same question the in-process gate asks Claude — policy, trust window,
+  pre-approval, voice confirm — so "Run …?" sounds and behaves exactly the same, and then **runs the tool inside
+  the app** and sends the result (text, or the screenshot's image) back. That last part matters: macOS attributes
+  what a helper process does to the CLI that spawned it, so a capture, a key press or an Apple Event issued from
+  the stdio child would be checked against permissions the CLI was never granted. Running it in the app is also
+  why a timer set through an external brain announces like any other.
 - *The CLI's own shell and file edits* (Codex's `Bash`/`apply_patch`, Antigravity's `run_command`, Copilot's `bash`)
   run with the vendor's own approvals turned off and Veronica's **pre-tool hook** as the only gate: the hook logs
   the call to `~/.veronica/backends/<brain>/hook.log`, asks the same gate socket, and a "no" blocks the command
@@ -211,9 +215,6 @@ path in Settings.").
 
 **Known limits.**
 
-- **Timers set while on an external brain don't announce.** The `pim` server runs in a child process where
-  nobody can speak, so a "set a timer for 5 minutes" is recorded but never spoken or shown. Memory, calendar,
-  mail and the rest work normally. Claude runs the tools in-process, so timers set on Claude are unaffected.
 - **Antigravity edits user-level files.** Only the user-level `~/.gemini/config/hooks.json` is loaded by `agy`,
   so Veronica merges her PreToolUse entry into it, scoped to her own conversation id (your own interactive `agy`
   sessions are never gated). The first Antigravity turn also runs `agy mcp add` for each of her servers, which
