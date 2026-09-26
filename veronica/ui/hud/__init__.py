@@ -166,8 +166,16 @@ def _real_panel(s: Settings, web):
         Foundation.NSMakeRect(x, y, s.hud_width, s.hud_height), style, AppKit.NSBackingStoreBuffered, False)
     panel.setOpaque_(False)
     panel.setBackgroundColor_(AppKit.NSColor.clearColor())
-    panel.setLevel_(AppKit.NSFloatingWindowLevel)
-    panel.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces | AppKit.NSWindowCollectionBehaviorStationary)
+    # Status level (above ordinary windows, below the menu bar's own panels)
+    # plus FullScreenAuxiliary: at floating level the HUD disappeared behind
+    # any app running full screen — which is most of the time on a laptop —
+    # even though it had been ordered front on all Spaces.
+    panel.setLevel_(AppKit.NSStatusWindowLevel)
+    panel.setCollectionBehavior_(
+        AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+        | AppKit.NSWindowCollectionBehaviorStationary
+        | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+    )
     # Draggable by clicking anywhere on the (background of the) panel, while
     # staying a non-activating panel (it never steals key focus/Space).
     panel.setIgnoresMouseEvents_(False)

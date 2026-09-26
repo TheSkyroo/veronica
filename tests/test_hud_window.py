@@ -390,11 +390,13 @@ def test_panel_factory_sets_up_draggable_non_activating_panel(monkeypatch):
         def __init__(self):
             self.ignores_mouse = None
             self.movable_by_bg = None
+            self.level = None
+            self.behavior = None
 
         def setOpaque_(self, v): pass
         def setBackgroundColor_(self, v): pass
-        def setLevel_(self, v): pass
-        def setCollectionBehavior_(self, v): pass
+        def setLevel_(self, v): self.level = v
+        def setCollectionBehavior_(self, v): self.behavior = v
         def setIgnoresMouseEvents_(self, v): self.ignores_mouse = v
         def setMovableByWindowBackground_(self, v): self.movable_by_bg = v
         def setHasShadow_(self, v): pass
@@ -427,9 +429,11 @@ def test_panel_factory_sets_up_draggable_non_activating_panel(monkeypatch):
         NSColor=_types.SimpleNamespace(clearColor=lambda: None),
         NSWindowStyleMaskBorderless=0,
         NSWindowStyleMaskNonactivatingPanel=0,
-        NSFloatingWindowLevel=0,
-        NSWindowCollectionBehaviorCanJoinAllSpaces=0,
-        NSWindowCollectionBehaviorStationary=0,
+        NSFloatingWindowLevel=3,
+        NSStatusWindowLevel=25,
+        NSWindowCollectionBehaviorCanJoinAllSpaces=1,
+        NSWindowCollectionBehaviorStationary=16,
+        NSWindowCollectionBehaviorFullScreenAuxiliary=256,
         NSBackingStoreBuffered=0,
     )
     fake_foundation = _types.SimpleNamespace(NSMakeRect=lambda x, y, w, h: (x, y, w, h))
@@ -441,6 +445,10 @@ def test_panel_factory_sets_up_draggable_non_activating_panel(monkeypatch):
     panel = _real_panel(Settings(), object())
     assert panel.ignores_mouse is False
     assert panel.movable_by_bg is True
+    # Above ordinary windows and allowed over another app's full-screen Space:
+    # at floating level the HUD was invisible whenever anything ran full screen.
+    assert panel.level == 25
+    assert panel.behavior & 256 and panel.behavior & 1
 
 
 # -- commit: defer HUD JS until the page has loaded ---------------------------
