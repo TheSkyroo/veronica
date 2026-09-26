@@ -47,6 +47,7 @@ from veronica.brain.sentences import has_devanagari
 from veronica.tools import mac as mac_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
+from veronica.tools import registry
 from veronica.tools.screen import capture_screenshot
 from veronica.ui.events import envelope
 from veronica.updater import UpdateInProgress
@@ -1127,7 +1128,10 @@ class Orchestrator:
         self._emit("hud", {"backend": self._brain_label()})
         gate = self.gate
         if gate is not None and self._gate_server is None:
-            self._gate_server = GateServer(gate, self.s.gate_socket)
+            # run_tool: an external brain's tools.serve child asks the gate
+            # to run our tools here, in the app — the process macOS granted
+            # Screen Recording, Accessibility and Apple Events to.
+            self._gate_server = GateServer(gate, self.s.gate_socket, run_tool=registry.call_tool)
             await self._gate_server.start()
 
     async def stop_brain(self) -> None:

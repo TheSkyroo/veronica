@@ -24,30 +24,18 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 import httpx
-from mcp.types import CallToolRequestParams
-
 from veronica.brain.gate import ToolGate
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
-from veronica.tools.browser import browser_server
-from veronica.tools.computer import computer_server
-from veronica.tools.mac import mac_server
-from veronica.tools.memory_tools import memory_server
-from veronica.tools.music import music_server
-from veronica.tools.pim import pim_server
-from veronica.tools.screen import screen_server
+from veronica.tools.registry import SERVERS, call_tool
 
 log = logging.getLogger("veronica.brain")
 
-# The same servers ClaudeBrain hands the SDK, exposed here as function
-# schemas under the same `mcp__<server>__<tool>` names — so policy.py, the
-# HUD cards and the trust window all key off identical strings.
-SERVERS = {
-    "mac": mac_server, "pim": pim_server, "memory": memory_server,
-    "screen": screen_server, "music": music_server,
-    "browser": browser_server, "computer": computer_server,
-}
+# The registry's servers — the same ones ClaudeBrain hands the SDK —
+# exposed here as function schemas under the same `mcp__<server>__<tool>`
+# names, so policy.py, the HUD cards and the trust window all key off
+# identical strings.
 
 START_FAILED = "The local model wouldn't start — check the Local settings."
 # How long a cold `llama-server` gets to load the weights and answer /health.
@@ -73,20 +61,19 @@ HIDDEN_SERVERS_FOR_LOCAL = frozenset({"computer"})
 CHARS_PER_TOKEN = 3.5
 HISTORY_SHARE = 0.35
 
-_tools: tuple[list[dict], dict[str, tuple[object, str]]] | None = None
+_tools: tuple[list[dict], set[str]] | None = None
 
 
-async def tool_catalog() -> tuple[list[dict], dict[str, tuple[object, str]]]:
-    """(function schemas, `mcp__srv__tool` -> (server instance, bare name)),
-    built once per process from the MCP servers' own tools/list."""
+async def tool_catalog() -> tuple[list[dict], set[str]]:
+    """(function schemas, the `mcp__srv__tool` names they cover), built once
+    per process from the MCP servers' own tools/list."""
     global _tools
     if _tools is not None:
         return _tools
     schemas: list[dict] = []
-    index: dict[str, tuple[object, str]] = {}
+    names: set[str] = set()
     for srv, server in SERVERS.items():
-        inst = server["instance"]
-        listed = await inst.get_request_handler("tools/list").handler(None, None)
+        listed = await server["instance"].get_request_handler("tools/list").handler(None, None)
         for t in listed.tools:
             full = f"mcp__{srv}__{t.name}"
             if full in HIDDEN_FROM_LOCAL or srv in HIDDEN_SERVERS_FOR_LOCAL:
@@ -96,8 +83,8 @@ async def tool_catalog() -> tuple[list[dict], dict[str, tuple[object, str]]]:
                 "description": t.description or "",
                 "parameters": t.input_schema or {"type": "object", "properties": {}},
             }})
-            index[full] = (inst, t.name)
-    _tools = (schemas, index)
+            names.add(full)
+    _tools = (schemas, names)
     return _tools
 
 
@@ -371,10 +358,12 @@ class LocalBrain:
             self._response = None
 
     # -- tools ------------------------------------------------------------------
-    async def _call_tool(self, index: dict, call: dict) -> str:
+    async def _call_tool(self, names: set[str], call: dict) -> str:
         """Gate, then run, one tool call. Everything the model asks for goes
         through `ToolGate.decide`; a refusal comes back as the tool result so
-        it can re-plan, same as every other backend."""
+        it can re-plan, same as every other backend. The tool itself runs in
+        this process (registry.call_tool), which is also where an external
+        brain's calls end up."""
         name = call.get("name") or ""
         try:
             args = json.loads(call.get("arguments") or "{}")
@@ -382,23 +371,15 @@ class LocalBrain:
             args = {}
         if not isinstance(args, dict):
             args = {}
-        entry = index.get(name)
-        if entry is None:
+        if name not in names:
             log.warning("local: model asked for unknown tool %r", name)
             return f"error: there is no tool called {name}"
         decision = await self.gate.decide(name, args)
         if not decision.allow:
             return f"Not allowed: {decision.message}"
-        inst, bare = entry
-        try:
-            result = await inst.get_request_handler("tools/call").handler(
-                None, CallToolRequestParams(name=bare, arguments=args))
-        except Exception as e:
-            log.exception("local: tool %s failed", name)
-            return f"error: {e}"
-        return "\n".join(
-            c.text for c in (result.content or []) if getattr(c, "type", None) == "text"
-        ) or "ok"
+        content, _is_error = await call_tool(name, args)
+        # This model is text-only, so an image block has nothing to say to it.
+        return "\n".join(c["text"] for c in content if c.get("type") == "text") or "ok"
 
     # -- public -----------------------------------------------------------------
     async def ask(self, text: str, images: list[bytes] = ()) -> AsyncIterator[str]:
@@ -417,7 +398,7 @@ class LocalBrain:
             return
         self._touch()
 
-        schemas, index = await tool_catalog()
+        schemas, names = await tool_catalog()
         self._history.append({"role": "user", "content": text})
         self._trim()
         splitter = SentenceSplitter()
@@ -455,7 +436,7 @@ class LocalBrain:
                 self._history.append({
                     "role": "tool",
                     "tool_call_id": call["id"] or f"call_{i}",
-                    "content": await self._call_tool(index, call),
+                    "content": await self._call_tool(names, call),
                 })
             self._trim()
         # Out of rounds: the model kept asking for tools and never spoke.

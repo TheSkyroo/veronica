@@ -208,3 +208,139 @@ async def test_gate_server_serializes_confirms(sock):
     finally:
         await srv.stop()
     assert [o[0] for o in order] == ["start", "end", "start", "end"]
+
+
+# -- GateServer: running the tool in the app process ("op": "call") -----------
+
+
+def runner(log_to, content=None, *, delay=0.0):
+    """A stand-in for registry.call_tool that records what it was asked."""
+    async def run_tool(tool, args):
+        log_to.append((tool, args))
+        if delay:
+            await asyncio.sleep(delay)
+        return content if content is not None else ([{"type": "text", "text": "ran"}], False)
+    return run_tool
+
+
+CALL = {"v": 1, "op": "call", "tool": "mcp__mac__clipboard_write",
+        "input": {"text": "a"}, "origin": "mcp", "backend": "codex"}
+
+
+async def test_call_runs_the_tool_here_after_a_yes(sock):
+    g, _, cards = make([True])
+    ran = []
+    srv = GateServer(g, sock, run_tool=runner(ran))
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, CALL)
+    finally:
+        await srv.stop()
+    assert resp == {"allow": True, "kind": "approved", "reason": "",
+                    "content": [{"type": "text", "text": "ran"}], "is_error": False}
+    assert ran == [("mcp__mac__clipboard_write", {"text": "a"})]
+
+
+async def test_call_shows_exactly_one_hud_card(sock):
+    """One call, one decide, one card — running the tool must not add a second."""
+    g, _, cards = make([])
+    srv = GateServer(g, sock, run_tool=runner([]))
+    await srv.start()
+    try:
+        await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+    finally:
+        await srv.stop()
+    assert cards == [("volume_get", "auto")]
+
+
+async def test_call_denied_never_runs_the_tool(sock):
+    g, _, _ = make([False])
+    ran = []
+    srv = GateServer(g, sock, run_tool=runner(ran))
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, CALL)
+    finally:
+        await srv.stop()
+    assert resp == {"allow": False, "kind": "denied", "reason": "user declined"}
+    assert ran == []
+
+
+async def test_call_without_a_runner_is_denied(sock):
+    g, calls, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, CALL)
+    finally:
+        await srv.stop()
+    assert resp["allow"] is False and resp["kind"] == "denied" and calls == []
+
+
+async def test_call_returns_image_content(sock):
+    g, _, _ = make([])
+    shot = ([{"type": "image", "data": "QUJD", "mimeType": "image/png"},
+             {"type": "text", "text": "Screenshot of the screen."}], False)
+    srv = GateServer(g, sock, run_tool=runner([], shot))
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, dict(CALL, tool="mcp__screen__screenshot", input={"region": "screen"}))
+    finally:
+        await srv.stop()
+    assert resp["allow"] and resp["content"] == shot[0] and resp["is_error"] is False
+
+
+async def test_a_tool_that_blows_up_is_an_error_not_a_dropped_call(sock):
+    g, _, _ = make([])
+
+    async def boom(tool, args):
+        raise RuntimeError("kaboom")
+
+    srv = GateServer(g, sock, run_tool=boom)
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+    finally:
+        await srv.stop()
+    assert resp["allow"] and resp["is_error"] and "kaboom" in resp["content"][0]["text"]
+
+
+async def test_a_slow_tool_does_not_block_an_unrelated_confirm(sock):
+    """Confirms are serialized because the user can only be asked one thing
+    at a time; running the tool is not, or one long capture would wedge the
+    gate for everything behind it."""
+    order = []
+
+    async def confirm(summary, detail=""):
+        order.append(f"confirm {summary}")
+        return True
+
+    async def run_tool(tool, args):
+        order.append("run start")
+        await asyncio.sleep(0.1)
+        order.append("run end")
+        return [{"type": "text", "text": "ran"}], False
+
+    g = ToolGate(Settings(), confirm)
+    srv = GateServer(g, sock, run_tool=run_tool)
+    await srv.start()
+    try:
+        await asyncio.gather(
+            _roundtrip(sock, CALL),
+            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write",
+                              "input": {"text": "B"}, "origin": "mcp", "backend": "x"}),
+        )
+    finally:
+        await srv.stop()
+    assert order.index("confirm Copy to clipboard: B") < order.index("run end")
+
+
+async def test_unknown_op_is_a_bad_request(sock):
+    g, calls, _ = make([])
+    srv = GateServer(g, sock, run_tool=runner([]))
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, dict(CALL, op="whatever"))
+    finally:
+        await srv.stop()
+    assert resp == {"allow": False, "kind": "denied", "reason": "bad request"} and calls == []

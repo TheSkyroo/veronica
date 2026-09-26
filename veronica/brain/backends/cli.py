@@ -83,6 +83,14 @@ Event = Text | ToolStart | ToolEnd | Session | Done | Error
 
 # "You've hit your weekly limit - resets 6:30am (Asia/Calcutta)" is what
 # Claude Code says on a subscription limit, hence the per-period markers.
+# One stream-json line. A CLI echoes the tool result back in its own
+# stream, and a screenshot's base64 rides in it, so asyncio's 64 KiB
+# default is far too small — a "look at my screen" turn died on
+# "Separator is not found, and chunk exceed the limit". This is the same
+# 1 MiB ceiling the Agent SDK's reader uses, and the reason screen.py
+# keeps a capture under MAX_PNG_BYTES.
+STDOUT_LINE_LIMIT = 1024 * 1024
+
 LIMIT_MARKERS = ("usage limit", "rate limit", "rate_limit", "429", "quota", "resource exhausted",
                  "too many requests", "limit reached", "out of credits", "insufficient_quota", "overloaded",
                  "hourly limit", "daily limit", "weekly limit", "monthly limit")
@@ -250,9 +258,20 @@ class CliBrain:
     async def _subprocess_spawn(self, argv: list[str], cwd: str, env: dict[str, str]):
         stdin = asyncio.subprocess.PIPE if self.mode == "persistent" else asyncio.subprocess.DEVNULL
         return await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=env,
+            *argv, cwd=cwd, env=env, limit=STDOUT_LINE_LIMIT,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, stdin=stdin,
         )
+
+    @staticmethod
+    async def _readline(proc) -> bytes:
+        """One stream-json line. A line past STDOUT_LINE_LIMIT is dropped
+        rather than raised: the stream is still usable, and losing one
+        event beats losing the turn."""
+        while True:
+            try:
+                return await proc.stdout.readline()
+            except ValueError:
+                log.warning("dropped a stream line over %d bytes", STDOUT_LINE_LIMIT)
 
     async def _start(self, argv: list[str]):
         env = {
@@ -333,7 +352,7 @@ class CliBrain:
         try:
             async with asyncio.timeout(self.s.brain_timeout_s):
                 while True:
-                    raw = await proc.stdout.readline()
+                    raw = await self._readline(proc)
                     if not raw:
                         raise RuntimeError(f"{self.label} exited before announcing a session: {self._stderr_tail[-300:]}")
                     for ev in self._parse_line(raw):
@@ -409,7 +428,7 @@ class CliBrain:
         while True:
             try:
                 async with asyncio.timeout(self.s.brain_timeout_s):
-                    raw = await proc.stdout.readline()
+                    raw = await self._readline(proc)
             except TimeoutError:
                 log.warning("%s: brain timeout after %ss", self.name, self.s.brain_timeout_s)
                 await self._kill()
