@@ -617,13 +617,32 @@ def match_proactive_intent(text: str) -> ProactiveAction | None:
 # the orchestrator's BrainSwitcher does the actual switch (and says why it
 # can't). Names are the BACKENDS keys — kept literal here so this module
 # stays import-light.
-BrainAction = tuple[Literal["switch", "which", "online"], str | None]
+BrainAction = tuple[Literal["switch", "which", "which_to", "online"], str | None]
 
 _BRAIN_NAMES = r"(claude|codex|antigravity|copilot|local)"
-_BRAIN_SWITCH_RE = re.compile(
-    rf"^(?:switch(?: brains?)? to|use|change(?: brains?)? to|switch(?: the)? brain to)\s+(?:the )?{_BRAIN_NAMES}(?: brain)?$"
+# Spoken requests arrive wrapped in lead-ins the shared filler stripper does
+# not touch ("now switch to Claude", "okay can you use Codex", "let's go back
+# to Claude"). Without this the whole utterance went to whichever brain was
+# running, which then answered that it cannot switch itself.
+_BRAIN_LEAD_RE = re.compile(
+    r"^(?:(?:and|so|but|now|then|okay|ok|alright|right|yeah|yes|hey|veronica|"
+    r"please|lets|let us|can you|could you|would you|will you|i want you to|"
+    r"i want to|i need you to|you can|just|go ahead and|try to|try)\s+)+"
 )
-_BRAIN_BACK_RE = re.compile(rf"^(?:go )?back to {_BRAIN_NAMES}(?: brain)?$")
+_BRAIN_SWITCH_RE = re.compile(
+    rf"^(?:switch(?:\s+(?:it|over|brains?|the brain))*\s+to|use|change(?:\s+(?:it|over|brains?|the brain))*\s+to"
+    rf"|put(?:\s+(?:it|the brain))?\s+on|run(?:\s+it)?\s+on|move(?:\s+(?:it|over))?\s+to"
+    rf"|switch(?: the)? brain to)\s+(?:the |to )?{_BRAIN_NAMES}(?:\s+(?:brain|instead|now|please))*$"
+)
+_BRAIN_BACK_RE = re.compile(
+    rf"^(?:go |switch |change )?back to {_BRAIN_NAMES}(?:\s+(?:brain|again|now|please))*$"
+)
+# "switch the brain" with no target: she offers the choice rather than
+# handing a bare "switch it" to the brain, which cannot act on it.
+_BRAIN_WHICH_TO_RE = re.compile(
+    r"^(?:switch|change)(?:\s+(?:it|over))?(?:\s+(?:brains?|the brain))?"
+    r"(?:\s+(?:to|please|now|man|dude))*$"
+)
 # Hinglish: "codex pe switch karo", "copilot use karo", "claude pe wapas jao".
 _BRAIN_SWITCH_HINGLISH_RE = re.compile(
     rf"^{_BRAIN_NAMES}\s+(?:(?:pe|par)\s+(?:switch karo|jao|wapas jao)|use karo|chalao)$"
@@ -655,6 +674,8 @@ _ONLINE_PHRASES = frozenset({
 
 
 def _match_brain_candidate(candidate: str) -> BrainAction | None:
+    # strip lead-ins repeatedly: "okay now switch to claude" has two
+    candidate = _BRAIN_LEAD_RE.sub("", candidate).strip() or candidate
     if candidate in _WHICH_BRAIN_PHRASES or candidate in _WHICH_BRAIN_PHRASES_HINGLISH:
         return ("which", None)
     if candidate in _OFFLINE_PHRASES:
@@ -665,6 +686,8 @@ def _match_brain_candidate(candidate: str) -> BrainAction | None:
         m = pattern.match(candidate)
         if m:
             return ("switch", m.group(1))
+    if _BRAIN_WHICH_TO_RE.match(candidate):
+        return ("which_to", None)
     return None
 
 

@@ -5122,3 +5122,24 @@ async def test_a_turn_that_never_gets_going_leaves_no_plan_latched():
     with pytest.raises(RuntimeError):
         await o.handle_text("read it")
     assert o._plan_turn is False
+
+
+async def test_switch_with_no_target_offers_the_ready_brains():
+    """"switch it" names no brain: she offers the choice rather than handing
+    the words to the brain, which cannot switch itself."""
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None],
+                     stt_texts=["but you can switch it man"])
+    o.switcher = FakeSwitcher(o.brain)
+    o.switcher.brain.name = "codex"
+    import veronica.orchestrator as orch_mod
+    from veronica.brain.backends import Availability
+
+    ready = {"claude", "antigravity"}
+    orig = orch_mod.check_backend
+    orch_mod.check_backend = lambda n, **kw: Availability(n in ready, "ok" if n in ready else "not installed", "")
+    try:
+        await o.one_turn()
+    finally:
+        orch_mod.check_backend = orig
+    assert o.tts.said == ["Switch to which one — Antigravity or Claude?"]
+    assert o.brain.asked == []

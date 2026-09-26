@@ -549,3 +549,33 @@ def test_resume_phrases_do_not_collide_with_other_intents():
 def test_hinglish_pause_and_continue_phrases_count_as_hinglish():
     from veronica.brain.intents import HINGLISH_INTENT_PHRASES
     assert {"ek minute", "aage bolo"} <= HINGLISH_INTENT_PHRASES
+
+
+@pytest.mark.parametrize("text,expected", [
+    # The lead-ins people actually use. Without these the whole utterance went
+    # to the running brain, which answered that it cannot switch itself.
+    ("Now switch to Claude.", ("switch", "claude")),
+    ("okay now switch to codex", ("switch", "codex")),
+    ("can you use claude please", ("switch", "claude")),
+    ("hey veronica switch to copilot", ("switch", "copilot")),
+    ("i want you to use antigravity", ("switch", "antigravity")),
+    ("just go back to claude", ("switch", "claude")),
+    ("lets switch back to codex now", ("switch", "codex")),
+    # other ways of saying it
+    ("switch it to claude", ("switch", "claude")),
+    ("put it on codex", ("switch", "codex")),
+    ("run it on local", ("switch", "local")),
+    ("move over to claude", ("switch", "claude")),
+    ("use codex instead", ("switch", "codex")),
+    # no target named: she offers the choice instead of passing it on
+    ("switch the brain", ("which_to", None)),
+    ("but you can switch it man", ("which_to", None)),
+    ("change brains", ("which_to", None)),
+    # still not a brain switch
+    ("use gemini", None),
+    ("switch to spanish", None),
+    ("use a british voice", None),
+    ("now open safari", None),
+])
+def test_match_brain_intent_tolerates_lead_ins(text, expected):
+    assert match_brain_intent(text) == expected

@@ -18,7 +18,7 @@ from veronica import version
 from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
 from veronica.brain import quick
-from veronica.brain.backends import BACKENDS
+from veronica.brain.backends import BACKENDS, check_backend
 from veronica.brain.backends.cli import LimitError
 from veronica.brain.gate import GateServer
 from veronica.brain.intents import (
@@ -1022,6 +1022,14 @@ class Orchestrator:
         return None
 
     # -- brains -----------------------------------------------------------------
+    @staticmethod
+    def _spoken_list(items: list[str]) -> str:
+        """"Codex, Antigravity or Claude" — spoken, so "or" rather than a
+        trailing comma."""
+        if len(items) == 1:
+            return items[0]
+        return ", ".join(items[:-1]) + " or " + items[-1]
+
     async def _brain_switch_turn(self, action: tuple[str, str | None]) -> None:
         """Local fast path for "switch to codex" / "go offline" / "which
         brain are you on": the switcher does the switch (or says why it
@@ -1040,6 +1048,16 @@ class Orchestrator:
                 await self.say("No online brain is ready.")
                 return
             kind, name = "switch", name
+        if kind == "which_to":
+            # "switch it" with no target: name the ones that are ready rather
+            # than handing a bare "switch it" to the brain, which can't act.
+            ready = [BACKENDS[n].label for n in BACKENDS
+                     if n != sw.brain.name and check_backend(n).ok]
+            if not ready:
+                await self.say(f"I'm on {self._brain_label()} — nothing else is set up.")
+                return
+            await self.say(f"Switch to which one — {self._spoken_list(ready)}?")
+            return
         if kind == "which":
             label = self._brain_label()
             if sw.standing_in and sw.brain.name == "local" and sw._standin_reason == "offline":
