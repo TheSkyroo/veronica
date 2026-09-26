@@ -183,11 +183,12 @@ def _compile_with_clang(source: str, out: Path, defines: dict[str, str]) -> None
         )
     src = out.with_suffix(".c")
     src.write_text(source)
-    # Reproducible: without -no_uuid the linker stamps a fresh LC_UUID into
-    # every build, which changes the ad-hoc signature's cdhash — and macOS
-    # keys Microphone/Screen Recording grants on that hash, so every rebuild
-    # looked like a brand-new app and asked for permissions again.
-    argv = [clang, "-O1", "-Wall", "-Wl,-no_uuid", "-o", str(out), str(src)]
+    # ld64 derives LC_UUID from the linked content, so identical inputs give
+    # an identical binary — do NOT pass -Wl,-no_uuid to force that: dyld on
+    # macOS 27 refuses to load an image with no LC_UUID ("missing LC_UUID
+    # load command") and the app won't start at all. Reproducibility comes
+    # from the inputs instead (see _brain_dirs).
+    argv = [clang, "-O1", "-Wall", "-o", str(out), str(src)]
     for key, value in defines.items():
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         argv.append(f'-D{key}="{escaped}"')

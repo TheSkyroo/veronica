@@ -286,3 +286,35 @@ def test_the_baked_path_is_the_same_on_every_build(tmp_path):
         for seed in (0, 1, 2, 3)
     }
     assert len(runs) == 1, runs
+
+
+def test_the_launcher_keeps_its_uuid(tmp_path):
+    """dyld on macOS 27 refuses an image with no LC_UUID, so the launcher must
+    never be linked with -no_uuid — it would build fine and never start."""
+    from scripts.build_app import STUB_SOURCE, _launcher_defines
+    import scripts.build_app as build_app
+
+    seen = {}
+
+    def fake_which(name):
+        return "/usr/bin/clang" if name == "clang" else None
+
+    class Done:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        Path(argv[argv.index("-o") + 1]).write_bytes(b"")
+        return Done()
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(build_app.shutil, "which", fake_which)
+        monkey.setattr(build_app.subprocess, "run", fake_run)
+        defines = _launcher_defines(Path("/repo"), Path("/py"), "/c/bin", Path("/b.json"),
+                                    Path("/A.app"), Path("/libpython"))
+        build_app._compile_with_clang(STUB_SOURCE, tmp_path / "Veronica", defines)
+    finally:
+        monkey.undo()
+    assert not any("no_uuid" in a for a in seen["argv"]), seen["argv"]
