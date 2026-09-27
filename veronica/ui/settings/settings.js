@@ -189,6 +189,32 @@
     return row(sec, key, spec, section(sec)[key]);
   }
 
+  // One checkbox per tool that MAY be auto-allowed; the eligible set and its
+  // labels come from Python. Each posts the whole new list through the same
+  // `set` the free-form field below it uses, so ticking and clearing agree —
+  // and anything else on the list is carried through untouched.
+  function autoAllowRow(tool, label, allowed) {
+    const status = el('span', {class: 'status'});
+    const labelId = 'label-auto-' + tool;
+    const r = el('div', {class: 'row', 'data-section': 'brain', 'data-key': 'auto_allow_tools', 'data-tool': tool});
+    r.appendChild(el('span', {class: 'label', id: labelId, text: label}));
+    r.appendChild(el('span', {class: 'help', text: tool}));
+    const on = allowed.indexOf(tool) >= 0;
+    const input = el('input', {type: 'checkbox', class: 'toggle', 'data-tool': tool, checked: on, onchange: e => {
+      const next = allowed.filter(t => t !== tool);
+      if (e.target.checked) next.push(tool);
+      status.textContent = 'Applying…';
+      post('set', {section: 'brain', key: 'auto_allow_tools', value: next}).then(res => {
+        if (res.ok === false) { status.textContent = res.message || 'Failed'; status.classList.add('error'); input.checked = on; return; }
+        status.textContent = res.message || '';
+      });
+    }});
+    input.setAttribute('aria-labelledby', labelId);
+    r.appendChild(el('div', {class: 'control'}, [input]));
+    r.appendChild(status);
+    return r;
+  }
+
   function button(label, opts) {
     const o = opts || {};
     return el('button', Object.assign({type: 'button', class: o.class || 'btn', text: label, disabled: o.disabled}, o.attrs || {},
@@ -297,6 +323,11 @@
       frag.push(settingRow('brain', 'computer_trust_s'));
       frag.push(settingRow('brain', 'preapprove_by_wording'));
       frag.push(settingRow('brain', 'shortcut_allowlist', {wide: true}));
+      frag.push(el('h3', {text: 'Auto-allow tools'}));
+      frag.push(el('p', {class: 'lead', text: "Ticked tools run without asking. Only these can be added — sending mail or messages, AppleScript, screen control, shortcuts and the shell always ask."}));
+      const allowed = Array.isArray(b.auto_allow_tools) ? b.auto_allow_tools : [];
+      for (const t of (b.auto_allowable || [])) frag.push(autoAllowRow(t.tool, t.label, allowed));
+      frag.push(settingRow('brain', 'auto_allow_tools', {wide: true}));
       return frag;
     },
     history() {

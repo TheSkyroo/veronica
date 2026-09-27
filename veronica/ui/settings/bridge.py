@@ -55,12 +55,24 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
     "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
-    "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
+    "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist", "auto_allow_tools",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
               "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
               "brain_offline_fallback", "local_server_bin", "local_model", "local_ctx", "local_port"),
 }
 HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
+# The "Auto-allow tools" checkboxes: one per tool that MAY be auto-allowed
+# (policy.AUTO_ALLOWABLE — a test pins the two to each other), in the order
+# they're shown, with the plain-English name beside each.
+AUTO_ALLOW_LABELS: dict[str, str] = {
+    "mcp__mac__clipboard_write": "Copy to the clipboard",
+    "mcp__pim__calendar_create": "Create a calendar event",
+    "mcp__pim__reminder_create": "Create a reminder",
+    "mcp__memory__fact_add": "Remember a fact",
+    "mcp__memory__fact_delete": "Forget a fact",
+    "mcp__browser__browser_click": "Click in the browser",
+    "mcp__browser__browser_type": "Type in the browser",
+}
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                  "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                  "unread_enabled", "unread_time")
@@ -260,6 +272,8 @@ class SettingsBridge:
                 # What's actually answering right now ("Codex", "Claude (for
                 # Codex)" while standing in); "" until the switcher exists.
                 "brain_label": self._brain_label(orch),
+                # The tools that may be auto-allowed at all — one checkbox each.
+                "auto_allowable": [{"tool": t, "label": label} for t, label in AUTO_ALLOW_LABELS.items()],
             },
             "about": {
                 "version": self._version.APP_VERSION,

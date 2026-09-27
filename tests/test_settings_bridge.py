@@ -10,9 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from veronica.config import EDITABLE_SETTINGS, Settings
+from veronica.brain.policy import classify
+from veronica.config import EDITABLE_SETTINGS, Settings, load_settings
 from veronica.proactive import Schedule
-from veronica.ui.settings.bridge import SettingsBridge
+from veronica.ui.settings.bridge import AUTO_ALLOW_LABELS, SettingsBridge
 
 
 # -- fakes ---------------------------------------------------------------------
@@ -214,6 +215,7 @@ def test_state_has_every_section_and_key(h):
                                     "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                                     "unread_enabled", "unread_time"}
     assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
+                                "auto_allow_tools", "auto_allowable",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",
@@ -982,3 +984,40 @@ def test_shortcut_allowlist_is_editable_and_has_a_row(h):
     # ...and settings.js hand-lists a row for it, or the window can't reach it
     js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
     assert "settingRow('brain', 'shortcut_allowlist'" in js
+
+
+# -- auto-allow tools ---------------------------------------------------------
+
+
+def test_the_checkbox_list_matches_what_policy_allows():
+    from veronica.brain.policy import AUTO_ALLOWABLE
+
+    assert set(AUTO_ALLOW_LABELS) == AUTO_ALLOWABLE
+
+
+def test_auto_allow_tools_is_editable_and_round_trips_through_prefs(h):
+    assert h.bridge.set("brain", "auto_allow_tools", ["mcp__pim__reminder_create"])["ok"]
+    assert h.orch.s.auto_allow_tools == ["mcp__pim__reminder_create"]
+    assert ("auto_allow_tools", ["mcp__pim__reminder_create"]) in h.prefs.overrides
+    assert h.bridge.get_state()["brain"]["auto_allow_tools"] == ["mcp__pim__reminder_create"]
+    assert EDITABLE_SETTINGS["auto_allow_tools"].kind == "list"
+    # and the saved override is what a restart would load
+    assert load_settings(h.prefs.load()["settings"]).auto_allow_tools == ["mcp__pim__reminder_create"]
+
+
+def test_clearing_the_field_revokes_everything(h):
+    assert h.bridge.set("brain", "auto_allow_tools", "")["ok"]
+    assert h.orch.s.auto_allow_tools == []
+    assert classify("mcp__mac__clipboard_write", {"text": "hi"}, (), h.orch.s.auto_allow_tools) == "confirm"
+
+
+def test_the_default_ships_with_clipboard_write_ticked(h):
+    st = h.bridge.get_state()["brain"]
+    assert st["auto_allow_tools"] == ["mcp__mac__clipboard_write"]
+    assert [t["tool"] for t in st["auto_allowable"]] == list(AUTO_ALLOW_LABELS)
+
+
+def test_settings_js_renders_a_checkbox_per_tool_and_the_list_field():
+    js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
+    assert "autoAllowRow(t.tool, t.label, allowed)" in js
+    assert "settingRow('brain', 'auto_allow_tools'" in js
