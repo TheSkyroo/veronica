@@ -59,6 +59,32 @@ restart / sleep, `sudo`, pressing Enter, typing into a terminal, or anything on 
 confirmed every time, however you phrase it. A bare "do it" or "yes" is an answer, not a request, and a question
 ("should I do it?") never pre-approves. Turn it off in **Settings → Brain → Pre-approve when I say "do it"**.
 
+**Auto-allow tools.** If you've approved a tool once, it can stay approved. Answer a confirmation with "always"
+— or "don't ask again", "stop asking", "mat pucho" — and that tool stops asking, for good: the call goes ahead
+and the tool is added to **Settings → Brain → Auto-allow tools**, which survives a restart. She only offers the
+option for tools that are allowed to be there; from then on those calls show a "auto" pill in the HUD, the same
+as anything else that runs without asking. Seven tools are eligible, and **only** these can ever be added:
+
+| Tool | What it does |
+| --- | --- |
+| `mcp__mac__clipboard_write` | Copy to the clipboard — **ticked by default** |
+| `mcp__pim__calendar_create` | Create a calendar event |
+| `mcp__pim__reminder_create` | Create a reminder |
+| `mcp__memory__fact_add` | Remember a fact |
+| `mcp__memory__fact_delete` | Forget a fact |
+| `mcp__browser__browser_click` | Click in the browser |
+| `mcp__browser__browser_type` | Type in the browser (including a typed Enter) |
+
+**Destructive tools can never be added**, whichever way you try. Sending mail or messages, AppleScript, every
+screen-control action (`mcp__computer__*`), running a Shortcut and the shell are not on the list, so saying
+"always" to one of them approves that single call and she answers "That one I'll always ask about." Typing one
+into the free-form field by hand does nothing either: `policy.classify` only honours names in
+`policy.AUTO_ALLOWABLE`, and `policy.always_confirm` is checked first, so a hand-typed `mcp__pim__mail_send` or
+`mcp__computer__computer_click` still asks every single time.
+
+The Settings section has a checkbox per eligible tool plus the full list as a text field, for review and for
+revoking: untick one, or clear the field, and she starts asking again immediately — no restart.
+
 While she's listening, the HUD also shows a live partial transcript of what you're saying (in italics), which is
 replaced by the final transcript once you finish talking. This costs a bit of CPU; disable it with
 `VERONICA_PARTIAL_STT=false` in `.env` to save power on slower Macs.
