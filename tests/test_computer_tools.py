@@ -590,3 +590,40 @@ def test_dialog_safe_short_labels_are_exact_only():
     assert not c._dialog_safe("now")            # "Update Now" must not be safe
     assert not c._dialog_safe("ok") and not c._dialog_safe("on") and not c._dialog_safe("go")
     assert c._dialog_safe("Don't Allow") and c._dialog_safe("cancei")   # fuzzy still fine for long labels
+
+
+# ---- second display -------------------------------------------------------
+
+def _second_display_geometry() -> Geometry:
+    """A capture of the external 2560×1440 monitor at (1470, 0), downscaled
+    to 1568 px wide — its origin is global, not (0, 0)."""
+    return Geometry(
+        region="screen", image_w=1568, image_h=882, origin_x=1470.0, origin_y=0.0,
+        width_pt=2560.0, height_pt=1440.0, scale=1568 / 2560, captured_at=1000.0,
+        window=None, display={"id": 3, "index": 2, "main": False},
+    )
+
+
+async def test_click_on_the_second_display_is_not_out_of_bounds(fakes):
+    """The bounds check is against the captured display, not the main one:
+    a click in the middle of the external monitor's screenshot must land
+    past the main display's width, not be refused."""
+    calls, state = fakes
+    state["geometry"] = _second_display_geometry()
+    res = await c.computer_click.handler({"x": 784, "y": 441})
+    assert not res.get("is_error"), text(res)
+    name, x, y, button, double = calls[0]
+    assert name == "click" and button == "left" and double is False
+    assert x == pytest.approx(1470.0 + 1280.0, abs=1)
+    assert y == pytest.approx(720.0, abs=1)
+
+
+async def test_screen_space_point_on_the_second_display_is_accepted(fakes):
+    calls, state = fakes
+    state["geometry"] = _second_display_geometry()
+    res = await c.computer_move.handler({"x": 3900, "y": 1400, "space": "screen"})
+    assert not res.get("is_error"), text(res)
+    assert calls[0] == ("move", 3900.0, 1400.0)
+    # still bounded by that display: the main display's own points are off it
+    res = await c.computer_move.handler({"x": 700, "y": 400, "space": "screen"})
+    assert res["is_error"] and "outside the last screenshot" in text(res)

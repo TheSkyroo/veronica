@@ -55,7 +55,7 @@ async def test_call_tool_unknown_name_is_an_error():
 
 async def test_call_tool_passes_image_blocks_through(monkeypatch):
     png = b"\x89PNG tiny"
-    monkeypatch.setattr(screen, "capture_screenshot", lambda region: (png, None, "image/png"))
+    monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": (png, None, "image/png"))
     monkeypatch.setattr(screen, "load_geometry", lambda: None)
     content, is_error = await registry.call_tool("mcp__screen__screenshot", {"region": "screen"})
     assert not is_error
@@ -68,7 +68,7 @@ async def test_oversized_image_is_replaced_not_sent(monkeypatch):
     # ceiling would make a response line nobody can read, so it never goes
     # on the wire.
     huge = b"x" * (registry.MAX_IMAGE_BYTES + 1)
-    monkeypatch.setattr(screen, "capture_screenshot", lambda region: (huge, None, "image/png"))
+    monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": (huge, None, "image/png"))
     monkeypatch.setattr(screen, "load_geometry", lambda: None)
     content, is_error = await registry.call_tool("mcp__screen__screenshot", {"region": "screen"})
     assert is_error and content[0]["type"] == "text" and "too large" in content[0]["text"]
