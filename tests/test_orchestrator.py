@@ -5184,3 +5184,20 @@ async def test_the_ack_does_not_repeat_on_every_slow_turn():
 ])
 def test_a_yes_survives_extra_words(heard, expected):
     assert Orchestrator.classify_answer(heard) == expected
+
+
+@pytest.mark.parametrize("heard,expected", [
+    # "yes, and stop asking" — the negator lives inside the phrase, so it
+    # must not read as taking the approval back.
+    ("Yeah, just do not confirm again.", "approved"),
+    ("dont ask again", "approved"),
+    ("stop asking me that", "approved"),
+    ("yes always", "approved"),
+    ("always allow this", "approved"),
+    ("mat pucho", "approved"),
+    # a no outside the phrase still wins
+    ("no dont ask again", "denied"),
+    ("no, and dont ask again", "denied"),
+])
+def test_stop_asking_is_an_approval(heard, expected):
+    assert Orchestrator.classify_answer(heard) == expected

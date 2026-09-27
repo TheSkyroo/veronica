@@ -194,6 +194,19 @@ class Orchestrator:
     # Words that can pad a yes/no without turning it into a request ("yes
     # please", "no thanks", "haan ji", "not now"). Anything else left over
     # after the confirm/deny tokens is new content the brain should hear.
+    # "yes, and stop asking me" — an approval with a standing request
+    # attached. The words carry a negator ("do NOT confirm again"), which
+    # would otherwise read as taking the yes back, so they are matched
+    # first. (Persisting the "stop asking" part is the auto-allow setting;
+    # this only makes sure the answer counts as the yes it plainly is.)
+    ALWAYS_PHRASES = (
+        "dont ask again", "do not ask again", "dont ask me again", "dont ask",
+        "dont confirm again", "do not confirm again", "dont confirm", "no need to confirm",
+        "no need to ask", "stop asking", "without asking", "never ask again",
+        "mat pucho", "mat poocho", "puchna mat", "मत पूछो", "हमेशा",
+        "always", "always allow",
+    )
+
     # Words that turn a "yes" into a qualified answer: the user is steering
     # somewhere else rather than approving what was asked.
     REDIRECT_MARKERS = frozenset({
@@ -223,6 +236,15 @@ class Orchestrator:
         words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
         if not words:
             return "denied"
+        flat = " ".join(words)
+        for phrase in Orchestrator.ALWAYS_PHRASES:
+            if phrase not in flat:
+                continue
+            # "yeah, just don't confirm again": an approval, whatever the
+            # negator inside the phrase itself would otherwise say. A "no"
+            # OUTSIDE the phrase still wins ("no, and don't ask again").
+            rest = flat.replace(phrase, " ").split()
+            return "denied" if any(w in Orchestrator.DENY_WORDS for w in rest) else "approved"
         confirmed = Orchestrator.is_confirmation(heard)
         # Every word that is part of a confirm phrase, negated or not.
         covered = set()
