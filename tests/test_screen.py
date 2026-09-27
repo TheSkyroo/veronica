@@ -23,9 +23,13 @@ def fake_run(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_quartz(monkeypatch):
+def _no_real_quartz(monkeypatch, request):
     """Hermetic: no test reaches the real CoreGraphics; tests that need
-    display/window bounds patch `screen._quartz` with a fake."""
+    display/window bounds patch `screen._quartz` with a fake. The `live`
+    tests are the exception — the real screens are the point of them."""
+    if request.node.get_closest_marker("live") is not None:
+        return
+
     def boom():
         raise ImportError("Quartz disabled in tests")
     monkeypatch.setattr(screen, "_quartz", boom)
@@ -413,15 +417,26 @@ class _Rect:
 class FakeQuartz:
     kCGWindowListOptionIncludingWindow = 1 << 3
 
-    def __init__(self, bounds=(0, 0, 1470, 956), windows=None):
+    def __init__(self, bounds=(0, 0, 1470, 956), windows=None, displays=None):
         self._bounds, self._windows = bounds, windows or []
+        # (id, x, y, w, h) per active display, in CGGetActiveDisplayList
+        # order; by default just the one display `bounds` describes.
+        self._displays = displays if displays is not None else [(1, *bounds)]
         self.calls = []
 
     def CGMainDisplayID(self):
         return 1
 
+    def CGGetActiveDisplayList(self, max_displays, _ids, _count):
+        self.calls.append(("displaylist", max_displays))
+        ids = tuple(d[0] for d in self._displays[:max_displays])
+        return (0, ids, len(ids))
+
     def CGDisplayBounds(self, did):
         self.calls.append(("bounds", did))
+        for d in self._displays:
+            if d[0] == did:
+                return _Rect(*d[1:])
         return _Rect(*self._bounds)
 
     def CGWindowListCopyWindowInfo(self, options, wid):
@@ -635,3 +650,317 @@ async def test_selection_screenshot_text_has_no_geometry(fake_screens_dir, monke
     monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
     res = await screen.screenshot.handler({"region": "selection"})
     assert text(res) == "Screenshot of the selection."
+
+
+# ---- multi-display --------------------------------------------------------
+
+# Two displays as this Mac reports them: the main Retina laptop screen at
+# the origin, and a 2560×1440 monitor to its right.
+TWO_DISPLAYS = [(1, 0, 0, 1470, 956), (3, 1470, 0, 2560, 1440)]
+
+
+def _two_display_quartz(windows=None):
+    return FakeQuartz((0, 0, 1470, 956), windows=windows, displays=TWO_DISPLAYS)
+
+
+def _window(wid, x, y, w, h, app="Safari", title="Apple"):
+    return {
+        "kCGWindowNumber": wid, "kCGWindowOwnerName": app, "kCGWindowName": title,
+        "kCGWindowBounds": {"X": x, "Y": y, "Width": w, "Height": h},
+    }
+
+
+def test_active_displays_lists_id_index_and_bounds():
+    ds = screen._active_displays(_two_display_quartz())
+    assert [(d.id, d.index, d.main) for d in ds] == [(1, 1, True), (3, 2, False)]
+    assert (ds[1].x, ds[1].y, ds[1].w, ds[1].h) == (1470.0, 0.0, 2560.0, 1440.0)
+    assert ds[0].label == "main" and ds[1].label == "external"
+    assert ds[1].contains(2000, 700) and not ds[1].contains(100, 100)
+
+
+def test_displays_falls_back_to_main_bounds_without_the_list(monkeypatch):
+    """No CGGetActiveDisplayList (older seam / odd failure): one display,
+    built from the main display's bounds, still at index 1."""
+    class NoList(FakeQuartz):
+        CGGetActiveDisplayList = None   # not callable on this Quartz
+
+    monkeypatch.setattr(screen, "_quartz", lambda: NoList((0, 0, 1470, 956)))
+    ds = screen.displays()
+    assert len(ds) == 1 and ds[0].index == 1 and ds[0].main
+    assert (ds[0].w, ds[0].h) == (1470.0, 956.0)
+
+
+def test_displays_empty_without_quartz(monkeypatch):
+    def boom():
+        raise ImportError("no Quartz")
+    monkeypatch.setattr(screen, "_quartz", boom)
+    assert screen.displays() == []
+
+
+def test_pick_display_auto_follows_the_front_window(monkeypatch):
+    q = _two_display_quartz(windows=[_window(42, 1600, 200, 900, 700)])
+    monkeypatch.setattr(screen, "_quartz", lambda: q)
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    assert screen.pick_display("auto").index == 2
+
+
+def test_pick_display_auto_falls_back_to_main(monkeypatch):
+    q = _two_display_quartz()
+    monkeypatch.setattr(screen, "_quartz", lambda: q)
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    assert screen.pick_display("auto").index == 1
+    assert screen.pick_display("main").index == 1
+
+
+def test_pick_display_by_number_and_bad_spec(monkeypatch):
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz())
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    assert screen.pick_display("2").id == 3
+    with pytest.raises(ValueError, match="no display 5"):
+        screen.pick_display("5")
+    with pytest.raises(ValueError, match="must be"):
+        screen.pick_display("left")
+
+
+def test_screen_capture_pins_the_front_window_display(fake_screens_dir, monkeypatch):
+    """The bug: without -D, screencapture only ever grabs the main display."""
+    calls = _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz(
+        windows=[_window(42, 1600, 200, 900, 700)]))
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    screen.capture_screenshot("screen")
+    argv = [a for a in calls if a[0] == "screencapture"][0]
+    assert argv[argv.index("-D") + 1] == "2"
+
+
+def test_geometry_origin_is_the_second_displays_origin(fake_screens_dir, monkeypatch):
+    """origin_* is global, so to_screen lands on the external monitor."""
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz(
+        windows=[_window(42, 1600, 200, 900, 700)]))
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    screen.capture_screenshot("screen")
+    g = screen.load_geometry()
+    assert (g.origin_x, g.origin_y) == (1470.0, 0.0)
+    assert (g.width_pt, g.height_pt) == (2560.0, 1440.0)
+    assert g.display == {"id": 3, "index": 2, "main": False}
+    x, y = g.to_screen(0, 0)
+    assert (x, y) == (1470.0, 0.0)
+    x, y = g.to_screen(g.image_w / 2, 0)
+    assert 1470.0 < x < 1470.0 + 2560.0
+
+
+async def test_screenshot_text_names_the_display_when_there_are_two(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz(
+        windows=[_window(42, 1600, 200, 900, 700)]))
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert text(res) == (
+        "Screenshot of display 2 of 2 (external, 2560×1440 pt): 1568×1019 px. "
+        "Coordinates you pass to computer_* tools are in these image pixels."
+    )
+
+
+async def test_screenshot_text_unchanged_with_one_display(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert text(res) == (
+        "Screenshot of the screen: 1568×1019 px (screen 1470×956 pt). "
+        "Coordinates you pass to computer_* tools are in these image pixels."
+    )
+
+
+async def test_screenshot_display_number_picks_that_screen(fake_screens_dir, monkeypatch):
+    calls = _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz())
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    res = await screen.screenshot.handler({"region": "screen", "display": "2"})
+    assert not res.get("is_error")
+    argv = [a for a in calls if a[0] == "screencapture"][0]
+    assert argv[argv.index("-D") + 1] == "2"
+    assert screen.load_geometry().origin_x == 1470.0
+
+
+async def test_screenshot_display_out_of_range_is_an_error(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz())
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    res = await screen.screenshot.handler({"region": "screen", "display": "7"})
+    assert res["is_error"] and "no display 7" in text(res)
+
+
+async def test_screenshot_all_returns_one_image_per_display(fake_screens_dir, monkeypatch):
+    calls = _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz(
+        windows=[_window(42, 1600, 200, 900, 700)]))
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    res = await screen.screenshot.handler({"region": "screen", "display": "all"})
+    kinds = [b["type"] for b in res["content"]]
+    assert kinds == ["image", "image", "text"]
+    grabbed = [a[a.index("-D") + 1] for a in calls if a[0] == "screencapture"]
+    # the front window's display goes last, so latest.png/the sidecar are its
+    assert grabbed == ["1", "2"]
+    assert screen.load_geometry().display == {"id": 3, "index": 2, "main": False}
+    body = text(res)
+    assert "display 1 (main, 1470×956 pt)" in body
+    assert "display 2 (external, 2560×1440 pt)" in body
+    assert "pixels of the display 2 (external) image" in body
+    # each capture is downscaled harder to share the one-message budget
+    assert all(str(screen.DOWNSCALE_ALL_MAX_PX) in a
+               for a in calls if a[0] == "sips" and "--resampleHeightWidthMax" in a)
+
+
+async def test_screenshot_all_names_what_did_not_fit(fake_screens_dir, monkeypatch):
+    """Over the budget the oversized display is named in the text, never
+    dropped in silence."""
+    big = b"\x89PNG" + b"\0" * screen.MAX_ALL_BYTES
+
+    def run(argv, **kw):
+        if argv[0] == "screencapture":
+            with open(argv[-1], "wb") as f:
+                f.write(big)
+        if argv[0] == "sips" and "--out" in argv:
+            with open(argv[argv.index("--out") + 1], "wb") as f:
+                f.write(big)
+        if argv[0] == "sips" and "-g" in argv:
+            return Done(out=SIPS_G_OUT)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz())
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    res = await screen.screenshot.handler({"region": "screen", "display": "all"})
+    assert [b["type"] for b in res["content"]] == ["image", "text"]
+    assert "display 2 didn't fit" in text(res)
+
+
+async def test_screenshot_all_with_one_display_reads_like_a_plain_screen_shot(
+    fake_screens_dir, monkeypatch
+):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: FakeQuartz((0, 0, 1470, 956)))
+    res = await screen.screenshot.handler({"region": "screen", "display": "all"})
+    assert [b["type"] for b in res["content"]] == ["image", "text"]
+    assert text(res).startswith("Screenshot of the screen:")
+
+
+def test_window_capture_records_the_display_it_is_on(fake_screens_dir, monkeypatch):
+    _geometry_run(monkeypatch, fake_screens_dir)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz(
+        windows=[_window(42, 1600, 200, 900, 700)]))
+    monkeypatch.setattr(screen, "front_window_id", lambda: 42)
+    screen.capture_screenshot("window")
+    g = screen.load_geometry()
+    # window bounds win over the display's, but the display is recorded
+    assert (g.origin_x, g.origin_y, g.width_pt, g.height_pt) == (1600.0, 200.0, 900.0, 700.0)
+    assert g.display == {"id": 3, "index": 2, "main": False}
+
+
+def test_display_change_retry_pins_the_same_display(fake_screens_dir, monkeypatch):
+    """The stale-display-list retry must not silently fall back to the
+    main display when another one was asked for."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "screencapture":
+            if len(calls) == 1:
+                return Done(rc=1, err="could not create image from display")
+            with open(argv[-1], "wb") as f:
+                f.write(b"\x89PNG-fake")
+        if argv[0] == "sips" and "-g" in argv:
+            return Done(out=SIPS_G_OUT)
+        return Done(out="")
+
+    monkeypatch.setattr(screen.subprocess, "run", run)
+    monkeypatch.setattr(screen, "_quartz", lambda: _two_display_quartz())
+    monkeypatch.setattr(screen, "front_window_id", lambda: None)
+    screen.capture_screenshot("screen", display="2")
+    retry = [a for a in calls if a[0] == "screencapture"][1]
+    assert retry[retry.index("-D") + 1] == "2"
+
+
+# ---- live: needs the real screens ----------------------------------------
+
+@pytest.fixture
+def live_displays():
+    found = screen.displays()
+    if len(found) < 2:
+        pytest.skip("needs a second display attached")
+    return found
+
+
+@pytest.mark.live
+def test_live_active_displays_are_side_by_side(live_displays):
+    """Every active display shows up with a distinct id, its 1-based index
+    and non-overlapping global bounds."""
+    assert [d.index for d in live_displays] == list(range(1, len(live_displays) + 1))
+    assert len({d.id for d in live_displays}) == len(live_displays)
+    assert sum(1 for d in live_displays if d.main) == 1
+    assert all(d.w > 0 and d.h > 0 for d in live_displays)
+
+
+@pytest.mark.live
+def test_live_each_display_captures_its_own_size(live_displays, tmp_path):
+    """The bug, live: without -D every capture came back the main
+    display's size. Each display's raw capture must match its own points
+    (times that screen's backing scale)."""
+    for d in live_displays:
+        out = tmp_path / f"d{d.index}.png"
+        argv = screen._capture_argv("screen", out, None, d)
+        assert subprocess.run(argv, capture_output=True, text=True).returncode == 0
+        size = screen._png_size(out)
+        assert size is not None
+        factor = size[0] / d.w
+        assert factor in (1.0, 2.0), f"display {d.index}: {size} for {d.w}×{d.h} pt"
+        assert size[1] == pytest.approx(d.h * factor, abs=1)
+        geometry = screen._build_geometry("screen", out, None, d)
+        assert geometry is not None
+        assert (geometry.origin_x, geometry.origin_y) == (d.x, d.y)
+        assert (geometry.width_pt, geometry.height_pt) == (d.w, d.h)
+
+
+@pytest.mark.live
+async def test_live_auto_captures_the_front_windows_display(live_displays):
+    """region='screen' follows the frontmost window, and the geometry it
+    writes maps image pixels back onto that display."""
+    expected = screen.pick_display("auto", live_displays)
+    res = await screen.screenshot.handler({"region": "screen"})
+    assert not res.get("is_error"), text(res)
+    g = screen.load_geometry()
+    assert g is not None and g.display["index"] == expected.index
+    assert (g.origin_x, g.origin_y) == (expected.x, expected.y)
+    assert f"display {expected.index} of {len(live_displays)}" in text(res)
+    # round trip: the middle of the image is the middle of that display
+    x, y = g.to_screen(g.image_w / 2, g.image_h / 2)
+    assert expected.contains(x, y)
+    assert x == pytest.approx(expected.x + expected.w / 2, abs=2)
+    assert y == pytest.approx(expected.y + expected.h / 2, abs=2)
+
+
+@pytest.mark.live
+async def test_live_display_number_captures_that_display(live_displays):
+    for d in live_displays:
+        res = await screen.screenshot.handler({"region": "screen", "display": str(d.index)})
+        assert not res.get("is_error"), text(res)
+        g = screen.load_geometry()
+        assert (g.origin_x, g.origin_y, g.width_pt, g.height_pt) == (d.x, d.y, d.w, d.h)
+        assert g.image_w / g.image_h == pytest.approx(d.w / d.h, rel=0.01)
+
+
+@pytest.mark.live
+async def test_live_all_returns_every_display_within_budget(live_displays):
+    res = await screen.screenshot.handler({"region": "screen", "display": "all"})
+    assert not res.get("is_error"), text(res)
+    images = [b for b in res["content"] if b["type"] == "image"]
+    assert len(images) == len(live_displays)
+    import base64
+    total = sum(len(base64.b64decode(b["data"])) for b in images)
+    assert total <= screen.MAX_ALL_BYTES
+    # the sidecar belongs to the display the model will act on
+    chosen = screen.pick_display("auto", live_displays)
+    g = screen.load_geometry()
+    assert g.display["index"] == chosen.index
+    assert f"display {chosen.index}" in text(res)

@@ -285,10 +285,12 @@ Disable memory entirely (no DB, no injection, no remember/forget intents) with:
 ## Screen awareness
 
 Ask "what's on my screen", "look at my screen", "summarize this page/screen", or "what does this error say" and
-Veronica takes a screenshot of the main display herself (downscaled to fit within 1568 px on the long edge) and
+Veronica takes a screenshot herself (downscaled to fit within 1568 px on the long edge) and
 sends it to Claude along with your question in one turn — the HUD shows a "Look at screen" action line. Claude can
 also decide to look at the screen on its own mid-conversation via the `screenshot` tool (allow-class, runs
-automatically). Requires **Screen Recording** access — see Permissions below.
+automatically). With more than one monitor she captures the display your frontmost window is on; Claude can ask for
+one by number (`display=2`) or for every screen at once (`display=all`), and clicks map back to the right monitor.
+Requires **Screen Recording** access — see Permissions below.
 
 ## Browser control
 
