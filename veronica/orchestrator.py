@@ -194,6 +194,13 @@ class Orchestrator:
     # Words that can pad a yes/no without turning it into a request ("yes
     # please", "no thanks", "haan ji", "not now"). Anything else left over
     # after the confirm/deny tokens is new content the brain should hear.
+    # Words that turn a "yes" into a qualified answer: the user is steering
+    # somewhere else rather than approving what was asked.
+    REDIRECT_MARKERS = frozenset({
+        "but", "instead", "except", "rather", "actually", "although", "though",
+        "however", "wait", "hold", "lekin", "magar", "balki", "लेकिन", "मगर", "बल्कि",
+    })
+
     ANSWER_FILLERS = frozenset({
         "please", "pls", "thanks", "thank", "you", "veronica", "now", "it", "that", "this",
         "then", "so", "and", "just", "already", "really", "ahead", "for", "me", "on",
@@ -231,11 +238,16 @@ class Orchestrator:
         if any(w in Orchestrator.QUESTION_WORDS for w in words):
             return "other"
         if len(remaining) >= 6:
-            return "other"
+            return "other"          # a whole instruction rode along
+        if confirmed:
+            # A yes stays a yes however it is dressed up — "yes sir",
+            # "yes yes yes do it man", "yeah go on then". Only a word that
+            # takes it back or points somewhere else ("yes, but in Chrome")
+            # makes it the next request instead; requiring every extra word
+            # to be on a whitelist turned ordinary approvals into declines.
+            return "other" if any(w in Orchestrator.REDIRECT_MARKERS for w in remaining) else "approved"
         if any(w not in Orchestrator.ANSWER_FILLERS for w in remaining):
             return "other"
-        if confirmed:
-            return "approved"
         # No yes, no content: a no, or a mumble with nothing to redirect to.
         return "denied"
 

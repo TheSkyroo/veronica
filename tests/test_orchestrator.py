@@ -5161,3 +5161,26 @@ async def test_the_ack_does_not_repeat_on_every_slow_turn():
     o._last_ack_at -= o.ACK_MIN_GAP_S + 1          # long enough later: allowed again
     await o._ack_if_slow(lambda: False, "en")
     assert said == ["On it.", "On it."]
+
+
+@pytest.mark.parametrize("heard,expected", [
+    # A yes dressed up in anything is still a yes — these all used to come
+    # back "other", which denied the tool and blocked every approval.
+    ("Yes. Do it man, do it.", "approved"),
+    ("Yes, sir.", "approved"),
+    ("Yes, yes, yes. Confirmation doesn't work. Yes.", "approved"),
+    ("yeah go on then", "approved"),
+    ("yes please do that for me", "approved"),
+    ("haan kar do", "approved"),
+    # …unless it points somewhere else
+    ("yes but in chrome", "other"),
+    ("yes, open it in the other profile instead", "other"),
+    ("yes wait no", "other"),
+    ("what will that do?", "other"),
+    # and a no is still a no
+    ("no", "denied"),
+    ("no thanks", "denied"),
+    ("", "denied"),
+])
+def test_a_yes_survives_extra_words(heard, expected):
+    assert Orchestrator.classify_answer(heard) == expected
