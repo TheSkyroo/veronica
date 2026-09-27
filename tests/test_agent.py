@@ -875,7 +875,9 @@ class _Trust:
             return self.answers.pop(0) if self.answers else False
 
         self.brain = Brain(
-            Settings(computer_trust_s=trust_s), confirm=confirm,
+            # nothing auto-allowed: clipboard_write is the stand-in
+            # confirm-class tool here, and it ships on the list
+            Settings(computer_trust_s=trust_s, auto_allow_tools=[]), confirm=confirm,
             on_tool=lambda s, d: self.tools.append((s, d)),
             frontmost=lambda: self.front, clock=lambda: self.now,
         )

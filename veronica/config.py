@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # asking. Everything else is confirm-class, so an empty list (the
     # default) means every shortcut is asked about.
     shortcut_allowlist: list[str] = Field(default_factory=list)
+    # Confirm-class tools the user has approved for good, by ticking them in
+    # Settings or answering a confirm with "always". Only the names in
+    # policy.AUTO_ALLOWABLE take effect: anything else here is ignored, so a
+    # hand-typed mail_send still asks every single time.
+    auto_allow_tools: list[str] = Field(default_factory=lambda: ["mcp__mac__clipboard_write"])
     # External brains: may the vendor CLI use its own shell/file tools
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.
@@ -285,6 +290,12 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "list", "Shortcuts she may run without asking",
         "Comma-separated shortcut names, exactly as they're named in Shortcuts. "
         "Anything not listed still asks first.",
+        restart=False,
+    ),
+    "auto_allow_tools": EditableField(
+        "list", "Tools she may use without asking",
+        "Ticked above. Comma-separated tool names; clear one to start asking again. "
+        "Only the tools listed here can ever be added — sending, screen control and the shell always ask.",
         restart=False,
     ),
     "brain_backend": EditableField(

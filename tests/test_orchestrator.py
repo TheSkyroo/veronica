@@ -5201,3 +5201,26 @@ def test_a_yes_survives_extra_words(heard, expected):
 ])
 def test_stop_asking_is_an_approval(heard, expected):
     assert Orchestrator.classify_answer(heard) == expected
+
+
+@pytest.mark.parametrize("heard,always", [
+    ("Yeah, just do not confirm again.", True),
+    ("dont ask again", True),
+    ("yes always", True),
+    ("mat pucho", True),
+    # a plain yes is a yes for this one call only
+    ("yes", False),
+    ("yeah go on then", False),
+    ("", False),
+])
+def test_says_always_marks_a_standing_approval(heard, always):
+    assert Orchestrator.says_always(heard) is always
+
+
+def test_confirm_result_carries_the_always_flag():
+    from veronica.orchestrator import ConfirmResult
+
+    assert ConfirmResult("approved", "yes").always is False
+    assert bool(ConfirmResult("approved", "always", always=True)) is True
+    # a "no, and don't ask again" is a no: never a standing approval
+    assert ConfirmResult(Orchestrator.classify_answer("no dont ask again")).outcome == "denied"

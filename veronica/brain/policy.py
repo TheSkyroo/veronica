@@ -237,7 +237,46 @@ def _shortcut_allowed(name: str, allowlist) -> bool:
     return any(str(entry).strip().casefold() == wanted for entry in allowlist or ())
 
 
-def classify(tool_name: str, tool_input: dict, shortcut_allowlist=()) -> Decision:
+# Confirm-class tools the user may switch off one by one, in Settings ›
+# Brain or by answering a confirm with "always". Nothing outside this set
+# can ever be auto-allowed, however it gets into the setting: sending mail
+# or messages, AppleScript, screen control, shortcuts and the shell always
+# ask.
+AUTO_ALLOWABLE = frozenset({
+    "mcp__mac__clipboard_write",
+    "mcp__pim__calendar_create",
+    "mcp__pim__reminder_create",
+    "mcp__memory__fact_add",
+    "mcp__memory__fact_delete",
+    "mcp__browser__browser_click",
+    "mcp__browser__browser_type",
+})
+
+
+def _auto_allowed(tool_name: str, auto_allow) -> bool:
+    """True iff the user listed `tool_name` AND it is one of the tools that
+    may be on the list at all."""
+    if tool_name not in AUTO_ALLOWABLE:
+        return False
+    return any(str(entry or "").strip() == tool_name for entry in auto_allow or ())
+
+
+def classify(tool_name: str, tool_input: dict, shortcut_allowlist=(), auto_allow=()) -> Decision:
+    """`auto_allow` is Settings.auto_allow_tools — confirm-class tools the
+    user has approved for good. Only AUTO_ALLOWABLE names count, and
+    `always_confirm` is consulted first, so anything on the never-list that
+    was hand-typed into the setting still gets its own yes/no."""
+    decision = _classify(tool_name, tool_input, shortcut_allowlist)
+    if (
+        decision == "confirm"
+        and _auto_allowed(tool_name, auto_allow)
+        and not always_confirm(tool_name, tool_input)
+    ):
+        return "allow"
+    return decision
+
+
+def _classify(tool_name: str, tool_input: dict, shortcut_allowlist=()) -> Decision:
     if tool_name in ALLOW_TOOLS:
         return "allow"
     if tool_name == "Bash":

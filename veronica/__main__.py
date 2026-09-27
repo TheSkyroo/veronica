@@ -152,7 +152,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # One confirm gate for every brain; the switcher builds the backends on
     # it lazily (orch.start_brain activates the preferred one) and speaks
     # through the orchestrator when it fails over or can't start.
-    gate = ToolGate(s, confirm, on_tool=on_tool)
+    gate = ToolGate(s, confirm, on_tool=on_tool, say=lambda t: holder["orch"].say(t))
     switcher = BrainSwitcher(
         s, gate=gate, on_tool=on_tool, memory=store,
         say=lambda t: holder["orch"].say(t),
@@ -203,8 +203,8 @@ def _quit_noop() -> None:
 async def _text_mode(text: str) -> None:
     orch = build_orchestrator(settings, audio=False, on_quit=_quit_noop)
     # no mic in text mode: risky (confirm-class) tools ask y/N on stdin.
-    async def confirm(summary: str, detail: str = "") -> bool:
-        answer = await asyncio.to_thread(_ask_stdin, f"{Orchestrator.confirm_prompt(summary)} [{detail}] [y/N] ")
+    async def confirm(summary: str, detail: str = "", *, question: str | None = None) -> bool:
+        answer = await asyncio.to_thread(_ask_stdin, f"{question or Orchestrator.confirm_prompt(summary)} [{detail}] [y/N] ")
         ok = answer.strip().lower() in ("y", "yes")
         print(f"[tool] {summary} -> {'allowed' if ok else 'declined'}")
         return ok

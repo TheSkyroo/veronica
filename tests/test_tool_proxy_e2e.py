@@ -56,7 +56,8 @@ async def proxy_call(sock, monkeypatch, server, tool, args, *, answers=(True,)):
     async def confirm(summary, detail=""):
         return pending.pop(0)
 
-    srv = GateServer(ToolGate(Settings(), confirm), sock, run_tool=registry.call_tool)
+    # nothing auto-allowed: clipboard_write is the confirm-class stand-in here
+    srv = GateServer(ToolGate(Settings(auto_allow_tools=[]), confirm), sock, run_tool=registry.call_tool)
     await srv.start()
     try:
         inst = serve.gated_server(server)
