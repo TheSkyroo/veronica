@@ -2,8 +2,11 @@
 events via Quartz CGEvent, Accessibility (AX) checks, and a frontmost-app
 lookup.
 
-Coordinates here are **screen points** (top-left origin, main display);
-the `computer` tools convert screenshot pixels before calling in. Every
+Coordinates here are **screen points** in the global space: top-left
+origin on the main display, running on across every attached one, so a
+point on a second monitor is simply past the main display's width and
+nothing here clamps it. The `computer` tools convert screenshot pixels
+before calling in. Every
 framework call goes through `_quartz()` / `_ax()` / `_appkit()` so tests
 can swap in recording fakes — nothing in this module is exercised for
 real under pytest.

@@ -92,7 +92,7 @@ async def test_a_timer_set_through_an_external_brain_fires(sock, monkeypatch):
 
 async def test_a_screenshot_comes_back_as_an_image_over_the_socket(sock, monkeypatch):
     png = b"\x89PNG not really"
-    monkeypatch.setattr(screen, "capture_screenshot", lambda region: (png, None, "image/png"))
+    monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": (png, None, "image/png"))
     monkeypatch.setattr(screen, "load_geometry", lambda: None)
     res = await proxy_call(sock, monkeypatch, "screen", "screenshot", {"region": "screen"}, answers=())
     assert not res.is_error
@@ -110,7 +110,7 @@ async def test_a_denied_call_never_reaches_the_tool(sock, monkeypatch):
 async def test_the_proxy_fails_closed_when_the_app_is_gone(sock, monkeypatch):
     monkeypatch.setenv("VERONICA_GATE_SOCK", str(sock))       # never bound
     ran = []
-    monkeypatch.setattr(screen, "capture_screenshot", lambda region: ran.append(region) or "no")
+    monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": ran.append(region) or "no")
     inst = serve.gated_server("screen")
     res = await inst.get_request_handler("tools/call").handler(
         None, CallToolRequestParams(name="screenshot", arguments={"region": "screen"}))
