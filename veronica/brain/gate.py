@@ -7,14 +7,21 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from veronica import prefs
 from veronica.brain.agent import (
     COMPUTER_PREFIX,
     Confirm,
+    confirm_prompt,
     summarize_detail,
     summarize_tool,
 )
 from veronica.brain.base import Decision
-from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES, always_confirm, classify
+from veronica.brain.policy import (
+    AUTO_ALLOWABLE,
+    TRUST_EXCLUDED_BUNDLES,
+    always_confirm,
+    classify,
+)
 from veronica.config import Settings
 from veronica.tools.computer_events import Front, frontmost, is_system_dialog
 
@@ -23,14 +30,21 @@ log = logging.getLogger("veronica.brain")
 # (content blocks, is_error) for one allowed tool call, run in this process.
 RunTool = Callable[[str, dict], Awaitable[tuple[list[dict], bool]]]
 NO_RUNNER = "Veronica can't run tools right now"
+# Tacked onto the spoken question, but only for a tool the user could
+# switch off for good (policy.AUTO_ALLOWABLE).
+ALWAYS_HINT = " Say always and I'll stop asking."
+# What she says when "always" lands on something that can never be
+# auto-allowed. The call itself still goes ahead.
+ALWAYS_ASK = "That one I'll always ask about."
 
 
-def _confirm_outcome(result) -> tuple[str, str]:
-    """(outcome, heard) of a Confirm result; a bare bool is approved/denied."""
+def _confirm_outcome(result) -> tuple[str, str, bool]:
+    """(outcome, heard, always) of a Confirm result; a bare bool is
+    approved/denied. `always` is a yes that also said stop asking."""
     outcome = getattr(result, "outcome", None)
     if outcome is None:
-        return ("approved" if result else "denied"), ""
-    return outcome, getattr(result, "heard", "") or ""
+        return ("approved" if result else "denied"), "", False
+    return outcome, getattr(result, "heard", "") or "", bool(getattr(result, "always", False))
 
 
 class ToolGate:
@@ -45,12 +59,16 @@ class ToolGate:
         on_tool: Callable[[str, str], None] | None = None,
         frontmost: Callable[[], Front] = frontmost,
         clock: Callable[[], float] = time.monotonic,
+        say: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.s = settings
         self._confirm = confirm
         self._on_tool = on_tool
         self._frontmost = frontmost
         self._clock = clock
+        # One spoken line, when "always" lands on a tool that can never be
+        # auto-allowed. Wired to Orchestrator.say; None in text mode.
+        self._say = say
         # Trust window (spec E4): after the user approves one confirm-class
         # screen action, further ones in the same app are auto-allowed until
         # `_trust_until` (monotonic seconds). Cleared on barge, "that's all",
@@ -102,7 +120,7 @@ class ToolGate:
         if redirect is not None:
             log.info("tool redirected: %s -> %s", summary, redirect)
             return Decision(False, "redirect", redirect)
-        if classify(tool_name, input, self.s.shortcut_allowlist) == "allow":
+        if classify(tool_name, input, self.s.shortcut_allowlist, self.s.auto_allow_tools) == "allow":
             log.info("auto-allow: %s", summary)
             self._card(summary, "auto")
             return Decision(True, "auto")
@@ -114,10 +132,38 @@ class ToolGate:
         if front is not None:
             return await self._gate_computer(tool_name, input, summary, front)
         log.info("tool request: %s", summary)
-        outcome, heard = _confirm_outcome(await self._confirm(summary, summarize_detail(tool_name, input)))
+        outcome, heard, always = _confirm_outcome(await self._ask(tool_name, summary, input))
         if outcome == "approved":
+            if always:
+                await self._remember(tool_name)
             return Decision(True, "approved")
         return self._deny(outcome, heard)
+
+    # -- auto-allow ("yes, and stop asking") ----------------------------------
+    def _ask(self, tool_name: str, summary: str, input: dict):
+        """The confirm call. A tool the user could switch off for good is
+        asked with the option said out loud; everything else is asked the
+        way it always was."""
+        detail = summarize_detail(tool_name, input)
+        if tool_name in AUTO_ALLOWABLE:
+            return self._confirm(summary, detail, question=confirm_prompt(summary) + ALWAYS_HINT)
+        return self._confirm(summary, detail)
+
+    async def _remember(self, tool_name: str) -> None:
+        """Persist a "yes, and stop asking" — to the live Settings and to
+        prefs.json, so it survives a restart. Only for AUTO_ALLOWABLE tools:
+        anything else keeps its yes/no, and she says so. The approval itself
+        stands either way."""
+        if tool_name not in AUTO_ALLOWABLE:
+            log.info("always refused for %s (not auto-allowable)", tool_name)
+            if self._say is not None:
+                await self._say(ALWAYS_ASK)
+            return
+        if tool_name in self.s.auto_allow_tools:
+            return
+        self.s.auto_allow_tools = [*self.s.auto_allow_tools, tool_name]
+        prefs.save_settings_override("auto_allow_tools", list(self.s.auto_allow_tools))
+        log.info("auto-allow added: %s", tool_name)
 
     def _deny(self, outcome: str, heard: str) -> Decision:
         """A "no" is a plain decline; anything else the user said instead is
@@ -196,8 +242,10 @@ class ToolGate:
             self._card(summary, "auto")     # HUD wire value unchanged
             return Decision(True, "trusted")
         log.info("tool request: %s", summary)
-        outcome, heard = _confirm_outcome(await self._confirm(summary, summarize_detail(tool_name, input)))
+        outcome, heard, always = _confirm_outcome(await self._ask(tool_name, summary, input))
         if outcome == "approved":
+            if always:
+                await self._remember(tool_name)   # never eligible: she says so
             front = self._frontmost()
             now = self._clock()
             window = self.s.computer_trust_s

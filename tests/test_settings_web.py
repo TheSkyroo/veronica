@@ -7,6 +7,7 @@ import pathlib
 import pytest
 
 from veronica.config import EDITABLE_SETTINGS
+from veronica.ui.settings.bridge import AUTO_ALLOW_LABELS
 
 PAGE = pathlib.Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "index.html"
 TABS = ["general", "voice", "listening", "briefings", "brain", "history", "about"]
@@ -32,7 +33,10 @@ def fixture_state(**over) -> dict:
                       "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
         "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
-                  "preapprove_by_wording": True, "shortcut_allowlist": [], "brain_backend": "codex", "brain_failover": True,
+                  "preapprove_by_wording": True, "shortcut_allowlist": [],
+                  "auto_allow_tools": ["mcp__mac__clipboard_write"],
+                  "auto_allowable": [{"tool": t, "label": lbl} for t, lbl in AUTO_ALLOW_LABELS.items()],
+                  "brain_backend": "codex", "brain_failover": True,
                   "brain_failover_order": "codex,antigravity,claude,copilot", "brain_limit_cooldown_min": 60,
                   "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
                   "brain_offline_fallback": True, "local_server_bin": "/opt/llama-server",
@@ -97,6 +101,44 @@ def test_all_tabs_render_from_state():
         assert "0.1.0" in about and "a517483" in about and "modified" in about.lower()
         assert page.inner_text("#pane .about .log-path") == "/tmp/veronica.log"
         assert not page.is_visible("#banner")
+        browser.close()
+
+
+@pytest.mark.live
+def test_auto_allow_section_renders_toggles_and_revokes():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('brain')")
+        # one checkbox per eligible tool, clipboard_write ticked
+        boxes = page.locator("#pane .row[data-key=auto_allow_tools] input[type=checkbox]")
+        assert boxes.count() == len(AUTO_ALLOW_LABELS)
+        assert page.is_checked("#pane input[data-tool='mcp__mac__clipboard_write']")
+        assert not page.is_checked("#pane input[data-tool='mcp__pim__reminder_create']")
+        assert "Copy to the clipboard" in page.inner_text("#pane .row[data-tool='mcp__mac__clipboard_write']")
+
+        # ticking one adds it, leaving the others alone
+        page.click("#pane input[data-tool='mcp__pim__reminder_create']")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "set" and msg["args"] == {
+            "section": "brain", "key": "auto_allow_tools",
+            "value": ["mcp__mac__clipboard_write", "mcp__pim__reminder_create"]}
+        reply(page, msg["id"], {"ok": True, "restart_required": False, "message": ""})
+        assert page.inner_text("#pane .row[data-tool='mcp__pim__reminder_create'] .status") == ""
+
+        # unticking revokes; a refusal puts the tick back
+        page.click("#pane input[data-tool='mcp__mac__clipboard_write']")
+        msg = sent(page)[-1]
+        assert msg["args"] == {"section": "brain", "key": "auto_allow_tools", "value": []}
+        reply(page, msg["id"], {"ok": False, "message": "nope", "restart_required": False})
+        assert page.is_checked("#pane input[data-tool='mcp__mac__clipboard_write']")
+
+        # the free-form field lists them for review, and clearing it revokes
+        assert page.input_value("#pane input[data-key=auto_allow_tools]") == "mcp__mac__clipboard_write"
+        page.fill("#pane input[data-key=auto_allow_tools]", "")
+        page.press("#pane input[data-key=auto_allow_tools]", "Enter")
+        assert sent(page)[-1]["args"] == {"section": "brain", "key": "auto_allow_tools", "value": []}
         browser.close()
 
 

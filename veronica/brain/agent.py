@@ -11,10 +11,12 @@ def _image_media_type(data: bytes) -> str:
     tools/screen.py), else image/png."""
     return "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
 
-# confirm(summary, detail) answers with something truthy only when the
-# user approved: Orchestrator.ConfirmResult (`.outcome` of "approved" /
-# "denied" / "other" plus `.heard`), or a bare bool from older callers.
-Confirm = Callable[[str, str], Awaitable[Any]]
+# confirm(summary, detail, question=…) answers with something truthy only
+# when the user approved: Orchestrator.ConfirmResult (`.outcome` of
+# "approved" / "denied" / "other", plus `.heard` and `.always`), or a bare
+# bool from older callers. `question` overrides the spoken wording; the gate
+# passes it for a tool that can be auto-allowed.
+Confirm = Callable[..., Awaitable[Any]]
 
 
 MAC_PREFIX = "mcp__mac__"
@@ -28,6 +30,20 @@ COMPUTER_PREFIX = "mcp__computer__"
 # TRUST_EXCLUDED_BUNDLES (terminals) and the Enter/terminal/system-dialog
 # rules live in policy.always_confirm now; the gate and the trust window
 # both consult it.
+
+
+# Summaries that already read as an action (the computer tools' "Click
+# 'Save'", "Press cmd+s") are asked as themselves; anything else gets the
+# generic "Run X?".
+ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
+
+
+def confirm_prompt(summary: str) -> str:
+    """The spoken question for a tool `summary`: "Click 'Save'?" for a
+    screen action, "Run Bash: ls?" for everything else."""
+    if summary.startswith(ACTION_SUMMARY_PREFIXES):
+        return f"{summary}?"
+    return f"Run {summary}?"
 
 
 def summarize_tool(tool_name: str, input: dict) -> str:

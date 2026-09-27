@@ -18,6 +18,7 @@ from veronica import version
 from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
 from veronica.brain import quick
+from veronica.brain.agent import confirm_prompt
 from veronica.brain.backends import BACKENDS, check_backend
 from veronica.brain.backends.cli import LimitError
 from veronica.brain.gate import GateServer
@@ -92,6 +93,10 @@ class ConfirmResult:
     keep working."""
     outcome: Literal["approved", "denied", "other"]
     heard: str = ""
+    # "yes, and stop asking": an approval that also asks her to remember it.
+    # The gate persists it (Settings.auto_allow_tools) for the tools that may
+    # be remembered at all; a plain yes covers this one call.
+    always: bool = False
 
     def __bool__(self) -> bool:
         return self.outcome == "approved"
@@ -224,6 +229,20 @@ class Orchestrator:
     })
 
     @staticmethod
+    def _answer_words(heard: str | None) -> list[str]:
+        """A confirm reply reduced to bare lowercase words."""
+        no_apostrophes = (heard or "").lower().replace("'", "").replace("’", "")
+        return Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
+
+    @staticmethod
+    def says_always(heard: str | None) -> bool:
+        """True when the answer asked her to stop asking (ALWAYS_PHRASES).
+        Only meaningful alongside an approval: "no, dont ask again" is a no,
+        and classify_answer says so."""
+        flat = " ".join(Orchestrator._answer_words(heard))
+        return any(phrase in flat for phrase in Orchestrator.ALWAYS_PHRASES)
+
+    @staticmethod
     def classify_answer(heard: str | None) -> Literal["approved", "denied", "other"]:
         """Three-way reading of a confirm reply. Silence is a no. A yes or a
         no with at most a little padding ("yes please", "no thanks", "haan
@@ -232,8 +251,7 @@ class Orchestrator:
         Chrome"), an instruction ("no, open it in Safari instead"), six or
         more leftover words — is "other": not an answer, but the next
         request."""
-        no_apostrophes = (heard or "").lower().replace("'", "").replace("’", "")
-        words = Orchestrator._CONFIRM_NON_WORD_RE.sub(" ", no_apostrophes).split()
+        words = Orchestrator._answer_words(heard)
         if not words:
             return "denied"
         flat = " ".join(words)
@@ -1731,18 +1749,14 @@ class Orchestrator:
         self._set("idle")
 
     # -- confirmation gate ----------------------------------------------------
-    # Summaries that already read as an action (the computer tools' "Click
-    # 'Save'", "Press cmd+s") are asked as themselves; anything else gets
-    # the generic "Run X?".
-    ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
-
-    @classmethod
-    def confirm_prompt(cls, summary: str) -> str:
+    # The wording lives in brain.agent, next to the summarize_* that produce
+    # these summaries: the gate builds the same question when it adds the
+    # "say always" hint.
+    @staticmethod
+    def confirm_prompt(summary: str) -> str:
         """The spoken question for a tool `summary`: "Click 'Save'?" for a
         screen action, "Run Bash: ls?" for everything else."""
-        if summary.startswith(cls.ACTION_SUMMARY_PREFIXES):
-            return f"{summary}?"
-        return f"Run {summary}?"
+        return confirm_prompt(summary)
 
     async def confirm(self, summary: str, detail: str = "", *, question: str | None = None) -> ConfirmResult:
         """Ask `summary` (or `question`) aloud and listen for the answer.
@@ -1815,7 +1829,9 @@ class Orchestrator:
                     log.info("confirm heard nothing -> denied")
                     await self._say_unlocked("Okay, skipping that.")
                     return result
-                result = ConfirmResult(self.classify_answer(heard), heard)
+                outcome = self.classify_answer(heard)
+                result = ConfirmResult(outcome, heard,
+                                       always=outcome == "approved" and self.says_always(heard))
                 log.info("confirm heard=%r -> %s", heard, result.outcome)
         finally:
             self._set(prev)

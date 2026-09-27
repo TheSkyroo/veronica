@@ -118,6 +118,7 @@ class FakeToolServer:
 
 
 def make_brain(tmp_path, *, rounds=(), health=(True,), confirm=None, **kw):
+    kw.setdefault("auto_allow_tools", [])   # clipboard_write is the confirm-class stand-in here
     s = Settings(home=tmp_path, local_server_bin=tmp_path / "llama-server",
                  local_model=tmp_path / "m.gguf", **kw)
     async def yes(summary, detail):
@@ -325,7 +326,7 @@ async def test_the_gate_can_refuse_and_the_model_is_told(tmp_path, monkeypatch):
     fake_catalog(monkeypatch, server, names=("mcp__mac__clipboard_write",))
     asked = []
 
-    async def confirm(summary, detail):
+    async def confirm(summary, detail, *, question=None):
         asked.append(summary)
         return False
 

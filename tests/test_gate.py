@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from veronica.brain import gate as gate_mod
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
@@ -11,17 +12,24 @@ from veronica.tools.computer_events import Front
 FINDER = Front(app="Finder", bundle_id="com.apple.finder", window_title="Desktop", pid=1)
 
 
-def make(answers, *, front=FINDER, now=None, **settings):
+def make(answers, *, front=FINDER, now=None, said=None, **settings):
     calls, cards = [], []
+    # Nothing auto-allowed unless a test says so: clipboard_write is on the
+    # shipped list, and it's the stand-in confirm-class tool here.
+    settings.setdefault("auto_allow_tools", [])
 
-    async def confirm(summary, detail=""):
-        calls.append((summary, detail))
+    async def confirm(summary, detail="", *, question=None):
+        calls.append((summary, detail, question))
         a = answers.pop(0)
         return a if isinstance(a, ConfirmResult) else ConfirmResult("approved" if a else "denied")
 
+    async def say(text):
+        if said is not None:
+            said.append(text)
+
     clock = (lambda: now[0]) if now is not None else time.monotonic
     g = ToolGate(Settings(**settings), confirm, on_tool=lambda s, d: cards.append((s, d)),
-                 frontmost=lambda: front, clock=clock)
+                 frontmost=lambda: front, clock=clock, say=say)
     return g, calls, cards
 
 
@@ -191,13 +199,13 @@ async def test_gate_server_malformed_request_is_denied(sock):
 async def test_gate_server_serializes_confirms(sock):
     order = []
 
-    async def confirm(summary, detail=""):
+    async def confirm(summary, detail="", *, question=None):
         order.append(("start", summary))
         await asyncio.sleep(0.05)
         order.append(("end", summary))
         return True
 
-    g = ToolGate(Settings(), confirm)
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm)
     srv = GateServer(g, sock)
     await srv.start()
     try:
@@ -311,7 +319,7 @@ async def test_a_slow_tool_does_not_block_an_unrelated_confirm(sock):
     gate for everything behind it."""
     order = []
 
-    async def confirm(summary, detail=""):
+    async def confirm(summary, detail="", *, question=None):
         order.append(f"confirm {summary}")
         return True
 
@@ -321,7 +329,7 @@ async def test_a_slow_tool_does_not_block_an_unrelated_confirm(sock):
         order.append("run end")
         return [{"type": "text", "text": "ran"}], False
 
-    g = ToolGate(Settings(), confirm)
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm)
     srv = GateServer(g, sock, run_tool=run_tool)
     await srv.start()
     try:
@@ -344,3 +352,112 @@ async def test_unknown_op_is_a_bad_request(sock):
     finally:
         await srv.stop()
     assert resp == {"allow": False, "kind": "denied", "reason": "bad request"} and calls == []
+
+
+# -- auto-allow: "yes, and stop asking" ---------------------------------------
+
+
+@pytest.fixture
+def saved(monkeypatch):
+    """What the gate wrote to prefs.json (the on-disk half of the setting)."""
+    written: list[tuple] = []
+    monkeypatch.setattr(gate_mod.prefs, "save_settings_override",
+                        lambda field, value: written.append((field, value)))
+    return written
+
+
+async def test_an_auto_allowed_tool_runs_without_asking():
+    g, calls, cards = make([], auto_allow_tools=["mcp__mac__clipboard_write"])
+    d = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    assert d.allow and d.kind == "auto" and calls == []
+    assert cards == [("Copy to clipboard: hi", "auto")]   # HUD wire value unchanged
+
+
+async def test_the_shipped_default_auto_allows_clipboard_write():
+    calls = []
+
+    async def confirm(summary, detail="", *, question=None):
+        calls.append(summary)
+        return True
+
+    g = ToolGate(Settings(), confirm)
+    assert (await g.decide("mcp__mac__clipboard_write", {"text": "hi"})).kind == "auto"
+    assert calls == []
+
+
+async def test_eligible_tool_is_offered_the_option_in_the_question():
+    g, calls, _ = make([True])
+    await g.decide("mcp__pim__reminder_create", {"title": "milk"})
+    assert calls[0][2] and calls[0][2].endswith(gate_mod.ALWAYS_HINT)
+
+
+async def test_the_option_is_not_offered_for_a_tool_that_cannot_be_auto_allowed():
+    g, calls, _ = make([True])
+    await g.decide("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"})
+    assert calls[0][2] is None
+
+
+async def test_always_approves_and_remembers_an_eligible_tool(saved):
+    g, calls, _ = make([ConfirmResult("approved", "yes, dont ask again", always=True)])
+    d = await g.decide("mcp__pim__reminder_create", {"title": "milk"})
+    assert d.allow and d.kind == "approved"
+    assert g.s.auto_allow_tools == ["mcp__pim__reminder_create"]
+    assert saved == [("auto_allow_tools", ["mcp__pim__reminder_create"])]
+    # ...and the next one never reaches the question.
+    d2 = await g.decide("mcp__pim__reminder_create", {"title": "eggs"})
+    assert d2.kind == "auto" and len(calls) == 1
+
+
+async def test_always_keeps_what_is_already_on_the_list(saved):
+    g, _, _ = make([ConfirmResult("approved", "always", always=True)],
+                   auto_allow_tools=["mcp__mac__clipboard_write"])
+    await g.decide("mcp__memory__fact_add", {"text": "x"})
+    assert g.s.auto_allow_tools == ["mcp__mac__clipboard_write", "mcp__memory__fact_add"]
+    assert saved[-1] == ("auto_allow_tools", ["mcp__mac__clipboard_write", "mcp__memory__fact_add"])
+
+
+async def test_a_plain_yes_remembers_nothing(saved):
+    g, _, _ = make([True])
+    await g.decide("mcp__pim__reminder_create", {"title": "milk"})
+    assert g.s.auto_allow_tools == [] and saved == []
+
+
+@pytest.mark.parametrize("tool, inp", [
+    ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
+    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+    ("Bash", {"command": "rm -rf /tmp/x"}),
+])
+async def test_always_on_an_ineligible_tool_approves_once_and_says_so(saved, tool, inp):
+    said = []
+    g, calls, _ = make([ConfirmResult("approved", "always", always=True),
+                        ConfirmResult("approved", "yes")], said=said)
+    d = await g.decide(tool, inp)
+    assert d.allow and d.kind == "approved"      # the single call still goes ahead
+    assert g.s.auto_allow_tools == [] and saved == []
+    assert said == [gate_mod.ALWAYS_ASK]
+    # and it is asked again next time
+    assert (await g.decide(tool, inp)).kind == "approved" and len(calls) == 2
+
+
+async def test_always_on_a_screen_action_approves_once_and_says_so(saved):
+    said = []
+    g, calls, _ = make([ConfirmResult("approved", "always", always=True)], said=said)
+    d = await g.decide("mcp__computer__computer_click", {"x": 5, "y": 6})
+    assert d.allow and d.kind == "approved"
+    assert g.s.auto_allow_tools == [] and saved == []
+    assert said == [gate_mod.ALWAYS_ASK]
+
+
+@pytest.mark.parametrize("tool, inp", [
+    ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
+    ("mcp__pim__message_send", {"to": "Priya", "body": "hi"}),
+    ("mcp__mac__applescript", {"script": "delete everything"}),
+    ("mcp__computer__computer_click", {"x": 1, "y": 2}),
+    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+])
+async def test_a_hand_typed_ineligible_tool_is_asked_every_single_time(tool, inp):
+    # trust window off, so nothing but the auto-allow list is under test
+    g, calls, _ = make([True, True, True], auto_allow_tools=[tool], computer_trust_s=0)
+    for _ in range(3):
+        assert (await g.decide(tool, inp)).kind == "approved"
+    assert len(calls) == 3

@@ -1,6 +1,7 @@
 import pytest
 
-from veronica.brain.policy import classify
+from veronica.brain.policy import AUTO_ALLOWABLE, classify
+from veronica.config import Settings
 
 ALLOW = "allow"
 CONFIRM = "confirm"
@@ -319,3 +320,57 @@ def test_always_confirm_future_send_tools():
     assert always_confirm("mcp__pim__messages_send", {"to": "x"}) is True
     assert always_confirm("mcp__messages__send", {"to": "x"}) is True
     assert always_confirm("mcp__pim__mail_search", {"query": "x"}) is False
+
+
+# --- auto-allow: confirm-class tools the user approved for good --------------
+
+def test_auto_allowable_is_exactly_the_eligible_set():
+    assert AUTO_ALLOWABLE == {
+        "mcp__mac__clipboard_write",
+        "mcp__pim__calendar_create",
+        "mcp__pim__reminder_create",
+        "mcp__memory__fact_add",
+        "mcp__memory__fact_delete",
+        "mcp__browser__browser_click",
+        "mcp__browser__browser_type",
+    }
+
+
+@pytest.mark.parametrize("tool", sorted(AUTO_ALLOWABLE))
+def test_eligible_tool_confirms_until_it_is_on_the_list(tool):
+    assert classify(tool, {}) == CONFIRM
+    assert classify(tool, {}, (), [tool]) == ALLOW
+
+
+def test_auto_allow_only_covers_the_tool_that_is_listed():
+    assert classify("mcp__pim__reminder_create", {}, (), ["mcp__mac__clipboard_write"]) == CONFIRM
+
+
+@pytest.mark.parametrize("tool, inp", [
+    ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
+    ("mcp__pim__message_send", {"to": "a", "body": "y"}),
+    ("mcp__mac__applescript", {"script": "delete everything"}),
+    ("mcp__computer__computer_click", {"x": 1, "y": 2}),
+    ("mcp__computer__computer_type", {"text": "rm -rf /"}),
+    ("mcp__computer__computer_key", {"combo": "return"}),
+    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+    ("Bash", {"command": "rm -rf /tmp/x"}),
+])
+def test_ineligible_tool_still_confirms_even_if_hand_typed_into_the_setting(tool, inp):
+    assert classify(tool, inp, (), [tool]) == CONFIRM
+
+
+def test_always_confirm_wins_over_the_auto_allow_list():
+    # mail_send isn't eligible anyway; this pins the belt-and-braces check.
+    assert always_confirm("mcp__pim__mail_send", {}) is True
+    assert classify("mcp__pim__mail_send", {}, (), ["mcp__pim__mail_send"]) == CONFIRM
+
+
+def test_auto_allow_entries_are_trimmed_and_blanks_ignored():
+    assert classify("mcp__mac__clipboard_write", {}, (), [" mcp__mac__clipboard_write "]) == ALLOW
+    assert classify("mcp__mac__clipboard_write", {}, (), ["", None]) == CONFIRM
+
+
+def test_clipboard_write_is_auto_allowed_by_default():
+    assert Settings().auto_allow_tools == ["mcp__mac__clipboard_write"]
+    assert classify("mcp__mac__clipboard_write", {"text": "hi"}, (), Settings().auto_allow_tools) == ALLOW
