@@ -36,6 +36,9 @@ def _exchange(req: dict, sock: str | None, timeout: float | None, budget: float)
     if timeout is None:
         env = os.environ.get("VERONICA_GATE_TIMEOUT_S")
         timeout = float(env) if env else budget
+    # The gate answers a little before this runs out (GateServer._decide),
+    # so a slow answer is an explicit deny rather than our timeout.
+    req = {**req, "budget": timeout}
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
         s.connect(path)
