@@ -38,6 +38,7 @@ ALWAYS_HINT = " Say always and I'll stop asking."
 # What she says when "always" lands on something that can never be
 # auto-allowed. The call itself still goes ahead.
 ALWAYS_ASK = "That one I'll always ask about."
+MESSAGE_SEND = "mcp__pim__message_send"
 # How long a brain may sit on one tool call (or wait on the gate) before the
 # turn is given up on anyway. Only a wedged tool gets near it: the gate's
 # own call budget is well under it.
@@ -76,8 +77,12 @@ class ToolGate:
         frontmost: Callable[[], Front] = frontmost,
         clock: Callable[[], float] = time.monotonic,
         say: Callable[[str], Awaitable[None]] | None = None,
+        resolve_recipient: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self.s = settings
+        # message_send's `to` as a person (tools.pim.resolve_recipient_async
+        # unless a test injects one): the confirm names who it's going to.
+        self._resolve_recipient = resolve_recipient
         self._confirm = confirm
         self._on_tool = on_tool
         self._frontmost = frontmost
@@ -188,8 +193,34 @@ class ToolGate:
                 return self._REDIRECT_BASH[base]
         return None
 
+    async def _recipient(self, input: dict) -> tuple[dict, str | None]:
+        """For message_send: the input as the confirm should show it
+        ("Priya Shah (+91…)"), or a reason to hand back to the brain when
+        the name is ambiguous, unknown or Contacts is off limits. Never
+        guesses; the tool itself still sends to the same handle."""
+        to = str(input.get("to", "")).strip()
+        if not to:
+            return input, None
+        resolve = self._resolve_recipient
+        if resolve is None:
+            from veronica.tools.pim import resolve_recipient_async as resolve
+        try:
+            with self.working():
+                rec = await resolve(to)
+        except ValueError as exc:
+            return input, str(exc)
+        if rec.handle == rec.name:
+            return input, None
+        return {**input, "to": f"{rec.name} ({rec.handle})"}, None
+
     async def decide(self, tool_name: str, input: dict) -> Decision:
-        summary = summarize_tool(tool_name, input)
+        shown = input
+        if tool_name == MESSAGE_SEND:
+            shown, problem = await self._recipient(input)
+            if problem is not None:
+                log.info("message recipient unresolved: %s", problem)
+                return Decision(False, "redirect", problem)
+        summary = summarize_tool(tool_name, shown)
         redirect = self._bash_redirect(tool_name, input)
         if redirect is not None:
             log.info("tool redirected: %s -> %s", summary, redirect)
@@ -206,7 +237,7 @@ class ToolGate:
         if front is not None:
             return await self._gate_computer(tool_name, input, summary, front)
         log.info("tool request: %s", summary)
-        outcome, heard, always = _confirm_outcome(await self._ask(tool_name, summary, input))
+        outcome, heard, always = _confirm_outcome(await self._ask(tool_name, summary, shown))
         if outcome == "approved":
             if always:
                 await self._remember(tool_name)

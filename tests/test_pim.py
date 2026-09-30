@@ -251,6 +251,80 @@ async def test_message_send_requires_to_and_body(fake_run):
     assert fake_run == []
 
 
+async def test_message_send_by_name_resolves_through_contacts(fake_run):
+    res = await pim.message_send.handler({"to": "Priya", "body": "on my way"})
+    assert 'buddy "+91 98765 43210"' in argv_of(fake_run)[2]
+    assert not res.get("is_error") and text(res) == "Sent to Priya Shah"
+
+
+async def test_message_send_ambiguous_name_asks_and_never_sends(fake_run, _fake_contacts):
+    _fake_contacts.append(("Priya Nair", ["+44 7700 900123"]))
+    res = await pim.message_send.handler({"to": "Priya", "body": "hi"})
+    assert res["is_error"] and text(res) == "error: Which Priya — Priya Shah or Priya Nair?"
+    assert fake_run == []
+
+
+async def test_message_send_unknown_name_says_so(fake_run):
+    res = await pim.message_send.handler({"to": "Zed", "body": "hi"})
+    assert res["is_error"] and "No contact named Zed" in text(res) and fake_run == []
+
+
+async def test_message_send_contacts_denied_names_the_setting(fake_run, monkeypatch):
+    def denied(name):
+        raise pim.ContactsDenied()
+    monkeypatch.setattr(pim, "_contacts_search", denied)
+    res = await pim.message_send.handler({"to": "Priya", "body": "hi"})
+    assert res["is_error"] and "Privacy & Security > Contacts" in text(res) and fake_run == []
+
+
+def test_resolve_prefers_an_exact_full_name(_fake_contacts):
+    _fake_contacts.append(("Priya Shahani", ["p@x.com"]))
+    assert pim.resolve_recipient("priya shah") == pim.Recipient("Priya Shah", "+91 98765 43210")
+
+
+def test_resolve_several_handles_asks_which(_fake_contacts):
+    _fake_contacts[0] = ("Priya Shah", ["+91 1", "priya@x.com"])
+    with pytest.raises(ValueError, match="Priya Shah has several: \\+91 1 or priya@x.com"):
+        pim.resolve_recipient("Priya")
+
+
+def test_resolve_no_handles(_fake_contacts):
+    _fake_contacts[0] = ("Priya Shah", [])
+    with pytest.raises(ValueError, match="no phone number or email"):
+        pim.resolve_recipient("Priya")
+
+
+def test_resolve_remembers_the_confirmed_handle(_fake_contacts, monkeypatch):
+    first = pim.resolve_recipient("Priya")
+    _fake_contacts[0] = ("Priya Shah", ["+1 000"])      # contacts changed after the confirm
+    assert pim.resolve_recipient("Priya") == first
+    monkeypatch.setattr(pim, "RESOLVED_TTL_S", 0)
+    assert pim.resolve_recipient("Priya").handle == "+1 000"
+
+
+def test_contact_row_reads_a_real_cncontact():
+    # an in-memory CNMutableContact: the framework's types, no address book
+    CN = pytest.importorskip("Contacts")
+    c = CN.CNMutableContact.alloc().init()
+    c.setGivenName_("Priya")
+    c.setFamilyName_("Shah")
+    c.setPhoneNumbers_([CN.CNLabeledValue.labeledValueWithLabel_value_(
+        CN.CNLabelPhoneNumberMobile, CN.CNPhoneNumber.phoneNumberWithStringValue_("+91 98765 43210"))])
+    c.setEmailAddresses_([CN.CNLabeledValue.labeledValueWithLabel_value_(CN.CNLabelHome, "priya@example.com")])
+    assert pim._contact_row(c) == ("Priya Shah", ["+91 98765 43210", "priya@example.com"])
+    org = CN.CNMutableContact.alloc().init()
+    org.setOrganizationName_("Acme Dental")
+    assert pim._contact_row(org) == ("Acme Dental", [])
+
+
+@pytest.mark.parametrize("to, handle", [
+    ("+15551234567", True), ("555-1234", True), ("(020) 7946 0958", True),
+    ("priya@example.com", True), ("Priya", False), ("Priya Shah", False), ("12", False),
+])
+def test_is_handle(to, handle):
+    assert pim.is_handle(to) is handle
+
+
 # -- reminder_create --------------------------------------------------------------
 
 async def test_reminder_create_no_when(fake_run):

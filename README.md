@@ -392,7 +392,7 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 | Tool | Can | Cannot |
 | --- | --- | --- |
 | `mac.run_shortcut` | Run any shortcut installed in Shortcuts.app by name ("run the Morning shortcut"), case-insensitively, with optional text input handed over as a file (`shortcuts run <name> --input-path …`). A shortcut gets 2 minutes. | Create or edit shortcuts, or hand back what one returned — the CLI prints nothing on success, so she just says she ran it. A name that isn't installed is refused ("there's no shortcut called 'Morning' on this Mac") rather than guessed at. |
-| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number or Apple ID ("message +15551234567: on my way"). | Read your messages, look a name up in Contacts, or send attachments. A bare first name isn't a handle, so Messages refuses it and she asks you for the number. |
+| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number, an Apple ID, or a contact by name ("message Priya: on my way") — the name is looked up in Contacts. | Read your messages, send attachments, or guess: two Priyas ("Which Priya — Priya Shah or Priya Nair?"), a contact with several numbers, or no match comes back as a question instead of a send. |
 
 **Which shortcuts run without asking.** Every shortcut is confirm-class by default — a shortcut is a program you
 wrote, and Veronica can't see what's in it. Settings → Brain → "Shortcuts she may run without asking" is a
@@ -401,11 +401,12 @@ everything else still asks "Run the shortcut 'X'?" first.
 
 **Sending a message always asks.** `message_send` is in `policy.always_confirm` alongside sending mail: the
 screen-control trust window never covers it, saying "just do it" in your request never pre-approves it, and no
-setting turns the question off. The confirm reads the recipient and the first 40 characters — "Message Priya: on
-my way".
+setting turns the question off. The confirm reads the resolved contact, their handle and the first 40 characters
+— "Message Priya Shah (+91 98765 43210): on my way" — and the send goes to that exact handle.
 
 Messages.app needs the usual one-time automation permission the first time she sends (System Settings → Privacy &
-Security → Automation), and Shortcuts must have been opened once for `shortcuts list` to report anything.
+Security → Automation). Messaging someone by name asks once for Contacts access (System Settings → Privacy &
+Security → Contacts); without it she says so and asks for the number. Shortcuts must have been opened once for `shortcuts list` to report anything.
 
 ## Voice & speed
 

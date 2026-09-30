@@ -1,13 +1,19 @@
 """Personal data via macOS apps (Calendar, Mail, Reminders) and in-process
 timers, exposed to Claude as in-process MCP tools. No OAuth: everything goes
 through `osascript` (Apple Events), same argv-only pattern as `tools/mac.py`.
+Contact names for Messages are looked up in the Contacts framework.
 """
 import asyncio
 import datetime as dt
 import html
+import logging
 import math
+import re
 import subprocess
+import threading
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -15,6 +21,8 @@ TIMEOUT_S = 30
 CALENDAR_DAYS_MAX = 30
 REMINDERS_DAYS_MAX = 60
 MAIL_LIMIT_MAX = 20
+
+log = logging.getLogger(__name__)
 
 
 def _ok(text: str = "ok") -> dict:
@@ -382,8 +390,129 @@ async def mail_send(args: dict) -> dict:
     return await _osascript(script, ok_text=f"Sent to {to}")
 
 
+# -- contacts -------------------------------------------------------------------
+CONTACTS_PROMPT_S = 30        # how long the first-use permission prompt may take
+RESOLVED_TTL_S = 300          # a confirmed name -> handle holds this long
+CONTACTS_DENIED = ("I can't read your contacts. Allow Veronica in System Settings > "
+                   "Privacy & Security > Contacts, or give me the number.")
+
+
+class ContactsDenied(Exception):
+    """Veronica isn't allowed to read Contacts (TCC)."""
+
+
+@dataclass(frozen=True)
+class Recipient:
+    name: str
+    handle: str
+
+
+def is_handle(to: str) -> bool:
+    """A phone number or an email / Apple ID, as opposed to a person's name."""
+    if "@" in to:
+        return True
+    return bool(re.fullmatch(r"\+?[\d\s().-]+", to)) and sum(c.isdigit() for c in to) >= 3
+
+
+def _contacts_search(name: str) -> list[tuple[str, list[str]]]:
+    """Contacts matching `name`, as (display name, [phones..., emails...]).
+    The real Contacts framework; tests replace this. Asks for access the
+    first time (the system prompt) and raises ContactsDenied without it."""
+    import Contacts as CN
+
+    store = CN.CNContactStore.alloc().init()
+    status = CN.CNContactStore.authorizationStatusForEntityType_(CN.CNEntityTypeContacts)
+    if status == CN.CNAuthorizationStatusNotDetermined:
+        done, granted = threading.Event(), []
+
+        def answered(ok, _err):
+            granted.append(bool(ok))
+            done.set()
+
+        store.requestAccessForEntityType_completionHandler_(CN.CNEntityTypeContacts, answered)
+        done.wait(CONTACTS_PROMPT_S)
+        if not (granted and granted[0]):
+            raise ContactsDenied()
+    elif status not in (CN.CNAuthorizationStatusAuthorized, getattr(CN, "CNAuthorizationStatusLimited", 4)):
+        raise ContactsDenied()
+    keys = [CN.CNContactGivenNameKey, CN.CNContactFamilyNameKey, CN.CNContactNicknameKey,
+            CN.CNContactOrganizationNameKey, CN.CNContactPhoneNumbersKey, CN.CNContactEmailAddressesKey]
+    found, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
+        CN.CNContact.predicateForContactsMatchingName_(name), keys, None)
+    if found is None:
+        raise RuntimeError(str(err) if err else "Contacts lookup failed")
+    return [_contact_row(c) for c in found]
+
+
+def _contact_row(c) -> tuple[str, list[str]]:
+    """A CNContact as (display name, [phones..., emails...])."""
+    display = " ".join(p for p in (str(c.givenName()), str(c.familyName())) if p) \
+        or str(c.nickname()) or str(c.organizationName())
+    handles = [str(p.value().stringValue()) for p in c.phoneNumbers()]
+    handles += [str(e.value()) for e in c.emailAddresses()]
+    return display, [h for h in handles if h]
+
+
+def _or_list(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " or " + items[-1]
+
+
+def _pick(name: str, found: list[tuple[str, list[str]]]) -> Recipient:
+    """One person with one handle, or a ValueError saying what to ask."""
+    if not found:
+        raise ValueError(f"No contact named {name}.")
+    exact = [f for f in found if f[0].casefold() == name.casefold()]
+    if len(exact) == 1:
+        found = exact
+    if len(found) > 1:
+        names = list(dict.fromkeys(f[0] for f in found))[:4]
+        raise ValueError(f"Which {name} — {_or_list(names)}?")
+    who, handles = found[0]
+    handles = list(dict.fromkeys(handles))
+    if not handles:
+        raise ValueError(f"{who} has no phone number or email in Contacts.")
+    if len(handles) > 1:
+        raise ValueError(f"{who} has several: {_or_list(handles[:4])}. Which one?")
+    return Recipient(who, handles[0])
+
+
+_resolved: dict[str, tuple[float, Recipient]] = {}
+
+
+def resolve_recipient(to: str) -> Recipient:
+    """A Messages recipient from what the brain said: a handle as-is, a name
+    looked up in Contacts. Raises ValueError with a short, speakable reason
+    (ambiguous, unknown, no access) instead of guessing. A name resolved
+    here is remembered for a few minutes, so the send goes to the very
+    handle the confirm showed."""
+    to = to.strip()
+    if is_handle(to):
+        return Recipient(to, to)
+    key = to.casefold()
+    hit = _resolved.get(key)
+    if hit is not None and time.monotonic() - hit[0] < RESOLVED_TTL_S:
+        return hit[1]
+    try:
+        found = _contacts_search(to)
+    except ContactsDenied:
+        raise ValueError(CONTACTS_DENIED) from None
+    except ImportError:
+        raise ValueError("Contacts support isn't installed; give me the number.") from None
+    rec = _pick(to, found)
+    _resolved[key] = (time.monotonic(), rec)
+    log.info("message recipient %r -> %s", to, rec.name)
+    return rec
+
+
+async def resolve_recipient_async(to: str) -> Recipient:
+    return await asyncio.to_thread(resolve_recipient, to)
+
+
 # -- messages -------------------------------------------------------------------
-@tool("message_send", "Send an iMessage/SMS through Messages.app", {"to": str, "body": str})
+@tool("message_send",
+      "Send an iMessage/SMS through Messages.app. `to` is a phone number, an email/Apple ID, "
+      "or a contact's name (looked up in Contacts)",
+      {"to": str, "body": str})
 @_guard
 async def message_send(args: dict) -> dict:
     to = str(args.get("to", "")).strip()
@@ -392,17 +521,21 @@ async def message_send(args: dict) -> dict:
         return _err("to is required")
     if not body:
         return _err("body is required")
-    # `buddy "..."` wants a phone number or Apple ID, not a contact's display
-    # name — Messages resolves nothing for us, so a bare first name fails and
-    # the app's own error comes back to the brain, which can then ask.
+    # `buddy "..."` wants a phone number or Apple ID, not a display name, so
+    # a name is looked up in Contacts first; an ambiguous or unknown one
+    # comes back as an error the brain can ask about.
+    try:
+        rec = await resolve_recipient_async(to)
+    except ValueError as exc:
+        return _err(str(exc))
     script = (
         'tell application "Messages"\n'
         "set targetService to 1st service whose service type = iMessage\n"
-        + f'set targetBuddy to buddy "{_q(to)}" of targetService\n'
+        + f'set targetBuddy to buddy "{_q(rec.handle)}" of targetService\n'
         + f'send "{_q(body)}" to targetBuddy\n'
         + "end tell\n"
     )
-    return await _osascript(script, ok_text=f"Sent to {to}")
+    return await _osascript(script, ok_text=f"Sent to {rec.name}")
 
 
 # -- reminders ----------------------------------------------------------------

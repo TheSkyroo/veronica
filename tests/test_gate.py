@@ -124,7 +124,28 @@ async def test_message_send_is_asked_even_when_preapproved():
     g, calls, _ = make([True], now=now)
     g.begin_turn(1); g.preapprove(1, until=30.0)
     d = await g.decide("mcp__pim__message_send", {"to": "Priya", "body": "on my way"})
-    assert d.kind == "approved" and calls[0][0] == "Message Priya: on my way"
+    assert d.kind == "approved" and calls[0][0] == "Message Priya Shah (+91 98765 43210): on my way"
+    assert calls[0][1] == calls[0][0]
+
+
+async def test_message_send_to_a_handle_is_shown_as_is():
+    g, calls, _ = make([True])
+    await g.decide("mcp__pim__message_send", {"to": "+15551234567", "body": "hi"})
+    assert calls[0][0] == "Message +15551234567: hi"
+
+
+async def test_message_send_to_an_ambiguous_name_is_handed_back_without_asking(_fake_contacts):
+    _fake_contacts.append(("Priya Nair", ["+44 1"]))
+    g, calls, cards = make([])
+    d = await g.decide("mcp__pim__message_send", {"to": "Priya", "body": "hi"})
+    assert not d.allow and d.kind == "redirect" and d.message == "Which Priya — Priya Shah or Priya Nair?"
+    assert calls == [] and cards == []
+
+
+async def test_message_send_to_an_unknown_name_is_handed_back():
+    g, calls, _ = make([])
+    d = await g.decide("mcp__pim__message_send", {"to": "Zed", "body": "hi"})
+    assert not d.allow and "No contact named Zed" in d.message and calls == []
 
 
 # -- GateServer: the socket front for out-of-process callers ------------------
