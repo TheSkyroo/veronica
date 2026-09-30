@@ -215,6 +215,36 @@
     return r;
   }
 
+  // The saved voice profile, the Learn / Forget buttons, and the last few
+  // speaker scores (newest first) to tune "Voice match strictness" by.
+  function voiceProfile(vp) {
+    const status = el('span', {class: 'status'});
+    const setStatus = (res, fallback) => {
+      status.textContent = (res && res.message) || (res && res.ok === false ? 'Failed' : fallback || '');
+      status.classList.toggle('error', !!(res && res.ok === false));
+    };
+    const lead = vp.enrolled
+      ? 'Your voice is saved' + (vp.created ? ' (' + when(vp.created) + ')' : '') + '. '
+        + (vp.active ? 'Other voices are ignored.' : 'The voice check is off.')
+      : 'Not set up. Say "learn my voice", or press Learn and repeat three lines after her.';
+    const box = el('div', {class: 'voice-profile', 'data-enrolled': vp.enrolled ? '1' : '0'}, [
+      el('p', {class: 'lead', text: lead}),
+      el('div', {class: 'actions'}, [
+        button(vp.enrolled ? 'Learn again' : 'Learn my voice', {attrs: {'data-cmd': 'learn_voice'},
+          onclick: () => { setStatus(null, 'Starting…'); post('learn_voice').then(res => setStatus(res)); }}),
+        button('Forget my voice', {class: 'btn danger', disabled: !vp.enrolled, attrs: {'data-cmd': 'forget_voice'},
+          onclick: () => post('forget_voice').then(res => setStatus(res)) }),
+        status,
+      ]),
+    ]);
+    const recent = Array.isArray(vp.recent) ? vp.recent : [];
+    if (recent.length) {
+      box.appendChild(el('p', {class: 'help scores', text: 'Recent scores: ' + recent.map(r =>
+        Number(r.score).toFixed(2) + (r.accepted ? ' ✓' : ' ✗') + ' ' + r.where).join(' · ')}));
+    }
+    return box;
+  }
+
   function button(label, opts) {
     const o = opts || {};
     return el('button', Object.assign({type: 'button', class: o.class || 'btn', text: label, disabled: o.disabled}, o.attrs || {},
@@ -269,6 +299,11 @@
       for (const k of ['wake_phrases', 'wake_min_rms', 'wake_window_s', 'wake_hop_s']) frag.push(settingRow('listening', k, k === 'wake_phrases' ? {wide: true} : null));
       frag.push(el('h3', {text: 'Microphone'}));
       frag.push(settingRow('listening', 'input_volume_floor'));
+      frag.push(settingRow('listening', 'noise_suppression'));
+      frag.push(settingRow('listening', 'vad_min_rms'));
+      frag.push(el('h3', {text: 'Only my voice'}));
+      frag.push(voiceProfile(section('listening').voice_profile || {}));
+      for (const k of ['speaker_verification', 'speaker_threshold', 'speaker_verification_wake']) frag.push(settingRow('listening', k));
       return frag;
     },
     briefings() {

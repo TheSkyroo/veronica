@@ -30,7 +30,10 @@ def fixture_state(**over) -> dict:
                              {"id": "hf_alpha", "name": "Alpha", "hindi": True}]},
         "listening": {"followup_window_s": 6, "confirm_listen_s": 8, "vad_silence_ms": 1200,
                       "max_utterance_s": 20, "wake_min_rms": 0.01, "wake_window_s": 1.5, "wake_hop_s": 0.25,
-                      "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85},
+                      "wake_phrases": ["veronica", "hey veronica"], "input_volume_floor": 85,
+                      "noise_suppression": True, "vad_min_rms": 0.001, "speaker_verification": True,
+                      "speaker_threshold": 0.35, "speaker_verification_wake": False,
+                      "voice_profile": {"enrolled": False, "created": "", "active": False, "recent": []}},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
         "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
                   "preapprove_by_wording": True, "shortcut_allowlist": [],
@@ -431,4 +434,35 @@ def test_brain_tab_renders_backend_rows_and_label():
         page.evaluate("s => window.settings.state(s)", fixture_state(brain={"brain_label": ""}))
         page.evaluate("window.settings.select('brain')")
         assert page.locator("#brain-label").count() == 0
+        browser.close()
+
+
+@pytest.mark.live
+def test_only_my_voice_section_learns_forgets_and_shows_scores():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('listening')")
+        assert page.is_checked("#pane input[data-key=noise_suppression]")
+        assert page.input_value("#pane input[data-key=speaker_threshold]") == "0.35"
+        box = page.locator("#pane .voice-profile")
+        assert box.get_attribute("data-enrolled") == "0"
+        assert "Not set up" in box.inner_text()
+        assert page.is_disabled("#pane button[data-cmd=forget_voice]")
+        page.click("#pane button[data-cmd=learn_voice]")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "learn_voice"
+        reply(page, msg["id"], {"ok": True, "message": "Listen for her, then repeat each line."})
+        assert "repeat each line" in box.inner_text()
+
+        vp = {"enrolled": True, "created": "2026-10-01T07:30:00", "active": True,
+              "recent": [{"where": "confirm", "score": 0.12, "accepted": False, "at": "07:31:02"},
+                         {"where": "request", "score": 0.71, "accepted": True, "at": "07:31:00"}]}
+        page.evaluate("s => window.settings.state(s)", fixture_state(listening={"voice_profile": vp}))
+        text = page.inner_text("#pane .voice-profile")
+        assert "Your voice is saved" in text and "Other voices are ignored" in text
+        assert "0.12 ✗ confirm" in text and "0.71 ✓ request" in text
+        page.click("#pane button[data-cmd=forget_voice]")
+        assert sent(page)[-1]["cmd"] == "forget_voice"
         browser.close()

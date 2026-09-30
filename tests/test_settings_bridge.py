@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from veronica.brain.policy import classify
@@ -1021,3 +1022,99 @@ def test_settings_js_renders_a_checkbox_per_tool_and_the_list_field():
     js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
     assert "autoAllowRow(t.tool, t.label, allowed)" in js
     assert "settingRow('brain', 'auto_allow_tools'" in js
+
+
+# -- only my voice ------------------------------------------------------------------
+class FakeSpeaker:
+    def __init__(self, enrolled=True):
+        self.enrolled = enrolled
+        self.forgets = 0
+
+    def status(self):
+        return {"enrolled": self.enrolled, "created": "2026-10-01T07:30:00", "active": self.enrolled,
+                "recent": [{"where": "request", "score": 0.7, "accepted": True, "at": "07:31:00"}]}
+
+    def forget(self):
+        self.forgets += 1
+        had, self.enrolled = self.enrolled, False
+        return had
+
+
+class VoiceOrch(FakeOrch):
+    def __init__(self):
+        super().__init__()
+        self.speaker = FakeSpeaker()
+        self.queued = []
+
+    async def queue_turn(self, turn):
+        self.queued.append(turn)
+        await turn()
+
+    async def _speaker_turn(self, action):
+        self.calls.append(("speaker", action))
+
+
+def test_listening_state_carries_the_voice_settings_and_profile():
+    h = Harness(orch=VoiceOrch())
+    st = h.bridge.get_state()["listening"]
+    assert {"noise_suppression", "vad_min_rms", "speaker_verification", "speaker_threshold",
+            "speaker_verification_wake"} <= set(st)
+    assert st["voice_profile"]["enrolled"] is True
+    assert st["voice_profile"]["recent"][0]["score"] == 0.7
+
+
+def test_voice_profile_state_while_warming_reads_the_file(tmp_home):
+    from veronica.audio import speaker
+
+    h = Harness(warming=True)
+    h.bridge._settings = Settings()
+    assert h.bridge.get_state()["listening"]["voice_profile"]["enrolled"] is False
+    speaker.VoiceProfile(np.ones(4, dtype=np.float32), speaker.models.CAMPPLUS.name, "2026-10-01T07:30:00", 3) \
+        .save(speaker.profile_path(Settings()))
+    vp = h.bridge.get_state()["listening"]["voice_profile"]
+    assert vp["enrolled"] is True and vp["created"] == "2026-10-01T07:30:00"
+
+
+def test_learn_voice_queues_the_enrolment_turn_and_pushes_after():
+    orch = VoiceOrch()
+    h = Harness(orch=orch)
+    res = h.bridge.handle("learn_voice")
+    assert res["ok"] and "repeat" in res["message"]
+    assert len(orch.queued) == 1
+    assert ("speaker", "enrol") in orch.calls
+    assert h.states                                   # pushed once the turn ran
+
+
+def test_learn_voice_while_warming_is_refused():
+    h = Harness(warming=True)
+    assert h.bridge.handle("learn_voice") == {"ok": False, "message": "Still starting up, try again in a moment."}
+
+
+def test_forget_voice_uses_the_running_gate():
+    orch = VoiceOrch()
+    h = Harness(orch=orch)
+    assert h.bridge.handle("forget_voice")["ok"]
+    assert orch.speaker.forgets == 1
+    assert h.bridge.handle("forget_voice") == {"ok": False, "message": "No voice saved."}
+
+
+def test_forget_voice_while_warming_deletes_the_file(tmp_home):
+    from veronica.audio import speaker
+
+    h = Harness(warming=True)
+    h.bridge._settings = Settings()
+    path = speaker.profile_path(Settings())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    assert h.bridge.handle("forget_voice")["ok"]
+    assert not path.exists()
+
+
+def test_speaker_threshold_applies_live():
+    h = Harness()
+    res = h.bridge.set("listening", "speaker_threshold", 0.5)
+    assert res["ok"] and not res["restart_required"]
+    assert h.orch.s.speaker_threshold == 0.5
+    assert ("speaker_threshold", 0.5) in h.prefs.overrides
+    h.bridge.set("listening", "noise_suppression", False)
+    assert h.orch.s.noise_suppression is False
