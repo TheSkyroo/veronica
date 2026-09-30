@@ -11,6 +11,7 @@ spectral gate / WebRTC NS: see
 docs/superpowers/specs/2026-10-01-veronica-voice-isolation-design.md."""
 import functools
 import logging
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -121,27 +122,49 @@ class Denoiser:
         return self.process(np.frombuffer(frame, dtype=np.int16)).tobytes()
 
 
+# Log latches, one line each per path: a model not on disk (yet), and one
+# that failed to load.
 _missing_logged: set[str] = set()
+_failed_logged: set[str] = set()
+_fetching: set[str] = set()
+# Set when the network raised mid-capture: suppression stays off until
+# restart rather than breaking every capture on a fault that repeats (the
+# session is shared). See Recorder._capture.
+_disabled = False
+
+
+def disable() -> None:
+    global _disabled
+    _disabled = True
+
+
+def _start_fetch(settings: Settings) -> None:
+    threading.Thread(target=prepare_model, args=(settings,), name="veronica-models", daemon=True).start()
 
 
 def make_denoiser(settings: Settings) -> Denoiser | None:
     """A fresh Denoiser when noise suppression is on and its model is on
-    disk; None otherwise (the caller then uses the raw mic audio). A
-    missing model is logged once per path; `prepare_model` gets it."""
-    if not settings.noise_suppression:
+    disk; None otherwise (the caller then uses the raw mic audio). Never
+    blocks on the network: a missing model is logged once and fetched in
+    the background, so switching suppression on in Settings takes effect
+    from the first capture after the download."""
+    if not settings.noise_suppression or _disabled:
         return None
     path = settings.models_dir / models.GTCRN.name
+    key = str(path)
     if not path.exists():
-        if str(path) not in _missing_logged:
-            _missing_logged.add(str(path))
-            log.warning("noise suppression is on but %s is missing; using raw mic audio "
-                        "(run scripts/download_models.py, or restart online)", path)
+        if key not in _missing_logged:
+            _missing_logged.add(key)
+            log.warning("noise suppression is on but %s is missing; using raw mic audio while it downloads", path)
+        if key not in _fetching:
+            _fetching.add(key)
+            _start_fetch(settings)
         return None
     try:
-        return Denoiser(_session(str(path)))
+        return Denoiser(_session(key))
     except Exception:
-        if str(path) not in _missing_logged:
-            _missing_logged.add(str(path))
+        if key not in _failed_logged:
+            _failed_logged.add(key)
             log.exception("noise suppression model failed to load; using raw mic audio")
         return None
 
@@ -149,8 +172,7 @@ def make_denoiser(settings: Settings) -> Denoiser | None:
 def prepare_model(settings: Settings) -> Path | None:
     """Download the model if suppression is on and it's missing, and load
     it, so the first capture doesn't wait on either (startup runs this off
-    the main thread). Never raises: offline just means raw audio until the
-    next launch."""
+    the main thread). Never raises: offline just means raw audio for now."""
     if not settings.noise_suppression:
         return None
     try:
@@ -160,3 +182,5 @@ def prepare_model(settings: Settings) -> Path | None:
     except Exception as e:
         log.warning("couldn't prepare the noise suppression model: %s", e)
         return None
+    finally:
+        _fetching.discard(str(settings.models_dir / models.GTCRN.name))

@@ -6,6 +6,8 @@ missing one the first time it is needed (the voice-isolation spec,
 docs/superpowers/specs/2026-10-01-veronica-voice-isolation-design.md)."""
 import hashlib
 import logging
+import shutil
+import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +15,12 @@ from pathlib import Path
 log = logging.getLogger("veronica.audio")
 
 _SHERPA = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
+# Seconds a stalled connection may sit before the download gives up (per
+# socket operation, so a slow but moving download still finishes).
+TIMEOUT_S = 30
+# One download at a time: startup, a Settings toggle and an enrolment may all
+# ask for a model at once, and must not write the same .part file.
+_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -46,14 +54,30 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def ensure(model: ModelFile, models_dir: Path, *, fetch=urllib.request.urlretrieve) -> Path:
+def download(url: str, dest: Path) -> None:
+    """Stream `url` to `dest`, with TIMEOUT_S on the connection and on each
+    read (urlretrieve has neither, and could hang a thread forever)."""
+    with urllib.request.urlopen(url, timeout=TIMEOUT_S) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f, 1 << 20)
+
+
+def ensure(model: ModelFile, models_dir: Path, *, fetch=None) -> Path:
     """The model's path, downloading and verifying it first if it isn't
     there. Raises on a network failure or a checksum mismatch (the partial
-    file is removed either way)."""
+    file is removed either way). Blocks for as long as a download takes:
+    call it from startup, enrolment or a background thread — never from a
+    turn's capture path."""
     dest = models_dir / model.name
     if dest.exists():
         return dest
-    models_dir.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        if dest.exists():   # another thread fetched it while we waited
+            return dest
+        return _fetch(model, dest, fetch or download)
+
+
+def _fetch(model: ModelFile, dest: Path, fetch) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     log.info("fetching %s", model.url)
     try:

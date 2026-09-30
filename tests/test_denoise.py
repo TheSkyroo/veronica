@@ -10,6 +10,7 @@ from veronica.config import Settings
 # conftest stubs make_denoiser out for every test; this module tests it.
 _REAL_MAKE_DENOISER = denoise.make_denoiser
 _REAL_PREPARE_MODEL = denoise.prepare_model
+_REAL_ENSURE = models.ensure
 
 
 class IdentitySession:
@@ -120,9 +121,9 @@ def test_ensure_downloads_verifies_and_reuses(tmp_path):
     payload = b"model bytes"
     m = models.ModelFile("m.onnx", "https://example/m.onnx", hashlib.sha256(payload).hexdigest())
     fetch, calls = _fake_fetch(payload)
-    p = models.ensure(m, tmp_path / "models", fetch=fetch)
+    p = _REAL_ENSURE(m, tmp_path / "models", fetch=fetch)
     assert p.read_bytes() == payload
-    assert models.ensure(m, tmp_path / "models", fetch=fetch) == p
+    assert _REAL_ENSURE(m, tmp_path / "models", fetch=fetch) == p
     assert calls == ["https://example/m.onnx"]
 
 
@@ -130,7 +131,7 @@ def test_ensure_rejects_a_checksum_mismatch(tmp_path):
     m = models.ModelFile("m.onnx", "https://example/m.onnx", "0" * 64)
     fetch, _ = _fake_fetch(b"tampered")
     with pytest.raises(ValueError, match="checksum"):
-        models.ensure(m, tmp_path, fetch=fetch)
+        _REAL_ENSURE(m, tmp_path, fetch=fetch)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -185,3 +186,60 @@ def test_prepare_model_fetches_and_loads_the_session(real_factory, monkeypatch, 
     assert real_factory == [str(s.models_dir / models.GTCRN.name)]
     denoise.make_denoiser(s)
     assert len(real_factory) == 1                 # the first capture reuses it
+
+
+def test_a_missing_model_is_fetched_in_the_background_once(real_factory, monkeypatch, tmp_home):
+    kicked = []
+    monkeypatch.setattr(denoise, "_start_fetch", lambda settings: kicked.append(settings))
+    monkeypatch.setattr(denoise, "_fetching", set())
+    s = Settings()
+    assert denoise.make_denoiser(s) is None
+    assert denoise.make_denoiser(s) is None
+    assert len(kicked) == 1                  # never on the capture's own thread, never twice at once
+
+
+def test_disable_turns_suppression_off_until_restart(real_factory, tmp_home):
+    s = Settings()
+    s.models_dir.mkdir(parents=True)
+    (s.models_dir / models.GTCRN.name).write_bytes(b"onnx")
+    assert denoise.make_denoiser(s) is not None
+    denoise.disable()
+    assert denoise.make_denoiser(s) is None
+
+
+def test_missing_and_failed_to_load_are_logged_separately(real_factory, monkeypatch, tmp_home, caplog):
+    monkeypatch.setattr(denoise, "_start_fetch", lambda settings: None)
+    monkeypatch.setattr(denoise, "_missing_logged", set())
+    monkeypatch.setattr(denoise, "_failed_logged", set())
+    s = Settings()
+    denoise.make_denoiser(s)
+    s.models_dir.mkdir(parents=True)
+    (s.models_dir / models.GTCRN.name).write_bytes(b"onnx")
+    denoise._session.cache_clear()
+    monkeypatch.setattr(denoise, "_session_factory", lambda p: (_ for _ in ()).throw(RuntimeError("corrupt")))
+    assert denoise.make_denoiser(s) is None
+    assert "is missing" in caplog.text and "failed to load" in caplog.text
+
+
+def test_downloads_have_a_timeout(monkeypatch, tmp_path):
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            data, self.data = getattr(self, "data", b"abc"), b""
+            return data
+
+    def urlopen(url, timeout=None):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", urlopen)
+    models.download("https://example/m.onnx", tmp_path / "m")
+    assert seen["timeout"] == models.TIMEOUT_S
+    assert (tmp_path / "m").read_bytes() == b"abc"
