@@ -37,7 +37,7 @@ from typing import Literal
 
 from veronica import prefs
 from veronica.brain import hook
-from veronica.brain.gate import ToolGate
+from veronica.brain.gate import ToolGate, ToolStall
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
@@ -378,7 +378,7 @@ class CliBrain:
 
     # -- canary -----------------------------------------------------------------
     async def _trip_canary(self, key: str, out: _Outcome) -> None:
-        log.error("%s: hook never logged native call %r; canary tripped", self.name, key)
+        log.error("turn ended early: reason=canary detail=%s: hook never logged native call %r", self.name, key)
         await self._kill()
         out.kind = "canary"
 
@@ -417,20 +417,32 @@ class CliBrain:
             else:
                 proc = await self._start(self.argv(text, self._load_session(), image_paths, native))
         except Exception:
-            log.exception("%s: could not start", self.name)
+            log.exception("turn ended early: reason=error detail=%s: could not start", self.name)
             await self._kill()
             out.kind = "error"
             yield f"{self.label} returned an error, check the log."
             return
 
         pending: dict[str, str] = {}   # call_id -> canary key, native non-read-only calls in flight
+        running: set[str] = set()      # call_id of every tool call in flight, ours or native
         saw_text = False
         while True:
+            # brain_timeout_s is for the model going quiet. A tool call in
+            # flight, or the gate asking/running something, is quiet too —
+            # and killing the child there dropped the task part-way.
             try:
-                async with asyncio.timeout(self.s.brain_timeout_s):
-                    raw = await self._readline(proc)
+                raw = await self.gate.wait_quiet(self._readline(proc), self.s.brain_timeout_s,
+                                                 tool_running=bool(running))
+            except ToolStall:
+                log.warning("turn ended early: reason=tool_stall detail=%s: tool call(s) %s still running after %ss",
+                            self.name, sorted(running), self.gate.busy_ceiling_s)
+                await self._kill()
+                out.kind = "error"
+                yield "That step never finished, so I stopped."
+                return
             except TimeoutError:
-                log.warning("%s: brain timeout after %ss", self.name, self.s.brain_timeout_s)
+                log.warning("turn ended early: reason=brain_timeout detail=%s: no output for %ss",
+                            self.name, self.s.brain_timeout_s)
                 await self._kill()
                 out.kind = "error"
                 yield "Taking too long, cancelled."
@@ -456,6 +468,7 @@ class CliBrain:
                     for sent in splitter.feed(ev.delta):
                         yield sent
                 elif isinstance(ev, ToolStart):
+                    running.add(ev.call_id)
                     if not ev.native:
                         continue       # our MCP tool: tools.serve gated it and carded it
                     if ev.tool in hook.READONLY_TOOLS:
@@ -471,6 +484,7 @@ class CliBrain:
                             await self._trip_canary(key, out)
                             return
                 elif isinstance(ev, ToolEnd):
+                    running.discard(ev.call_id)
                     key = pending.pop(ev.call_id, None)
                     if key is not None and not await self._hook_logged(key, turn_start):
                         await self._trip_canary(key, out)
@@ -495,18 +509,19 @@ class CliBrain:
     async def _on_error(self, ev: Error, out: _Outcome) -> AsyncIterator[str]:
         msg = ev.message.lower()
         if any(m in msg for m in LIMIT_MARKERS):
-            log.warning("%s: limit: %s", self.name, ev.message)
+            log.warning("turn ended early: reason=limit detail=%s: %s", self.name, ev.message)
             out.kind, out.message = "limit", ev.message
             return
         if any(m in msg for m in OVERFLOW_MARKERS):
             # Same substring heuristic as ClaudeBrain: a false positive only
             # costs the conversation history.
-            log.warning("%s: context overflow (session %s): %s", self.name, self._load_session(), ev.message)
+            log.warning("turn ended early: reason=overflow detail=%s: context overflow (session %s): %s",
+                        self.name, self._load_session(), ev.message)
             self._clear_session()
             out.kind = "error"
             yield "My memory got full, starting a fresh conversation."
             return
-        log.error("%s: error result: %s", self.name, ev.message)
+        log.error("turn ended early: reason=error detail=%s: error result: %s", self.name, ev.message)
         out.kind = "error"
         yield f"{self.label} returned an error, check the log."
 

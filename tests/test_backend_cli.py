@@ -395,3 +395,83 @@ async def test_an_overlong_line_is_dropped_not_fatal(tmp_path):
 
 async def _ready(proc):
     return proc
+
+
+# -- the silence clock: a tool at work is not the model going quiet -----------
+class PacedProc(FakeProc):
+    """Streams `(delay_s, line)` pairs: each line only after its delay, as a
+    CLI does while one of its tool calls runs. Hangs at the end when `hang`."""
+
+    def __init__(self, paced, **kw):
+        super().__init__([line for _d, line in paced], **kw)
+        self._delays = [d for d, _line in paced]
+
+    async def readline(self):
+        if self._delays:
+            await asyncio.sleep(self._delays.pop(0))
+        return await super().readline()
+
+
+def build_paced(tmp_path, paced, **kw):
+    b, _, _ = build(tmp_path, [])
+    b._spawn = lambda argv, cwd, env: _ready(PacedProc(paced, **kw))
+    return b
+
+
+async def test_a_long_tool_call_does_not_time_the_turn_out(tmp_path, caplog):
+    """The stream goes quiet while a tool runs (a page loading, a screen
+    sequence): that is not the model stalling, and killing the child there
+    abandoned the task part-way."""
+    b = build_paced(tmp_path, [
+        (0, ev("ToolStart", call_id="c1", tool="mcp__browser__browser_open", input={}, native=False)),
+        (0.3, ev("ToolEnd", call_id="c1")),
+        (0, ev("Text", delta="Opened it.")),
+        (0, ev("Done")),
+    ])
+    b.s.brain_timeout_s = 0.1
+    assert await collect(b, "x") == ["Opened it."]
+    assert "turn ended early" not in caplog.text
+
+
+async def test_a_busy_gate_pauses_the_silence_clock(tmp_path):
+    """A confirm the user is still answering (or a tool the gate is running)
+    shows nothing in the stream at all — no ToolStart for a hook-gated
+    command until it's allowed. The gate being busy stops the clock."""
+    b = build_paced(tmp_path, [(0.3, ev("Text", delta="Done.")), (0, ev("Done"))])
+    b.s.brain_timeout_s = 0.1
+
+    async def confirm_in_progress():
+        with b.gate.working():
+            await asyncio.sleep(0.25)
+
+    busy = asyncio.create_task(confirm_in_progress())
+    await asyncio.sleep(0)
+    assert await collect(b, "x") == ["Done."]
+    await busy
+
+
+async def test_silence_after_the_gate_goes_idle_still_times_out(tmp_path, caplog):
+    b = build_paced(tmp_path, [(0, ev("Text", delta="Looking."))], hang=True)
+    b.s.brain_timeout_s = 0.1
+
+    async def quick_confirm():
+        with b.gate.working():
+            await asyncio.sleep(0.05)
+
+    busy = asyncio.create_task(quick_confirm())
+    await asyncio.sleep(0)
+    assert await collect(b, "x") == ["Looking.", "Taking too long, cancelled."]
+    await busy
+    assert b._proc is None
+    assert "turn ended early: reason=brain_timeout" in caplog.text
+
+
+async def test_a_tool_that_never_finishes_is_stopped_at_the_ceiling(tmp_path, caplog):
+    b = build_paced(tmp_path, [
+        (0, ev("ToolStart", call_id="c1", tool="mcp__browser__browser_open", input={}, native=False)),
+    ], hang=True)
+    b.s.brain_timeout_s = 0.05
+    b.gate.busy_ceiling_s = 0.2
+    assert await collect(b, "x") == ["That step never finished, so I stopped."]
+    assert b._proc is None
+    assert "turn ended early: reason=tool_stall" in caplog.text

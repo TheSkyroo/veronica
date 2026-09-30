@@ -461,3 +461,50 @@ async def test_a_hand_typed_ineligible_tool_is_asked_every_single_time(tool, inp
     for _ in range(3):
         assert (await g.decide(tool, inp)).kind == "approved"
     assert len(calls) == 3
+
+
+# -- busy: the brain's silence clock stops while the gate works ---------------
+
+
+async def test_the_gate_is_busy_through_the_confirm_and_the_tool_run(sock):
+    seen = []
+
+    async def confirm(summary, detail="", *, question=None):
+        seen.append(("confirm", g.busy))
+        return True
+
+    async def run_tool(tool, args):
+        seen.append(("run", g.busy))
+        return [{"type": "text", "text": "ran"}], False
+
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm)
+    srv = GateServer(g, sock, run_tool=run_tool)
+    await srv.start()
+    try:
+        assert not g.busy
+        await _roundtrip(sock, CALL)
+    finally:
+        await srv.stop()
+    assert seen == [("confirm", True), ("run", True)]
+    assert not g.busy
+
+
+async def test_wait_quiet_restarts_the_clock_when_the_gate_goes_idle():
+    g, _, _ = make([])
+
+    async def line_after(s):
+        await asyncio.sleep(s)
+        return b"line"
+
+    async def busy_for(s):
+        with g.working():
+            await asyncio.sleep(s)
+
+    t = asyncio.create_task(busy_for(0.2))
+    await asyncio.sleep(0)
+    # 0.25 s of quiet, but only 0.05 of it with the gate idle
+    assert await g.wait_quiet(line_after(0.25), 0.1) == b"line"
+    await t
+    with pytest.raises(TimeoutError):
+        await g.wait_quiet(line_after(1), 0.05)
+

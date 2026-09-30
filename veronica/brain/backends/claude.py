@@ -11,12 +11,15 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from veronica.brain.agent import Confirm, _image_media_type
 from veronica.brain.backends.cli import LIMIT_MARKERS, LimitError
-from veronica.brain.gate import ToolGate
+from veronica.brain.gate import ToolGate, ToolStall
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
 from veronica.config import Settings
@@ -85,7 +88,8 @@ class ClaudeBrain:
         self.gate._confirm = value
 
     async def _can_use_tool(self, tool_name: str, input: dict, context):
-        d = await self.gate.decide(tool_name, input)
+        with self.gate.working():          # the stream is quiet until we answer
+            d = await self.gate.decide(tool_name, input)
         if d.allow:
             return PermissionResultAllow(updated_input=input)
         return PermissionResultDeny(message=d.message)
@@ -265,12 +269,22 @@ class ClaudeBrain:
                 log.exception("image query failed; falling back to text-only")
                 await client.query(self._image_fallback_text(text))
             it = client.receive_response().__aiter__()
+            # tool_use ids without a result yet: the stream is quiet while
+            # they run, and that isn't the model stalling.
+            running: set[str] = set()
             while True:
                 try:
-                    async with asyncio.timeout(self.s.brain_timeout_s):
-                        msg = await anext(it, None)
+                    msg = await self.gate.wait_quiet(anext(it, None), self.s.brain_timeout_s,
+                                                     tool_running=bool(running))
+                except ToolStall:
+                    log.warning("turn ended early: reason=tool_stall detail=claude: tool call(s) %s "
+                                "still running after %ss", sorted(running), self.gate.busy_ceiling_s)
+                    await self.interrupt()
+                    yield "That step never finished, so I stopped."
+                    return
                 except TimeoutError:
-                    log.warning("brain timeout after %ss", self.s.brain_timeout_s)
+                    log.warning("turn ended early: reason=brain_timeout detail=claude: no output for %ss",
+                                self.s.brain_timeout_s)
                     # interrupt(), not close(): dropping the client leaves the
                     # turn unanswered in the session, and the next ask()
                     # resumes that session — the CLI replays the abandoned
@@ -290,6 +304,12 @@ class ClaudeBrain:
                         if isinstance(block, TextBlock):
                             for sent in splitter.feed(block.text):
                                 yield sent
+                        elif isinstance(block, ToolUseBlock):
+                            running.add(block.id)
+                elif isinstance(msg, UserMessage):
+                    for block in msg.content if isinstance(msg.content, list) else ():
+                        if isinstance(block, ToolResultBlock):
+                            running.discard(block.tool_use_id)
                 elif isinstance(msg, ResultMessage):
                     self._in_flight = False   # turn ended, error or not
                     if getattr(msg, "is_error", False):
@@ -302,7 +322,7 @@ class ClaudeBrain:
                         # leave ask() as LimitError or the switcher can never
                         # fail over off Claude (spec 4a).
                         if any(marker in lowered for marker in LIMIT_MARKERS):
-                            log.warning("brain limit: %s", error_text)
+                            log.warning("turn ended early: reason=limit detail=claude: %s", error_text)
                             await self.close()
                             raise LimitError(error_text)
                         # Substring heuristic, not a structured error code from the
@@ -321,7 +341,7 @@ class ClaudeBrain:
                         ):
                             old_sid = self._load_session()
                             log.warning(
-                                "brain context overflow (session %s): %s %s",
+                                "turn ended early: reason=overflow detail=claude: context overflow (session %s): %s %s",
                                 old_sid, msg.result, errors,
                             )
                             self._clear_session()
@@ -329,7 +349,7 @@ class ClaudeBrain:
                             yield "My memory got full, starting a fresh conversation."
                             return
                         log.error(
-                            "brain error result: %s %s",
+                            "turn ended early: reason=error detail=claude: error result: %s %s",
                             msg.result,
                             errors,
                         )
