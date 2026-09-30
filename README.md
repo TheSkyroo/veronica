@@ -668,7 +668,9 @@ to see how loud your voice actually lands at the mic.
 **AirPods / USB mic / headphones.** Mic switching is automatic: Veronica polls macOS's default input device
 every couple of seconds and reopens the mic on the new device (`input device changed (...); reopening mic` in
 the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
-in-flight recording finishes.
+in-flight recording finishes. If the mic disappears mid-sentence (AirPods taken out, the Mac sleeping), the
+recording ends within about two seconds with what it already heard (`capture: no audio for 2.0s` in the log)
+instead of holding up the turn.
 
 **She stopped hearing me after a call / after switching mics.** Call apps with auto-gain (Zoom, Meet,
 FaceTime) and device switches quietly drop the Mac's input volume to ~30 %, which starves the wake check.

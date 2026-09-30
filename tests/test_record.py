@@ -759,3 +759,93 @@ async def test_a_suppressor_that_raises_falls_back_to_raw_and_turns_itself_off(m
     assert caplog.text.count("noise suppression failed") == 1
     assert await r.capture() is not None
     assert len(made) == 1                            # off until restart
+
+
+# -- the real mic path: a stream that dies mid-capture ---------------------------
+
+class DyingStream:
+    """A RawInputStream stand-in: hands out `chunks` (int16 sample counts,
+    speech) as they become "buffered", then goes silent for good, the way
+    PortAudio's input unit does after -10863. A read for more than is
+    buffered would block forever on a real stream, so it fails here."""
+
+    instances = []
+
+    def __init__(self, *, chunks=(), close_raises=False, **kw):
+        self.chunks = [np.full(c, 1000, dtype=np.int16).tobytes() for c in chunks]
+        self.close_raises = close_raises
+        self.latency = 0.01
+        self.closed = False
+        DyingStream.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.closed = True
+        if self.close_raises:
+            raise RuntimeError("PortAudio: stream already stopped")
+
+    @property
+    def read_available(self):
+        return len(self.chunks[0]) // 2 if self.chunks else 0
+
+    def read(self, frames):
+        if not self.chunks or frames > len(self.chunks[0]) // 2:
+            raise AssertionError(f"blocking read of {frames} frames on a dead stream")
+        return self.chunks.pop(0), False
+
+
+def dying_recorder(monkeypatch, chunks, **kw):
+    from veronica.audio import record as record_mod
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    monkeypatch.setattr(record_mod, "STALL_S", 0.3)
+    DyingStream.instances = []
+    monkeypatch.setattr(record_mod.sd, "RawInputStream", lambda **a: DyingStream(chunks=chunks, **kw))
+    return Recorder(Settings(vad_silence_ms=300, min_speech_ms=60, max_utterance_s=5))
+
+
+async def test_a_stream_that_dies_mid_capture_ends_it_with_what_was_heard(monkeypatch, caplog):
+    # uneven PortAudio reads (700 + 740 samples) are re-cut into 480-sample frames
+    rec = dying_recorder(monkeypatch, [700, 740])
+    t0 = asyncio.get_running_loop().time()
+    pcm = await asyncio.wait_for(rec.capture(max_s=5), timeout=3)
+    assert asyncio.get_running_loop().time() - t0 < 2
+    assert pcm is not None and pcm.size == 3 * FRAME
+    assert DyingStream.instances[0].closed and rec._capturing is False
+    assert "no audio" in caplog.text
+
+
+async def test_a_dead_stream_before_any_speech_returns_none(monkeypatch):
+    rec = dying_recorder(monkeypatch, [])
+    assert await asyncio.wait_for(rec.capture(max_s=30), timeout=3) is None
+
+
+async def test_the_refresh_lock_is_free_while_waiting_on_a_dead_stream(monkeypatch):
+    from veronica.audio import devices
+    rec = dying_recorder(monkeypatch, [480])
+    task = asyncio.ensure_future(rec.capture(max_s=5))
+    await asyncio.sleep(0.15)                  # capture thread is polling the dead stream
+
+    def grab():
+        if not devices.refresh_lock.acquire(timeout=0.1):
+            return False
+        devices.refresh_lock.release()
+        return True
+
+    assert await asyncio.to_thread(grab)
+    await asyncio.wait_for(task, timeout=3)
+
+
+async def test_stop_while_the_stream_is_dead_returns_none(monkeypatch):
+    rec = dying_recorder(monkeypatch, [480] * 3)
+    task = asyncio.ensure_future(rec.capture(max_s=5))
+    await asyncio.sleep(0.1)
+    rec.stop()
+    assert await asyncio.wait_for(task, timeout=3) is None
+
+
+async def test_a_dead_stream_that_complains_on_close_still_returns(monkeypatch):
+    rec = dying_recorder(monkeypatch, [480] * 3, close_raises=True)
+    pcm = await asyncio.wait_for(rec.capture(max_s=5), timeout=3)
+    assert pcm is not None and pcm.size == 3 * FRAME
