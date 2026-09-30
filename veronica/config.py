@@ -48,9 +48,10 @@ class Settings(BaseSettings):
     # sees — so clatter and music stop opening captures — while whisper still
     # gets the raw audio (it transcribes that better); the wake check is
     # left alone.
-    # vad_min_rms is the level (of the cleaned audio) a 30 ms frame must
-    # reach to count as speech: faint background talk stays out, you from
-    # across the room still get in. 0 = off.
+    # vad_min_rms is the level of the cleaned audio a 30 ms frame must reach
+    # to count as speech (so it only applies while suppression runs): faint
+    # background talk stays out, you from across the room still get in.
+    # 0 = off.
     noise_suppression: bool = True
     vad_min_rms: float = 0.001
     # Only my voice: with a profile enrolled ("learn my voice"), a request,
@@ -265,8 +266,9 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "vad_min_rms": EditableField(
         "float", "Speech level floor",
-        "How loud (after noise reduction) a sound must be to count as speech. "
-        "Raise if room noise keeps her listening; lower if she misses you from across the room. 0 = off.",
+        "How loud (after noise reduction) a sound must be to count as speech; only applies while noise "
+        "reduction is on. Raise if room noise keeps her listening; lower if she misses you from across the "
+        "room. 0 = off.",
         min=0.0, max=0.01, restart=False,
     ),
     "speaker_verification": EditableField(
@@ -280,7 +282,8 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "speaker_verification_wake": EditableField(
         "bool", "Only wake for my voice",
-        "The wake word must be your voice too. Off by default: a missed wake is worse than a stray one.",
+        "The wake word must be your voice too. Off by default: a missed wake is worse than a stray one. "
+        "While it's off, someone else saying \"Veronica\" can still interrupt her.",
         restart=False,
     ),
     "wake_min_rms": EditableField(

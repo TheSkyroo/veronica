@@ -504,7 +504,8 @@ class SettingsBridge:
         if sp is not None:
             return sp.status()
         p = _speaker.VoiceProfile.load(_speaker.profile_path(self._settings))
-        return {"enrolled": p is not None, "created": p.created if p else "", "active": False, "recent": []}
+        return {"enrolled": p is not None, "created": p.created if p else "", "active": False, "failed": False,
+                "recent": []}
 
     def learn_voice(self) -> dict:
         """Queue the enrolment turn: it runs when she's next idle, so it

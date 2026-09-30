@@ -14,13 +14,16 @@ ME, THEM = 1, 2
 
 
 def said(value: int, n: int = 1) -> np.ndarray:
-    """A capture in voice `value` (FakeSpeaker reads the voice off sample 0)."""
-    return np.full(n, value, dtype=np.int16)
+    """A capture in voice `value`, loud enough to be voiced (FakeSpeaker
+    reads the voice off sample 0)."""
+    return np.full(n, value * 1000, dtype=np.int16)
 
 
 class FakeSpeaker:
-    def __init__(self, active=True, ready=True, prepare_ok=True, agreement=0.9):
+    def __init__(self, active=True, ready=True, prepare_ok=True, agreement=0.9, her=0.1):
         self.active = active
+        self.failed = False
+        self.her = her          # similarity of every take to her own voice
         self.ready = ready
         self.prepare_ok = prepare_ok
         self.agreement = agreement
@@ -29,9 +32,12 @@ class FakeSpeaker:
         self.forgot = 0
 
     def check(self, pcm, where):
-        ok = int(pcm[0]) == ME
-        self.checked.append((where, int(pcm[0])))
-        return ok, 0.8 if ok else 0.1
+        who = int(pcm[0]) // 1000
+        self.checked.append((where, who))
+        return who == ME, 0.8 if who == ME else 0.1
+
+    def similarity(self, a, b):
+        return self.her
 
     def model_ready(self):
         return self.ready
@@ -49,14 +55,19 @@ class FakeSpeaker:
 
 
 def build(rec_pcms=(), stt_texts=(), speaker=None, **settings):
-    states = []
+    states, events = [], []
     o = Orchestrator(
         Settings(**{"followup_window_s": 0, "confirm_listen_s": 0, **settings}),
         wake=Wake(), recorder=Rec(rec_pcms), stt=STT(stt_texts),
         brain=Brain(), tts=TTS(), player=Player(), on_state=states.append,
+        on_event=lambda k, p: events.append((k, p)),
         speaker=speaker if speaker is not None else FakeSpeaker(),
     )
+    o.events = events
     return o, states
+
+
+LINES = list(Orchestrator.ENROL_LINES)
 
 
 # -- requests and follow-ups ----------------------------------------------------------
@@ -65,9 +76,27 @@ async def test_a_request_in_another_voice_is_silence():
     await o.one_turn()
     assert o.brain.asked == []
     assert o.tts.said == []                          # no "didn't catch that"
-    assert o.stt.texts == ["delete everything"]      # never even transcribed
     assert o.speaker.checked == [("request", THEM)]
+    assert ("tool", {"summary": "Ignored another voice", "decision": "declined"}) in o.events
     assert states[-1] == "idle"
+
+
+async def test_another_voice_saying_forget_my_voice_still_gets_through():
+    """A profile that stopped matching the user (new mic, a cold) must not
+    lock them out: "forget my voice" is the one request exempt."""
+    o, _ = build(rec_pcms=[said(THEM), None], stt_texts=["Forget my voice."])
+    await o.one_turn()
+    assert o.speaker.forgot == 1
+    assert ("tool", {"summary": "Ignored another voice", "decision": "declined"}) not in o.events
+
+
+async def test_a_failed_voice_check_says_so_once():
+    sp = FakeSpeaker()
+    sp.failed = True
+    o, _ = build(rec_pcms=[said(ME), said(ME), None], stt_texts=["hi", "and you"], speaker=sp, followup_window_s=4)
+    await o.one_turn()
+    cards = [p for k, p in o.events if k == "tool" and p.get("summary") == "Voice check unavailable, hearing everyone"]
+    assert len(cards) == 1
 
 
 async def test_my_request_goes_through():
@@ -154,7 +183,7 @@ LONG = 16320  # 34 whole 30 ms frames, just over 1 s: enough to enrol
 
 async def test_learn_my_voice_enrols_three_raw_clips():
     clips = [said(ME, LONG) for _ in range(3)]
-    o, _ = build(rec_pcms=[said(ME), *clips, None], stt_texts=["Veronica, learn my voice."])
+    o, _ = build(rec_pcms=[said(ME), *clips, None], stt_texts=["Veronica, learn my voice.", *LINES])
     await o.one_turn()
     assert len(o.speaker.enrolled) == 1 and len(o.speaker.enrolled[0]) == 3
     for line in Orchestrator.ENROL_LINES:
@@ -164,7 +193,7 @@ async def test_learn_my_voice_enrols_three_raw_clips():
 
 
 async def test_enrolment_retries_a_short_line_once_then_gives_up():
-    o, _ = build(rec_pcms=[said(ME, LONG), said(ME, 100), None], speaker=FakeSpeaker())
+    o, _ = build(rec_pcms=[said(ME, LONG), said(ME, 100), None], stt_texts=LINES, speaker=FakeSpeaker())
     await o._speaker_turn("enrol")
     assert o.tts.said.count("Once more, a little louder.") == 2
     assert o.tts.said[-1] == "I couldn't hear you. Let's try later."
@@ -172,7 +201,7 @@ async def test_enrolment_retries_a_short_line_once_then_gives_up():
 
 
 async def test_enrolment_that_disagrees_is_not_saved():
-    o, _ = build(rec_pcms=[said(ME, LONG)] * 3, speaker=FakeSpeaker(agreement=0.1))
+    o, _ = build(rec_pcms=[said(ME, LONG)] * 3, stt_texts=LINES, speaker=FakeSpeaker(agreement=0.1))
     await o._speaker_turn("enrol")
     assert o.tts.said[-1] == "Those didn't sound like one voice. Let's try again somewhere quieter."
 
@@ -184,7 +213,7 @@ async def test_enrolment_fetches_the_model_first_and_says_when_it_cant():
 
 
 async def test_enrolment_with_the_check_switched_off_says_so():
-    o, _ = build(rec_pcms=[said(ME, LONG)] * 3, speaker_verification=False)
+    o, _ = build(rec_pcms=[said(ME, LONG)] * 3, stt_texts=LINES, speaker_verification=False)
     await o._speaker_turn("enrol")
     assert o.tts.said[-1] == "Got your voice. Turn on the voice check in Settings to use it."
 
@@ -222,9 +251,30 @@ async def test_queued_turn_runs_when_idle():
 
 
 async def test_enrolment_counts_the_voice_not_the_trailing_silence():
-    blip = np.concatenate([np.full(4800, ME, np.int16) * 3000, np.zeros(19200, np.int16)])   # 0.3 s + 1.2 s quiet
-    blip[0] = ME
-    o, _ = build(rec_pcms=[blip, None])
+    blip = np.concatenate([said(ME, 4800), np.zeros(19200, np.int16)])   # 0.3 s + 1.2 s quiet
+    o, _ = build(rec_pcms=[blip, None], stt_texts=LINES)
     await o._speaker_turn("enrol")
     assert o.tts.said.count("Once more, a little louder.") == 2
     assert o.speaker.enrolled == []
+
+
+@pytest.mark.parametrize("take, heard, her, why", [
+    ("tv", "and in other news the markets fell", 0.1, "heard"),       # the TV, or anything but the line
+    ("tail", LINES[0], 0.8, "her own voice"),                          # her own line coming back
+    ("noise", "", 0.1, "heard"),                                       # steady noise: no words at all
+])
+async def test_enrolment_rejects_takes_that_are_not_the_user_saying_the_line(take, heard, her, why, caplog):
+    caplog.set_level("INFO", logger="veronica.orchestrator")
+    o, _ = build(rec_pcms=[said(ME, LONG)] * 2 + [None], stt_texts=[heard, heard], speaker=FakeSpeaker(her=her))
+    await o._speaker_turn("enrol")
+    assert o.speaker.enrolled == []
+    assert o.tts.said[-1] == "I couldn't hear you. Let's try later."
+    assert f"take rejected ({why}" in caplog.text
+
+
+async def test_enrolment_takes_a_close_repeat_of_the_line():
+    # whisper won't be word-perfect; most of the line is enough
+    heard = ["the quick brown fox jumped over a lazy dog", "i like my coffee strong", "remind me to water plants"]
+    o, _ = build(rec_pcms=[said(ME, LONG)] * 3, stt_texts=heard)
+    await o._speaker_turn("enrol")
+    assert len(o.speaker.enrolled) == 1

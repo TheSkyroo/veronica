@@ -225,9 +225,10 @@
     };
     const lead = vp.enrolled
       ? 'Your voice is saved' + (vp.created ? ' (' + when(vp.created) + ')' : '') + '. '
-        + (vp.active ? 'Other voices are ignored.' : 'The voice check is off.')
+        + (vp.failed ? "The voice model didn't load, so she's hearing everyone (see the log)."
+          : vp.active ? 'Other voices are ignored.' : 'The voice check is off.')
       : 'Not set up. Say "learn my voice", or press Learn and repeat three lines after her.';
-    const box = el('div', {class: 'voice-profile', 'data-enrolled': vp.enrolled ? '1' : '0'}, [
+    const box = el('div', {class: 'voice-profile', 'data-enrolled': vp.enrolled ? '1' : '0', 'data-failed': vp.failed ? '1' : '0'}, [
       el('p', {class: 'lead', text: lead}),
       el('div', {class: 'actions'}, [
         button(vp.enrolled ? 'Learn again' : 'Learn my voice', {attrs: {'data-cmd': 'learn_voice'},

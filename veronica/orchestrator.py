@@ -3,6 +3,7 @@ import contextlib
 import datetime as dt
 import difflib
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -17,7 +18,7 @@ from veronica import proactive as proactive_mod
 from veronica import version
 from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
-from veronica.audio.speaker import ENROL_MIN_S, voiced
+from veronica.audio.speaker import ENROL_MIN_S, voiced_s
 from veronica.brain import quick
 from veronica.brain.agent import confirm_prompt
 from veronica.brain.backends import BACKENDS, check_backend
@@ -440,6 +441,8 @@ class Orchestrator:
         # Whether the last capture was a hold (push-to-talk) one: the key
         # press is the proof it's the user, so it skips the speaker check.
         self._last_capture_hold = False
+        # The "voice check unavailable" card is shown once per session.
+        self._speaker_failed_shown = False
         self._barged = False
         # True only while confirm() has the mic open for its yes/no. Inside
         # that window the user speaking IS the answer, so _run_with_barge
@@ -1398,7 +1401,16 @@ class Orchestrator:
         if sp is None or pcm is None or not sp.active or self._last_capture_hold:
             return True
         ok, _score = await asyncio.to_thread(sp.check, pcm, where)
+        if getattr(sp, "failed", False) and not self._speaker_failed_shown:
+            # Failing open is silent by nature; say so once, so "only my
+            # voice" isn't quietly off.
+            self._speaker_failed_shown = True
+            self._emit("tool", {"summary": "Voice check unavailable, hearing everyone", "decision": "auto"})
         return ok
+
+    def _ignored_voice(self, where: str) -> None:
+        log.info("ignored another voice (%s)", where)
+        self._emit("tool", {"summary": "Ignored another voice", "decision": "declined"})
 
     # Read aloud one at a time, the user repeats each: ~3 s of speech apiece
     # is what the embedding needs. Plain English on purpose (a speaker
@@ -1441,22 +1453,24 @@ class Orchestrator:
         clips: list[np.ndarray] = []
         for line in self.ENROL_LINES:
             clip = None
+            her = await self._her_voice(line)
             for _attempt in range(2):
                 await self.say(line)
                 self._set("listening")
                 await self.chime(self.s.chime_followup_hz, 100)
                 pcm = await self._capture(max_s=6, skip_ms=self.s.followup_skip_ms)
-                # the voice itself, not the VAD's trailing silence, must last
-                if pcm is not None and voiced(pcm).size >= self.s.sample_rate * ENROL_MIN_S:
+                problem = await self._enrol_take_problem(pcm, line, her)
+                if problem is None:
                     clip = pcm
                     break
+                log.info("voice enrolment: take rejected (%s)", problem)
                 await self.say("Once more, a little louder.")
             if clip is None:
                 await self.say("I couldn't hear you. Let's try later.")
                 return
             clips.append(clip)
         self._set("thinking")
-        profile, agreement = await asyncio.to_thread(sp.enrol, clips)
+        profile, _agreement = await asyncio.to_thread(sp.enrol, clips)
         self._emit("tool", {"summary": "Learn my voice", "decision": "auto" if profile else "declined"})
         if profile is None:
             await self.say("Those didn't sound like one voice. Let's try again somewhere quieter.")
@@ -1466,6 +1480,43 @@ class Orchestrator:
             await self.say("आपकी आवाज़ याद हो गई। अब मैं सिर्फ़ आपकी सुनूँगी।", lang="hi")
         else:
             await self.say("Got it. I'll only listen to you now.")
+
+    async def _her_voice(self, line: str) -> np.ndarray | None:
+        """`line` in her own voice at 16 kHz, to tell her echo from the user."""
+        try:
+            samples, sr = await self.tts.asynth(line)
+            from scipy.signal import resample_poly
+
+            g = math.gcd(int(sr), self.s.sample_rate)
+            x = resample_poly(np.asarray(samples, dtype=np.float32), self.s.sample_rate // g, int(sr) // g)
+            return np.clip(x * 32767, -32768, 32767).astype(np.int16)
+        except Exception:
+            log.exception("couldn't synthesise the enrolment line for the echo check")
+            return None
+
+    # A take whose voice is this close to hers is her own line coming back.
+    _HER_VOICE_MAX = 0.5
+
+    async def _enrol_take_problem(self, pcm: np.ndarray | None, line: str, her: np.ndarray | None) -> str | None:
+        """Why this enrolment take can't be used, or None. Three takes of
+        the same wrong source (her tail, the TV, a fan) would agree with each
+        other and make a profile that ignores the user — so each take must be
+        at least ENROL_MIN_S of voice, must say (mostly) the line, and must
+        not be her."""
+        if pcm is None:
+            return "nothing heard"
+        if voiced_s(pcm) < ENROL_MIN_S:
+            return "too little voice"
+        heard = await self.stt.atranscribe(pcm) or ""
+        want = set(normalize(line).split())
+        got = set(normalize(heard).split())
+        if len(want & got) < len(want) / 2:
+            return f"heard {heard!r}"
+        if her is not None and her.size:
+            same = await asyncio.to_thread(self.speaker.similarity, pcm, her)
+            if same >= self._HER_VOICE_MAX:
+                return f"her own voice ({same:.2f})"
+        return None
 
     async def queue_turn(self, turn: Callable[[], Any]) -> None:
         """Run `turn()` (a coroutine factory) as the next idle turn — for the
@@ -1823,6 +1874,7 @@ class Orchestrator:
             if pcm is None:
                 break
             if not await self._speaker_ok(pcm, "dictation"):
+                self._ignored_voice("dictation")
                 continue   # someone else talking: not typed, keep listening
             text = await self.stt.atranscribe(pcm)
             self._emit("heard", text)
@@ -2136,11 +2188,15 @@ class Orchestrator:
             return
         is_followup = False
         while True:
-            if not await self._speaker_ok(pcm, "follow-up" if is_followup else "request"):
-                # Someone else's voice: as if nothing was said, so the turn
-                # ends here quietly (no "didn't catch that", no brain turn).
-                break
+            other_voice = not await self._speaker_ok(pcm, "follow-up" if is_followup else "request")
             text, detected = await self._transcribe(pcm)
+            if other_voice and match_speaker_intent(text) != "forget":
+                # Someone else's voice: as if nothing was said, so the turn
+                # ends here (no "didn't catch that", no brain turn); a card
+                # says why. "Forget my voice" alone gets through, so a
+                # profile that stopped matching the user can't lock them out.
+                self._ignored_voice("follow-up" if is_followup else "request")
+                break
             self._utterance_lang = self._lang_for(text, detected)
             if is_followup and text and self._is_own_speech(text):
                 log.info("ignoring own speech echo on follow-up: %r", text)

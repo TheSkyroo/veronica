@@ -465,4 +465,7 @@ def test_only_my_voice_section_learns_forgets_and_shows_scores():
         assert "0.12 ✗ confirm" in text and "0.71 ✓ request" in text
         page.click("#pane button[data-cmd=forget_voice]")
         assert sent(page)[-1]["cmd"] == "forget_voice"
+        page.evaluate("s => window.settings.state(s)",
+                      fixture_state(listening={"voice_profile": {**vp, "failed": True}}))
+        assert "hearing everyone" in page.inner_text("#pane .voice-profile")
         browser.close()

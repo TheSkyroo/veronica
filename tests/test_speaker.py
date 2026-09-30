@@ -13,9 +13,9 @@ DIM = 4
 
 
 def voice(k: int, n: int = 32000) -> np.ndarray:
-    """A fake utterance of 'voice' k: FakeModel reads the voice off the
-    first sample."""
-    return np.full(n, k, dtype=np.int16)
+    """A fake utterance of 'voice' k, loud enough to count as voiced:
+    FakeModel reads the voice off the first sample."""
+    return np.full(n, k * 1000, dtype=np.int16)
 
 
 class FakeModel:
@@ -26,7 +26,7 @@ class FakeModel:
         self.path = path
 
     def embed(self, pcm):
-        k = int(pcm[0])
+        k = int(pcm[0]) // 1000
         v = np.zeros(DIM, dtype=np.float32)
         if k >= 10:          # "a noisy take of voice k-10": mostly k, some of the next voice
             v[(k - 10) % DIM], v[(k - 9) % DIM] = 0.8, 0.6
@@ -117,18 +117,51 @@ def test_a_bad_profile_is_ignored(tmp_home, content, caplog):
     assert "ignoring voice profile" in caplog.text
 
 
-def test_a_model_that_wont_load_fails_open_once(gate, monkeypatch, caplog):
+def test_check_never_loads_the_model_itself(gate, monkeypatch, caplog):
+    """A turn's check must never wait on a download or a load: until the
+    model is in, it accepts (logged once) and loads it in the background."""
     gate.enrol([voice(1)] * 3)
     gate._model = None
+    kicked = []
+    monkeypatch.setattr(gate, "_load_in_background", lambda: kicked.append(1))
+    monkeypatch.setattr(models, "ensure", lambda *a, **k: pytest.fail("check fetched the model"))
+    assert gate.check(voice(2), "confirm") == (True, None)
+    assert gate.check(voice(2), "request") == (True, None)
+    assert len(kicked) == 2
+    assert caplog.text.count("model not loaded yet; accepting") == 1
+    assert gate.check_wake(voice(2)) is True
+
+
+def test_a_failed_load_is_visible_and_retried_only_now_and_then(gate, monkeypatch):
+    gate.enrol([voice(1)] * 3)
+    gate._model = None
+    calls = []
 
     def boom(m, d, **k):
+        calls.append(1)
         raise OSError("offline")
 
     monkeypatch.setattr(models, "ensure", boom)
-    assert gate.check(voice(2), "request") == (True, None)
-    assert gate.check(voice(2), "request") == (True, None)
-    assert caplog.text.count("speaker check failed") == 1
     assert gate.prepare() is False
+    assert gate.failed and gate.status()["failed"] is True
+    gate._load_in_background()                      # within RETRY_S: no new attempt
+    assert calls == [1]
+    gate._failed_at -= speaker.RETRY_S + 1
+    gate._load_in_background()
+    gate._loader.join(2)
+    assert calls == [1, 1]
+    monkeypatch.setattr(models, "ensure", lambda m, d, **k: d / m.name)
+    assert gate.prepare() is True and not gate.failed
+
+
+def test_one_scoring_error_accepts_that_capture_but_does_not_latch(gate, caplog):
+    gate.enrol([voice(1)] * 3)
+    real = gate._model.embed
+    gate._model.embed = lambda pcm: (_ for _ in ()).throw(RuntimeError("ort hiccup"))
+    assert gate.check(voice(2), "request") == (True, None)
+    gate._model.embed = real
+    assert gate.check(voice(2), "request")[0] is False
+    assert not gate.failed
 
 
 def test_speaker_model_feeds_normalised_fbanks_and_returns_a_unit_vector(monkeypatch, tmp_path):
@@ -159,9 +192,15 @@ def test_voiced_drops_the_silence_around_speech():
     pcm = np.concatenate([np.full(8000, 3, np.int16), speech, np.full(19200, 3, np.int16)])
     v = speaker.voiced(pcm)
     assert abs(v.size - speech.size) <= 480
+    assert speaker.voiced_s(pcm) == pytest.approx(1.0, abs=0.04)
     assert speaker.voiced(np.zeros(100, np.int16)).size == 100          # under a frame: as is
     quiet = np.zeros(48000, np.int16)
-    assert speaker.voiced(quiet).size == 48000                          # nothing stands out: all of it
+    assert speaker.voiced(quiet).size == 48000       # nothing to embed on its own: all of it...
+    assert speaker.voiced_s(quiet) == 0.0            # ...but none of it counts as voice
+    hiss = (np.random.default_rng(0).standard_normal(48000) * 5).astype(np.int16)
+    assert speaker.voiced_s(hiss) == 0.0
+    blip = np.concatenate([np.full(4320, 3000, np.int16), np.zeros(19200, np.int16)])   # 9 frames
+    assert speaker.voiced_s(blip) == 0.0
 
 
 def test_short_answers_get_a_proportionally_lower_bar(gate):
@@ -170,3 +209,9 @@ def test_short_answers_get_a_proportionally_lower_bar(gate):
     assert gate.threshold_for(voice(1, 64000)) == pytest.approx(0.4)
     assert gate.threshold_for(voice(1, 16320)) == pytest.approx(0.4 * (0.6 + 0.4 * 0.51))
     assert gate.threshold_for(voice(1, 4800)) == pytest.approx(0.4 * (0.6 + 0.4 * 0.15))
+    # more speech never lowers the bar: under ten voiced frames is no speech at all
+    assert gate.threshold_for(voice(1, 4320)) == pytest.approx(0.4 * 0.6)
+    assert gate.threshold_for(voice(1, 4320)) <= gate.threshold_for(voice(1, 4800))
+    # a confirm answer never goes under 80% of the threshold
+    assert gate.threshold_for(voice(1, 4800), "confirm") == pytest.approx(0.4 * 0.8)
+    assert gate.threshold_for(voice(1, 64000), "confirm") == pytest.approx(0.4)

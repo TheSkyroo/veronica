@@ -1032,7 +1032,7 @@ class FakeSpeaker:
 
     def status(self):
         return {"enrolled": self.enrolled, "created": "2026-10-01T07:30:00", "active": self.enrolled,
-                "recent": [{"where": "request", "score": 0.7, "accepted": True, "at": "07:31:00"}]}
+                "failed": False, "recent": [{"where": "request", "score": 0.7, "accepted": True, "at": "07:31:00"}]}
 
     def forget(self):
         self.forgets += 1
@@ -1068,7 +1068,8 @@ def test_voice_profile_state_while_warming_reads_the_file(tmp_home):
 
     h = Harness(warming=True)
     h.bridge._settings = Settings()
-    assert h.bridge.get_state()["listening"]["voice_profile"]["enrolled"] is False
+    assert h.bridge.get_state()["listening"]["voice_profile"] == {
+        "enrolled": False, "created": "", "active": False, "failed": False, "recent": []}
     speaker.VoiceProfile(np.ones(4, dtype=np.float32), speaker.models.CAMPPLUS.name, "2026-10-01T07:30:00", 3) \
         .save(speaker.profile_path(Settings()))
     vp = h.bridge.get_state()["listening"]["voice_profile"]

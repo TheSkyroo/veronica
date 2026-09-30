@@ -36,28 +36,49 @@ ENROL_MIN_AGREEMENT = 0.3
 ENROL_MIN_S = 1.0
 RECENT_MAX = 8
 # A capture carries the VAD's trailing silence (vad_silence_ms) and some lead
-# in; only 30 ms frames within 20 dB of the loud part are embedded.
+# in; only 30 ms frames within 20 dB of the loud part, and above a floor that
+# idle hiss and digital silence never reach, count as voice.
 _FRAME = 480
 _VOICED_DB = 20
+_VOICED_MIN_RMS = 0.0005
+_VOICED_MIN_FRAMES = 10
 # Short answers ("yes", "haan") embed less reliably, so they score lower
 # against the profile: the threshold scales down linearly from full at
-# FULL_S of voiced audio to SHORT_FLOOR of it at none (see the spec's table).
+# FULL_S of voiced audio to SHORT_FLOOR of it at none (see the spec's table)
+# — but a confirm answer never gets under CONFIRM_FLOOR of it.
 FULL_S = 2.0
 SHORT_FLOOR = 0.6
+CONFIRM_FLOOR = 0.8
+# A model that failed to load is retried (in the background) at most this often.
+RETRY_S = 600.0
+
+
+def _voiced_mask(pcm16: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n = pcm16.size // _FRAME
+    frames = pcm16[: n * _FRAME].reshape(n, _FRAME)
+    if n == 0:
+        return frames, np.zeros(0, dtype=bool)
+    level = np.sqrt(np.mean((frames.astype(np.float32) / 32768.0) ** 2, axis=1))
+    keep = (level >= np.percentile(level, 95) * 10 ** (-_VOICED_DB / 20)) & (level >= _VOICED_MIN_RMS)
+    return frames, keep
 
 
 def voiced(pcm16: np.ndarray) -> np.ndarray:
-    """The loud-enough 30 ms frames of `pcm16`, joined; all of it when fewer
-    than ten frames qualify."""
-    n = pcm16.size // _FRAME
-    if n == 0:
-        return pcm16
-    frames = pcm16[: n * _FRAME].reshape(n, _FRAME)
-    level = np.sqrt(np.mean(frames.astype(np.float32) ** 2, axis=1))
-    keep = level >= np.percentile(level, 95) * 10 ** (-_VOICED_DB / 20)
-    if keep.sum() < 10:
+    """What gets embedded: the voiced frames of `pcm16`, joined; all of it
+    when fewer than ten qualify (too little to stand on its own)."""
+    frames, keep = _voiced_mask(pcm16)
+    if keep.sum() < _VOICED_MIN_FRAMES:
         return pcm16
     return frames[keep].ravel()
+
+
+def voiced_s(pcm16: np.ndarray) -> float:
+    """Seconds of voice in `pcm16`: qualifying frames only, 0 under ten.
+    What enrolment's length check and the length-scaled threshold use —
+    never the whole capture, or silence would count as speech."""
+    _frames, keep = _voiced_mask(pcm16)
+    count = int(keep.sum())
+    return 0.0 if count < _VOICED_MIN_FRAMES else count * _FRAME / 16000
 
 
 def profile_path(settings: Settings) -> Path:
@@ -132,12 +153,16 @@ class VoiceProfile:
 
 
 class SpeakerGate:
-    """Owns the voice profile and the (lazily loaded) embedding model.
+    """Owns the voice profile and the embedding model.
 
     check() is the one question the orchestrator asks: is this capture the
-    enrolled voice? It fails open — no profile, verification off, or a
-    model that won't load all mean "yes" (logged), because a broken model
-    must not make her deaf; the confirm gate never depends on it to say no."""
+    enrolled voice? It never waits on the network or on a model load: until
+    the model is loaded (startup and enrolment load it, in the background or
+    up front) it answers "yes", as it does with no profile or verification
+    off — a missing model must not make her deaf, and the confirm gate never
+    depends on it to say no. A load failure is remembered (`failed`, shown in
+    Settings) and retried in the background at most every RETRY_S; a single
+    scoring error is only logged."""
 
     _model_cls = SpeakerModel  # swapped in tests
 
@@ -147,7 +172,10 @@ class SpeakerGate:
         self.profile = VoiceProfile.load(self.path)
         self._model: SpeakerModel | None = None
         self._lock = threading.Lock()
-        self._load_failed = False
+        self._failed_at: float | None = None      # monotonic time of the last failed load
+        self._loader: threading.Thread | None = None
+        self._not_ready_logged = False
+        self._error_logged_at = -1e9
         # The last few checks, newest first, for the Settings window (read
         # from the AppKit thread while checks append from worker threads).
         self.recent: deque[dict] = deque(maxlen=RECENT_MAX)
@@ -157,56 +185,77 @@ class SpeakerGate:
     def active(self) -> bool:
         return self.profile is not None and self.s.speaker_verification
 
+    @property
+    def failed(self) -> bool:
+        """The model couldn't be loaded: every voice is being accepted."""
+        return self._failed_at is not None and self._model is None
+
     def model_ready(self) -> bool:
         return self._model is not None or (self.s.models_dir / models.CAMPPLUS.name).exists()
 
-    def _get_model(self) -> SpeakerModel:
+    def prepare(self) -> bool:
+        """Fetch (if needed) and load the model; False if that failed. May
+        block on a download: startup, enrolment and the background loader
+        only, never a turn's check."""
         with self._lock:
-            if self._model is None:
+            if self._model is not None:
+                return True
+            try:
                 path = models.ensure(models.CAMPPLUS, self.s.models_dir)
                 self._model = self._model_cls(path)
-            return self._model
-
-    def prepare(self) -> bool:
-        """Fetch (if needed) and load the model; False if that failed."""
-        try:
-            self._get_model()
-            self._load_failed = False
+            except Exception:
+                log.exception("speaker model unavailable; accepting every voice")
+                self._failed_at = time.monotonic()
+                return False
+            self._failed_at = None
+            self._not_ready_logged = False
             return True
-        except Exception:
-            log.exception("speaker model unavailable")
-            return False
+
+    def _load_in_background(self) -> None:
+        loader = self._loader
+        if loader is not None and loader.is_alive():
+            return
+        if self._failed_at is not None and time.monotonic() - self._failed_at < RETRY_S:
+            return
+        self._loader = threading.Thread(target=self.prepare, name="veronica-speaker-model", daemon=True)
+        self._loader.start()
 
     def embed(self, pcm16: np.ndarray) -> np.ndarray:
-        return self._get_model().embed(voiced(pcm16))
+        """Enrolment's embedding: loads the model first if it has to."""
+        if self._model is None and not self.prepare():
+            raise RuntimeError("speaker model unavailable")
+        return self._model.embed(voiced(pcm16))
 
-    def score(self, pcm16: np.ndarray) -> float:
-        profile = self.profile
-        if profile is None:
-            raise RuntimeError("no voice profile")
-        return float(profile.embedding @ self.embed(pcm16))
-
-    def threshold_for(self, pcm16: np.ndarray) -> float:
-        speech_s = voiced(pcm16).size / self.s.sample_rate
-        scale = SHORT_FLOOR + (1 - SHORT_FLOOR) * min(1.0, speech_s / FULL_S)
+    def threshold_for(self, pcm16: np.ndarray, where: str = "request") -> float:
+        scale = SHORT_FLOOR + (1 - SHORT_FLOOR) * min(1.0, voiced_s(pcm16) / FULL_S)
+        if where == "confirm":
+            scale = max(scale, CONFIRM_FLOOR)
         return float(self.s.speaker_threshold) * scale
 
     def check(self, pcm16: np.ndarray, where: str) -> tuple[bool, float | None]:
         """(accepted, score). score is None when no check ran."""
-        if not self.active or self._load_failed:
+        profile, model = self.profile, self._model
+        if not self.active or profile is None:
+            return True, None
+        if model is None:
+            if not self._not_ready_logged:
+                self._not_ready_logged = True
+                log.warning("speaker %s: model not loaded%s; accepting", where,
+                            " (it failed, see above)" if self.failed else " yet")
+            self._load_in_background()
             return True, None
         t0 = time.monotonic()
         try:
-            score = self.score(pcm16)
+            score = float(profile.embedding @ model.embed(voiced(pcm16)))
         except Exception:
-            if not self._load_failed:
-                log.exception("speaker check failed; accepting every voice until restart")
-                self._load_failed = True
+            if t0 - self._error_logged_at > 60:
+                self._error_logged_at = t0
+                log.exception("speaker %s: check failed; accepting this one", where)
             return True, None
-        threshold = self.threshold_for(pcm16)
+        threshold = self.threshold_for(pcm16, where)
         ok = score >= threshold
         log.info("speaker %s: score=%.3f threshold=%.2f -> %s (%.1f s voiced of %.1f s, %d ms)", where, score,
-                 threshold, "accepted" if ok else "ignored", voiced(pcm16).size / self.s.sample_rate,
+                 threshold, "accepted" if ok else "ignored", voiced_s(pcm16),
                  pcm16.size / self.s.sample_rate, (time.monotonic() - t0) * 1000)
         with self._recent_lock:
             self.recent.appendleft({"where": where, "score": round(score, 3), "accepted": ok,
@@ -220,6 +269,10 @@ class SpeakerGate:
             return True
         return self.check(window, "wake")[0]
 
+    def similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Cosine similarity of two recordings' voices (enrolment uses it to
+        catch a take that is really her own voice coming back)."""
+        return float(self.embed(a) @ self.embed(b))
     def enrol(self, clips: list[np.ndarray]) -> tuple[VoiceProfile | None, float]:
         """Build and save a profile from `clips` (raw int16). Returns
         (profile, agreement): agreement is the lowest similarity between any
@@ -258,4 +311,4 @@ class SpeakerGate:
         with self._recent_lock:
             recent = list(self.recent)
         return {"enrolled": p is not None, "created": p.created if p is not None else "",
-                "active": self.active, "recent": recent}
+                "active": self.active, "failed": self.active and self.failed, "recent": recent}
