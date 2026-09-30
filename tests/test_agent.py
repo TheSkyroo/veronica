@@ -1408,6 +1408,27 @@ async def test_a_long_tool_call_does_not_time_the_turn_out(brain, monkeypatch, c
     assert "turn ended early" not in caplog.text
 
 
+async def test_a_tool_result_error_is_reported_to_the_gate(brain, monkeypatch):
+    from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage
+
+    seen = []
+    monkeypatch.setattr(brain.gate, "tool_result", lambda name, inp, err: seen.append((name, inp, err)))
+    use = _Assistant()
+    use.content = [ToolUseBlock(id="t1", name="mcp__mac__volume_get", input={"a": 1}),
+                   ToolUseBlock(id="t2", name="Read", input={"file_path": "/x"})]
+
+    async def script(self):
+        yield use
+        yield UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="error: no", is_error=True),
+                                   ToolResultBlock(tool_use_id="t2", content="ok")])
+        yield _Assistant("Done.")
+        yield _Result("s")
+
+    monkeypatch.setattr(FakeClient, "receive_response", script)
+    assert [s async for s in brain.ask("x")] == ["Done."]
+    assert seen == [("mcp__mac__volume_get", {"a": 1}, True), ("Read", {"file_path": "/x"}, False)]
+
+
 async def test_a_confirm_in_progress_pauses_the_silence_clock(brain, monkeypatch):
     """can_use_tool is awaiting the user's yes/no: the gate is busy, and the
     stream is quiet until it answers."""

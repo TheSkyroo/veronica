@@ -112,6 +112,10 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
   re-checks its position on its own whenever a display is plugged in or unplugged, so it can't be stranded on a
   monitor that's no longer there.
 
+A turn that runs more than one tool shows them in the full card as a checklist: ○ waiting on your yes, ▸ running,
+✓ done, ✕ declined or failed — failed when the tool itself returned an error. (A Codex, Antigravity or Copilot
+built-in tool, such as their own shell, reports no result to Veronica, so its step only ever shows done.)
+
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
 switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
 

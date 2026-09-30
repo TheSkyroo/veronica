@@ -115,6 +115,11 @@ class ToolGate:
         self._busy = 0
         self._changed = asyncio.Event()
         self.busy_ceiling_s = BUSY_CEILING_S
+        # Allowed calls whose result hasn't come back: (tool, input) -> the
+        # summary their card carried, so an error result marks that step
+        # "failed". Only allowed calls are here, so a deny (which the model
+        # also sees as an error) can never be taken for a failure.
+        self._awaiting_result: dict[str, str] = {}
 
     # -- busy: the silence clock ---------------------------------------------
     @contextlib.contextmanager
@@ -213,6 +218,20 @@ class ToolGate:
             return input, None
         return {**input, "to": f"{rec.name} ({rec.handle})"}, None
 
+    @staticmethod
+    def _call_key(tool_name: str, input: dict) -> str:
+        return tool_name + "\0" + json.dumps(input, sort_keys=True, default=str)
+
+    def tool_result(self, tool_name: str, input: dict, is_error: bool) -> None:
+        """An allowed call's result came back (the brain saw it, or the
+        registry ran it here). An error settles its step as "failed" —
+        reported through on_tool, which the orchestrator folds into the plan
+        card and never shows as an action card."""
+        summary = self._awaiting_result.pop(self._call_key(tool_name, input), None)
+        if summary is not None and is_error:
+            log.info("tool failed: %s", summary)
+            self._card(summary, "failed")
+
     async def decide(self, tool_name: str, input: dict) -> Decision:
         shown = input
         if tool_name == MESSAGE_SEND:
@@ -221,6 +240,12 @@ class ToolGate:
                 log.info("message recipient unresolved: %s", problem)
                 return Decision(False, "redirect", problem)
         summary = summarize_tool(tool_name, shown)
+        d = await self._decide(tool_name, input, shown, summary)
+        if d.allow:
+            self._awaiting_result[self._call_key(tool_name, input)] = summary
+        return d
+
+    async def _decide(self, tool_name: str, input: dict, shown: dict, summary: str) -> Decision:
         redirect = self._bash_redirect(tool_name, input)
         if redirect is not None:
             log.info("tool redirected: %s -> %s", summary, redirect)
@@ -285,6 +310,7 @@ class ToolGate:
         pre-approval that was for some other turn is dropped here."""
         self._current_turn = turn_id
         self._asked_this_turn = 0
+        self._awaiting_result.clear()
         if self._preapproved_turn != turn_id:
             self._preapproved_turn = None
 
@@ -429,6 +455,7 @@ class GateServer:
                         if op == "call" and d.allow:
                             content, is_error = await self._run(tool, inp)
                             resp["content"], resp["is_error"] = content, is_error
+                            self.gate.tool_result(tool, inp, is_error)
             writer.write((json.dumps(resp) + "\n").encode())
             await writer.drain()
         except Exception:

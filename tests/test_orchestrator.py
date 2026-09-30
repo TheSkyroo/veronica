@@ -5077,6 +5077,38 @@ async def test_plan_appears_on_the_second_tool_call():
     ]
 
 
+class FailingGateBrain(GateBrain):
+    """Each call's tool result is reported back, as the brains do; the ones
+    in `errors` came back as errors."""
+
+    def __init__(self, orch, calls, errors):
+        super().__init__(orch, calls)
+        self.errors = errors
+
+    async def ask(self, text):
+        for i, (tool, inp) in enumerate(self.calls):
+            d = await self.gate.decide(tool, inp)
+            if d.allow:
+                self.gate.tool_result(tool, inp, i in self.errors)
+        yield "Done."
+
+
+async def test_a_step_whose_tool_errored_shows_failed():
+    o, ev = build_plan([READ_A, READ_B])
+    o.brain = FailingGateBrain(o, [READ_A, READ_B], errors={0})
+    await o.handle_text("read both")
+    assert plans(ev)[-1] == [("Read: /a", "failed"), ("Read: /b", "done")]
+    # the HUD never gets a card for it: failed is a plan state, not an action
+    assert [p["decision"] for k, p in ev if k == "tool"] == ["auto", "auto"]
+
+
+async def test_the_last_step_failing_stays_failed_at_the_end_of_the_turn():
+    o, ev = build_plan([READ_A, READ_B])
+    o.brain = FailingGateBrain(o, [READ_A, READ_B], errors={1})
+    await o.handle_text("read both")
+    assert plans(ev)[-1] == [("Read: /a", "done"), ("Read: /b", "failed")]
+
+
 async def test_plan_event_follows_the_tool_card_it_describes():
     o, ev = build_plan([READ_A, READ_B])
     await o.handle_text("read both")

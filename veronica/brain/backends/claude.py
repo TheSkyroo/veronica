@@ -272,6 +272,8 @@ class ClaudeBrain:
             # tool_use ids without a result yet: the stream is quiet while
             # they run, and that isn't the model stalling.
             running: set[str] = set()
+            # ...and what each one was (tool, input), to report its result
+            calls: dict[str, tuple[str, dict]] = {}
             while True:
                 try:
                     msg = await self.gate.wait_quiet(anext(it, None), self.s.brain_timeout_s,
@@ -306,10 +308,15 @@ class ClaudeBrain:
                                 yield sent
                         elif isinstance(block, ToolUseBlock):
                             running.add(block.id)
+                            calls[block.id] = (block.name, dict(block.input or {}))
                 elif isinstance(msg, UserMessage):
                     for block in msg.content if isinstance(msg.content, list) else ():
                         if isinstance(block, ToolResultBlock):
                             running.discard(block.tool_use_id)
+                            call = calls.pop(block.tool_use_id, None)
+                            if call is not None:
+                                # an error result settles its plan step as failed
+                                self.gate.tool_result(*call, bool(block.is_error))
                 elif isinstance(msg, ResultMessage):
                     self._in_flight = False   # turn ended, error or not
                     if getattr(msg, "is_error", False):

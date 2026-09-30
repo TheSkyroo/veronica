@@ -409,7 +409,8 @@ class LocalBrain:
         decision = await self.gate.decide(name, args)
         if not decision.allow:
             return f"Not allowed: {decision.message}"
-        content, _is_error = await call_tool(name, args)
+        content, is_error = await call_tool(name, args)
+        self.gate.tool_result(name, args, is_error)
         # This model is text-only, so an image block has nothing to say to it.
         return "\n".join(c["text"] for c in content if c.get("type") == "text") or "ok"
 

@@ -581,3 +581,20 @@ async def test_catch_all_tools_are_not_offered_to_the_local_model():
     assert "mcp__mac__applescript" not in names and "mcp__mac__applescript" not in index
     assert not any(n.startswith("mcp__computer__") for n in names)
     assert "mcp__mac__volume_get" in names        # ordinary tools still offered
+
+
+async def test_a_tool_error_is_reported_to_the_gate(tmp_path, monkeypatch):
+    class ErrServer(FakeToolServer):
+        def get_request_handler(self, kind):
+            async def handler(_ctx, params):
+                return CallToolResult(content=[TextContent(type="text", text="error: nope")], isError=True)
+            return type("H", (), {"handler": staticmethod(handler)})()
+
+    fake_catalog(monkeypatch, ErrServer())
+    cards = []
+    brain, *_ = make_brain(tmp_path, rounds=[[tool_delta(0, "mcp__mac__volume_get", "{}", "c1")],
+                                              [sse(content="Sorry.")]])
+    brain.gate._on_tool = lambda su, d: cards.append((su, d))
+    await drain(brain)
+    assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
+    await brain.close()

@@ -148,6 +148,40 @@ async def test_message_send_to_an_unknown_name_is_handed_back():
     assert not d.allow and "No contact named Zed" in d.message and calls == []
 
 
+# -- tool results: an error marks the step failed ------------------------------
+
+async def test_an_allowed_call_that_errors_reports_failed():
+    g, _, cards = make([])
+    await g.decide("mcp__mac__volume_get", {})
+    g.tool_result("mcp__mac__volume_get", {}, True)
+    assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
+
+
+async def test_a_successful_call_reports_nothing_more():
+    g, _, cards = make([])
+    await g.decide("mcp__mac__volume_get", {})
+    g.tool_result("mcp__mac__volume_get", {}, False)
+    g.tool_result("mcp__mac__volume_get", {}, True)      # already settled: ignored
+    assert cards == [("volume_get", "auto")]
+
+
+async def test_a_denied_call_error_is_not_a_failure():
+    """A deny comes back to the model as an error result too; that step is
+    already 'declined', never 'failed'."""
+    g, _, cards = make([False])
+    await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    g.tool_result("mcp__mac__clipboard_write", {"text": "hi"}, True)
+    assert cards == []
+
+
+async def test_a_failed_message_send_names_the_step_the_confirm_showed():
+    g, _, cards = make([True])
+    inp = {"to": "Priya", "body": "hi"}
+    await g.decide("mcp__pim__message_send", inp)
+    g.tool_result("mcp__pim__message_send", inp, True)
+    assert cards == [("Message Priya Shah (+91 98765 43210): hi", "failed")]
+
+
 # -- GateServer: the socket front for out-of-process callers ------------------
 import asyncio
 import json
@@ -332,6 +366,17 @@ async def test_a_tool_that_blows_up_is_an_error_not_a_dropped_call(sock):
     finally:
         await srv.stop()
     assert resp["allow"] and resp["is_error"] and "kaboom" in resp["content"][0]["text"]
+
+
+async def test_a_call_whose_tool_errors_reports_failed(sock):
+    g, _, cards = make([])
+    srv = GateServer(g, sock, run_tool=runner([], ([{"type": "text", "text": "error: no"}], True)))
+    await srv.start()
+    try:
+        await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+    finally:
+        await srv.stop()
+    assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
 
 
 async def test_a_slow_tool_does_not_block_an_unrelated_confirm(sock):
