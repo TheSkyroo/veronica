@@ -228,3 +228,17 @@ def test_reader_reopens_without_closing_when_portaudio_refreshed_elsewhere(fake_
     assert fake_sd.streams[0].closed is False        # dead handle dropped, not closed
     assert fake_sd.streams[1].closed is True
     assert "wake mic stream invalidated by PortAudio refresh; reopening" in caplog.text
+
+
+def test_a_device_that_overflows_every_chunk_does_not_flood_the_log(fake_sd, monkeypatch, caplog):
+    """AirPods' hands-free profile overflowed on every chunk: one warning per
+    chunk (~15 a second) rotated the whole log away within hours. It is
+    summarised at most once per OVERFLOW_LOG_EVERY_S instead."""
+    monkeypatch.setattr(FakeStream, "read",
+                        lambda self, n: (b"\0" * n, True))
+    with caplog.at_level(logging.WARNING, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        _drain(gen, 200)
+        gen.close()
+    lines = [r for r in caplog.records if "mic overflow" in r.getMessage()]
+    assert len(lines) == 1

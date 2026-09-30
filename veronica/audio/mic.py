@@ -13,6 +13,9 @@ from veronica.config import Settings
 
 log = logging.getLogger("veronica.audio")
 
+# Mic overflow warnings are summarised at most this often (see the read loop).
+OVERFLOW_LOG_EVERY_S = 60
+
 
 def mic_frames(
     settings: Settings,
@@ -104,6 +107,7 @@ def mic_frames(
                 open_fresh()
                 deferred_logged = False
 
+        overflow_count, overflow_logged_at = 0, -1e9
         try:
             if watch is not None:
                 # A change that happened while no reader was alive (or one
@@ -124,7 +128,18 @@ def mic_frames(
                         open_fresh()
                     data, overflowed = stream.read(chunk)
                 if overflowed:
-                    log.warning("%s mic overflow (reader thread stalled)", log_prefix)
+                    # One line per minute at most: a device that overflows on
+                    # every chunk (seen with AirPods' hands-free profile) wrote
+                    # ~15 lines a second and rotated every other log line away
+                    # within hours, destroying the evidence of what went wrong.
+                    overflow_count += 1
+                    now_s = time.monotonic()
+                    if now_s - overflow_logged_at >= OVERFLOW_LOG_EVERY_S:
+                        log.warning("%s mic overflow (reader thread stalled) x%d in the last %ds — input: %s",
+                                    log_prefix, overflow_count, OVERFLOW_LOG_EVERY_S,
+                                    getattr(devices, "last_input_name", None) or devices.last_input_id)
+                        overflow_count = 0
+                        overflow_logged_at = now_s
                 q.put(bytes(data))
                 if watch is None:
                     continue
