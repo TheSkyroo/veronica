@@ -244,7 +244,49 @@ def test_a_device_that_overflows_every_chunk_does_not_flood_the_log(fake_sd, mon
     assert len(lines) == 1
 
 
-# -- PortAudio ring size ---------------------------------------------------
+# -- PortAudio ring size, stalls, persistent overflow, dead consumers -------
+
+class PolledStream(FakeStream):
+    """A stream shaped like sounddevice's: `read_available` says how many
+    frames are buffered, and `read()` never has to block. `dead_after` reads
+    in, it stops delivering for good (what PortAudio's CoreAudio input
+    callback does after AudioUnitRender fails: it stops the unit, and a
+    blocking read then waits forever)."""
+
+    def __init__(self, registry, chunk=1280, dead_after=None, overflow=False, **kw):
+        super().__init__(registry, **kw)
+        self.chunk = chunk
+        self.dead_after = dead_after
+        self.overflow = overflow
+
+    @property
+    def dead(self):
+        return self.dead_after is not None and self.n >= self.dead_after
+
+    @property
+    def read_available(self):
+        return 0 if self.dead else self.chunk
+
+    @property
+    def active(self):
+        return not self.dead
+
+    def read(self, n):
+        assert not self.dead, "read() on a dead stream would block forever"
+        assert n <= self.read_available, "read() larger than what's buffered would block"
+        self.n += 1
+        time.sleep(0.0005)
+        return self.n.to_bytes(4, "little") * (n // 2), self.overflow
+
+
+def _polled(fake_sd, *streams_kw):
+    """Make fake_sd open PolledStreams, the i-th with streams_kw[i] (the last
+    repeats)."""
+    def open_(**kw):
+        fake_sd.calls.append("open")
+        i = min(len(fake_sd.streams), len(streams_kw) - 1)
+        return PolledStream(fake_sd.streams, **{**streams_kw[i], **kw})
+    fake_sd.RawInputStream = open_
 
 
 def test_stream_latency_keeps_portaudios_ring_at_least_two_chunks(fake_sd):
@@ -268,3 +310,118 @@ def test_stream_latency_never_lowers_the_devices_own_high_latency(fake_sd):
     next(gen)
     gen.close()
     assert fake_sd.streams[0].kw["latency"] == pytest.approx(0.3)
+
+
+def test_reader_reopens_a_stream_that_stopped_delivering(fake_sd, monkeypatch, caplog):
+    """The wedge behind two days of a deaf wake word: the device went away
+    (AirPods out, sleep), PortAudio stopped the input unit, and read() waited
+    forever — holding refresh_lock, so no device refresh could run either.
+    The reader must notice no audio arriving, say so, and reopen."""
+    monkeypatch.setattr(mic, "STALL_S", 0.1)
+    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "AirPods - Find My")
+    _polled(fake_sd, {"dead_after": 3}, {})
+    with caplog.at_level(logging.INFO, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        got = _drain(gen, 6)
+        gen.close()
+    assert len(got) == 6                                  # frames resumed on the new stream
+    assert fake_sd.calls == ["open", "open"]              # a plain reopen first
+    assert "no audio from AirPods - Find My" in caplog.text
+    assert "reopening the stream" in caplog.text
+
+
+def test_a_second_stall_in_a_row_reinitialises_portaudio(fake_sd, monkeypatch, caplog):
+    """If a fresh stream on the same device table is dead too, the table
+    itself is stale (the device was re-created under a new id): re-initialise
+    PortAudio before opening again."""
+    monkeypatch.setattr(mic, "STALL_S", 0.05)
+    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "Rockerz 480")
+    _polled(fake_sd, {"dead_after": 2}, {"dead_after": 0}, {})
+    with caplog.at_level(logging.INFO, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        got = _drain(gen, 5)
+        gen.close()
+    assert len(got) == 5
+    assert fake_sd.calls == ["open", "open", "terminate", "initialize", "open"]
+    assert "re-initialising PortAudio" in caplog.text
+
+
+def test_a_stalled_reader_does_not_hold_the_refresh_lock(fake_sd, monkeypatch):
+    """Waiting for audio must not happen under devices.refresh_lock: the
+    Player's output-stream open and every device refresh take it."""
+    monkeypatch.setattr(mic, "STALL_S", 30)
+    _polled(fake_sd, {"dead_after": 1})
+    gen = mic.mic_frames(Settings(), 1280, "wake", on_backlog=lambda f: None)
+    next(gen)
+    time.sleep(0.05)                                      # reader is now waiting on a dead stream
+    got = devices.refresh_lock.acquire(timeout=0.5)
+    assert got, "reader held refresh_lock while waiting for audio"
+    devices.refresh_lock.release()
+    gen.close()
+
+
+def test_persistent_overflow_reopens_with_a_bigger_buffer_and_says_so(fake_sd, monkeypatch, caplog):
+    """Whatever makes a device overflow on every read, spinning on it for
+    days is wrong: after OVERFLOW_HEAL_S of it the reader reopens with twice
+    the latency (a bigger ring), naming the device, until MAX_LATENCY_S."""
+    monkeypatch.setattr(mic, "OVERFLOW_HEAL_S", 0.05)
+    monkeypatch.setattr(mic, "MAX_LATENCY_S", 0.4)
+    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "AirPods - Find My")
+    fake_sd.query_devices = lambda kind=None: {"default_high_input_latency": 0.0}
+    _polled(fake_sd, {"overflow": True})
+    with caplog.at_level(logging.WARNING, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        deadline = time.monotonic() + 3
+        while "not reopening again" not in caplog.text and time.monotonic() < deadline:
+            _drain(gen, 1)
+        gen.close()
+    lat = [s.kw["latency"] for s in fake_sd.streams]
+    assert lat == pytest.approx([0.08, 0.16, 0.32, 0.4])
+    assert "overflowing on" in caplog.text and "AirPods - Find My" in caplog.text
+    assert "reopening with latency 0.16s" in caplog.text
+    assert "not reopening again" in caplog.text
+
+
+def test_occasional_overflow_does_not_reopen(fake_sd, monkeypatch):
+    monkeypatch.setattr(mic, "OVERFLOW_HEAL_S", 0.02)
+
+    class Rare(PolledStream):
+        def read(self, n):
+            data, _ = super().read(n)
+            return data, self.n % 10 == 0
+
+    fake_sd.RawInputStream = lambda **kw: (fake_sd.calls.append("open"), Rare(fake_sd.streams, **kw))[1]
+    gen = mic.mic_frames(Settings(), 1280, "wake")
+    _drain(gen, 300)
+    gen.close()
+    assert fake_sd.calls == ["open"]
+
+
+def test_a_consumer_that_stops_draining_never_blocks_the_reader(fake_sd, monkeypatch, caplog):
+    """The queue is bounded and drops its *oldest* frames when full: a wake
+    loop that stopped pulling can cost memory for at most QUEUE_MAX frames,
+    and the reader keeps reading (and healing) regardless."""
+    monkeypatch.setattr(mic, "QUEUE_MAX", 5)
+    _polled(fake_sd, {})
+    with caplog.at_level(logging.WARNING, logger="veronica.audio"):
+        gen = mic.mic_frames(Settings(), 1280, "wake")
+        first = next(gen)
+        time.sleep(0.1)                                   # consumer stalls
+        n_read = fake_sd.streams[0].n
+        assert n_read > 20                                # reader kept going
+        got = _drain(gen, 5)
+        gen.close()
+    assert first == (1).to_bytes(4, "little") * 640
+    # what's left is the newest audio, not the oldest
+    assert int.from_bytes(got[-1][:4], "little") > 20
+    assert "not draining" in caplog.text
+
+
+def test_frames_are_whole_chunks_whatever_the_device_hands_over(fake_sd):
+    """read_available can be any size (a Bluetooth mic's IO buffer is a few
+    hundred frames); the queue only ever carries whole `chunk`-frame frames."""
+    _polled(fake_sd, {"chunk": 300})
+    gen = mic.mic_frames(Settings(), 1280, "wake")
+    got = _drain(gen, 4)
+    gen.close()
+    assert {len(f) for f in got} == {2560}
