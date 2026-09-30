@@ -2,6 +2,7 @@ import asyncio
 import threading
 
 import numpy as np
+import pytest
 
 from veronica.audio.record import Recorder
 from veronica.config import Settings
@@ -601,3 +602,160 @@ async def test_followup_skip_grows_with_input_latency(monkeypatch):
     r2._frames = counting2
     await r2.capture(max_s=1, skip_ms=300)
     assert seen2["n"] < seen["n"]
+
+
+# -- voice isolation: energy gate and noise suppression ---------------------------
+def quiet_frames(pattern, level):
+    """Like frames(), with 's' frames at `level` (int16 amplitude)."""
+    for ch in pattern:
+        yield np.full(FRAME, level if ch == "s" else 0, dtype=np.int16).tobytes()
+    while True:
+        yield np.zeros(FRAME, dtype=np.int16).tobytes()
+
+
+class PassDenoiser:
+    """Suppression that changes nothing: the level floor applies, the audio
+    is what went in."""
+
+    def process_bytes(self, frame):
+        return frame
+
+
+def with_suppression(monkeypatch, den=None):
+    from veronica.audio import denoise
+
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: den if den is not None else PassDenoiser())
+
+
+async def test_frames_under_the_energy_gate_do_not_open_a_capture(monkeypatch):
+    # The VAD calls every non-zero frame speech; at amplitude 20 (rms ~0.0006)
+    # it is room noise to the gate.
+    with_suppression(monkeypatch)
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, vad_min_rms=0.002)
+    r = Recorder(s, frames=lambda: quiet_frames("...ssssss......", 20))
+    assert await r.capture(max_s=1) is None
+
+
+async def test_energy_gate_zero_lets_the_vad_decide_alone(monkeypatch):
+    with_suppression(monkeypatch)
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, vad_min_rms=0.0)
+    r = Recorder(s, frames=lambda: quiet_frames("...ssssss......", 20))
+    assert await r.capture(max_s=1) is not None
+
+
+async def test_without_suppression_the_floor_is_off_as_before(monkeypatch):
+    # (conftest: no denoiser) — quiet speech the VAD hears must still count.
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, vad_min_rms=0.002)
+    r = Recorder(s, frames=lambda: quiet_frames("...ssssss......", 20))
+    assert await r.capture(max_s=1) is not None
+
+
+def test_has_speech_is_the_vad_alone(monkeypatch):
+    # the pre-roll is raw audio: no floor on it, as before
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    r = Recorder(Settings(vad_min_rms=0.002), frames=lambda: frames(""))
+    assert r.has_speech(np.full(FRAME * 6, 20, dtype=np.int16))
+
+
+class HalvingDenoiser:
+    def __init__(self):
+        self.calls = 0
+
+    def process_bytes(self, frame):
+        self.calls += 1
+        return (np.frombuffer(frame, dtype=np.int16) // 2).tobytes()
+
+
+async def test_suppression_decides_speech_but_the_capture_is_the_raw_audio(monkeypatch):
+    from veronica.audio import denoise
+
+    levels = []
+    den = HalvingDenoiser()
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: den)
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1)
+    r = Recorder(s, frames=lambda: frames("..ssssss...."), on_level=levels.append)
+    pcm = await r.capture()
+    assert den.calls > 0
+    assert pcm.max() == 1000                     # what STT and the speaker check get
+    assert max(levels) == pytest.approx(1000 / 32768, rel=1e-3)  # the HUD meter shows the mic as it is
+
+
+async def test_suppression_that_removes_a_noise_burst_keeps_it_from_opening(monkeypatch):
+    from veronica.audio import denoise
+
+    class Silencer:
+        def process_bytes(self, frame):
+            return bytes(len(frame))
+
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: Silencer())
+    r = make("..ssssss....", monkeypatch)
+    assert await r.capture(max_s=1) is None
+
+
+class DelayDenoiser:
+    """Behaves like the real one in time: output is input delayed by LAG."""
+
+    def __init__(self):
+        from veronica.audio import denoise
+
+        self.tail = np.zeros(denoise.LAG, dtype=np.int16)
+
+    def process_bytes(self, frame):
+        x = np.concatenate([self.tail, np.frombuffer(frame, dtype=np.int16)])
+        self.tail = x[-self.__class__._lag():]
+        return x[: x.size - self.__class__._lag()].tobytes()
+
+    @staticmethod
+    def _lag():
+        from veronica.audio import denoise
+
+        return denoise.LAG
+
+
+async def test_the_onset_is_not_clipped_by_the_suppressors_delay(monkeypatch):
+    """Onset is seen in the delayed suppressed audio; the raw frames that
+    hold it come before that frame and must be in the capture."""
+    with_suppression(monkeypatch, DelayDenoiser())
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=300, min_speech_ms=60, max_utterance_s=2)
+    raw = "......" + "s" * 10 + "." * 30
+    r = Recorder(s, frames=lambda: frames(raw))
+    pcm = await r.capture(max_s=2)
+    assert pcm is not None
+    assert np.count_nonzero(pcm) == 10 * FRAME          # all of the speech, from its first sample
+    first = int(np.flatnonzero(pcm)[0])
+    assert first <= FRAME * 2                           # a little lead-in, not a clipped start
+
+
+async def test_a_suppressor_that_raises_falls_back_to_raw_and_turns_itself_off(monkeypatch, caplog):
+    from veronica.audio import denoise
+
+    class Broken:
+        calls = 0
+
+        def process_bytes(self, frame):
+            Broken.calls += 1
+            raise RuntimeError("onnxruntime: bad state")
+
+    made = []
+
+    def make(settings):
+        if denoise._disabled:
+            return None
+        made.append(Broken())
+        return made[-1]
+
+    monkeypatch.setattr(denoise, "make_denoiser", make)
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1)
+    r = Recorder(s, frames=lambda: frames("..ssssss...."))
+    pcm = await r.capture()
+    assert pcm is not None and pcm.max() == 1000     # the turn still got its audio
+    assert Broken.calls == 1                         # tried once, then raw for the rest
+    assert caplog.text.count("noise suppression failed") == 1
+    assert await r.capture() is not None
+    assert len(made) == 1                            # off until restart

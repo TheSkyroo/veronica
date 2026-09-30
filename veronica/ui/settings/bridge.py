@@ -30,6 +30,7 @@ from veronica import config, proactive
 from veronica import prefs as _prefs
 from veronica import updater as _updater
 from veronica import version as _version
+from veronica.audio import speaker as _speaker
 from veronica.brain.backends import check_backend as _check_backend
 from veronica.speech import voices
 from veronica.ui import login_item as _login_item
@@ -44,6 +45,8 @@ LATEST = "You're already on the latest."
 BUILD_FIRST = "Build the app first."
 RESTART_FROM_TERMINAL = "Restart me from the terminal."
 VOICE_TEST = {"en": "This is how I sound now.", "hi": "Main aise bolti hoon."}
+LEARN_VOICE = "Listen for her, then repeat each line."
+NO_VOICE = "No voice saved."
 LANGUAGE_MODES = ("en", "hi", "auto")
 HUD_MODES = ("full", "mini")
 LOGIN_ITEMS_URL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
@@ -54,7 +57,9 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
     "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
     "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
-                  "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor"),
+                  "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor",
+                  "noise_suppression", "vad_min_rms", "speaker_verification", "speaker_threshold",
+                  "speaker_verification_wake"),
     "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist", "auto_allow_tools",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
               "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
@@ -167,6 +172,8 @@ class SettingsBridge:
             "restart": self.restart,
             "open_logs": self.open_logs,
             "open_login_items": self.open_login_items,
+            "learn_voice": self.learn_voice,
+            "forget_voice": self.forget_voice,
         }
         fn = handlers.get(cmd)
         if fn is None:
@@ -265,7 +272,10 @@ class SettingsBridge:
                     for vid in voices.ALL_VOICE_IDS
                 ],
             },
-            "listening": {name: setting(name) for name in SETTING_SECTIONS["listening"]},
+            "listening": {
+                **{name: setting(name) for name in SETTING_SECTIONS["listening"]},
+                "voice_profile": self._voice_profile(orch),
+            },
             "briefings": sched.to_prefs(),
             "brain": {
                 **{name: setting(name) for name in SETTING_SECTIONS["brain"]},
@@ -485,6 +495,48 @@ class SettingsBridge:
         lang = "hi" if str(lang).lower() == "hi" else "en"
         self._run_on_loop(self._with_player_reset(orch, orch.say(VOICE_TEST[lang], lang="hi" if lang == "hi" else None)))
         return _ok()
+
+    # -- voice profile ("only my voice") ----------------------------------------------
+    def _voice_profile(self, orch) -> dict:
+        """{enrolled, created, active, recent: [{where, score, accepted, at}]}
+        — from the running SpeakerGate, else straight from the profile file."""
+        sp = getattr(orch, "speaker", None) if orch is not None else None
+        if sp is not None:
+            return sp.status()
+        p = _speaker.VoiceProfile.load(_speaker.profile_path(self._settings))
+        return {"enrolled": p is not None, "created": p.created if p else "", "active": False, "failed": False,
+                "recent": []}
+
+    def learn_voice(self) -> dict:
+        """Queue the enrolment turn: it runs when she's next idle, so it
+        never shares the mic with a turn in flight."""
+        orch = self._orch_or_none()
+        if orch is None or getattr(orch, "speaker", None) is None:
+            return _fail(STARTING_UP)
+
+        async def turn():
+            reset = getattr(getattr(orch, "player", None), "reset", None)
+            if reset is not None:
+                reset()
+            try:
+                await orch._speaker_turn("enrol")
+            finally:
+                self._push()
+
+        self._run_on_loop(orch.queue_turn(turn))
+        return _ok(message=LEARN_VOICE)
+
+    def forget_voice(self) -> dict:
+        orch = self._orch_or_none()
+        sp = getattr(orch, "speaker", None) if orch is not None else None
+        if sp is not None:
+            had = sp.forget()
+        else:
+            path = _speaker.profile_path(self._settings)
+            had = path.exists()
+            path.unlink(missing_ok=True)
+        self._push()
+        return _ok() if had else _fail(NO_VOICE)
 
     # -- history ----------------------------------------------------------------------
     def _history_store(self):

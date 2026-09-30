@@ -174,6 +174,39 @@ def match_update_intent(text: str) -> bool:
     return any(c in UPDATE_PHRASES for c in _candidates_for(normalize(text)))
 
 
+# Voice profile ("only listen to my voice"): whole utterance only, and
+# checked before the memory intents, or "forget my voice" would be taken as
+# a fact to forget.
+SpeakerAction = Literal["enrol", "forget"]
+
+_SPEAKER_PHRASES: dict[str, SpeakerAction] = {
+    **dict.fromkeys((
+        "learn my voice", "remember my voice", "enroll my voice", "enrol my voice", "train my voice",
+        "recognize my voice", "recognise my voice", "learn to recognize my voice", "learn to recognise my voice",
+        "set up my voice", "only listen to my voice", "only listen to me", "listen only to me",
+        "meri awaaz yaad rakho", "meri awaz yaad rakho", "meri aawaz yaad rakho", "meri awaaz seekho",
+        "meri awaz seekho", "meri awaaz pehchano", "meri awaz pehchano", "sirf meri awaaz suno",
+        "sirf meri awaz suno", "sirf meri baat suno",
+    ), "enrol"),
+    **dict.fromkeys((
+        "forget my voice", "delete my voice", "forget my voice profile", "delete my voice profile",
+        "remove my voice", "listen to everyone", "listen to anyone",
+        "meri awaaz bhool jao", "meri awaz bhool jao", "meri aawaz bhool jao", "meri awaaz mita do",
+        "meri awaz mita do", "sabki awaaz suno", "sabki baat suno",
+    ), "forget"),
+}
+_SPEAKER_PHRASES_HINGLISH = frozenset(k for k in _SPEAKER_PHRASES if k.startswith(("meri", "sirf", "sabki")))
+
+
+def match_speaker_intent(text: str) -> SpeakerAction | None:
+    """"learn my voice" / "meri awaaz yaad rakho" -> "enrol"; "forget my
+    voice" / "meri awaaz bhool jao" -> "forget". Whole utterance only."""
+    for candidate in _candidates_for(normalize(text)):
+        if candidate in _SPEAKER_PHRASES:
+            return _SPEAKER_PHRASES[candidate]
+    return None
+
+
 # Hinglish "which brain" phrases (the switch forms are regexes, see
 # match_brain_intent below).
 _WHICH_BRAIN_PHRASES_HINGLISH = frozenset({
@@ -198,7 +231,7 @@ HINGLISH_INTENT_PHRASES: frozenset[str] = frozenset({
     "ruko zara", "zara ruko", "ek minute", "ek sec", "ek second",
     "aage bolo", "aage boliye", "jaari rakho", "continue karo",
 }) | _LANG_PHRASES_HINGLISH | _SETTINGS_PHRASES_HINGLISH | _VERSION_PHRASES_HINGLISH | _UPDATE_PHRASES_HINGLISH \
-    | _WHICH_BRAIN_PHRASES_HINGLISH
+    | _WHICH_BRAIN_PHRASES_HINGLISH | _SPEAKER_PHRASES_HINGLISH
 
 _LEAD_PREFIXES = ("hey veronica ", "veronica ")
 _TRAIL_SUFFIX = " please"

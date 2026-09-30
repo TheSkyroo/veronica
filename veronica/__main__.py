@@ -3,11 +3,14 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 
 from veronica import prefs, proactive
+from veronica.audio import denoise
 from veronica.audio.input_level import InputLevelGuard
 from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
+from veronica.audio.speaker import SpeakerGate
 from veronica.audio.wake import make_wake
 from veronica.brain.gate import ToolGate
 from veronica.brain.switch import BrainSwitcher
@@ -147,6 +150,20 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
             floor=lambda: s.input_volume_floor,
             on_corrected=lambda old, new, name: holder["orch"].input_volume_corrected(old, new, name),
         )
+    speaker = None
+    if audio:
+        # "Only my voice": inert until a profile is enrolled. Both models
+        # are fetched (if missing) and loaded in the background so the first
+        # capture doesn't wait; until the suppressor lands the mic audio is
+        # used as is, and a speaker check that can't load accepts everyone.
+        speaker = SpeakerGate(s)
+
+        def prepare_models() -> None:
+            denoise.prepare_model(s)
+            if speaker.active:
+                speaker.prepare()
+
+        threading.Thread(target=prepare_models, name="veronica-models", daemon=True).start()
     player = Player()
     register_for_refresh(player)
     # One confirm gate for every brain; the switcher builds the backends on
@@ -160,7 +177,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     )
     orch = Orchestrator(
         s,
-        wake=make_wake(s) if audio else None,
+        wake=make_wake(s, verify=speaker.check_wake) if audio else None,
         recorder=Recorder(s, on_level=on_level) if audio else None,
         stt=stt,
         partial_stt=partial_stt,
@@ -181,6 +198,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         relaunch=relaunch,
         can_relaunch=can_relaunch,
         version_describe=version_describe,
+        speaker=speaker,
     )
     holder["orch"] = orch
     pim.bind(TimerService(on_fire=orch.announce))

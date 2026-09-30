@@ -16,6 +16,27 @@ def _reset_audio_devices():
     devices.reset()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_audio_models(request, monkeypatch):
+    """Hermetic by default: the noise suppressor and speaker model are only
+    real in `live` tests, never because the model file happens to be in
+    ~/.veronica/models, and nothing is ever downloaded. Tests that want one
+    patch in a fake."""
+    from veronica.audio import denoise
+
+    monkeypatch.setattr(denoise, "_disabled", False)
+    if request.node.get_closest_marker("live") is not None:
+        return
+    from veronica.audio import models, speaker
+
+    def no_models(*a, **k):
+        raise RuntimeError("hermetic test: no real models, no downloads")
+
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: None)
+    monkeypatch.setattr(denoise, "prepare_model", lambda settings: None)
+    monkeypatch.setattr(denoise, "_start_fetch", lambda settings: None)
+    monkeypatch.setattr(models, "ensure", no_models)
+    monkeypatch.setattr(speaker.SpeakerModel, "_session_factory", staticmethod(no_models))
 
 
 _EXIT_STATUS = 0

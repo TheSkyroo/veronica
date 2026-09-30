@@ -579,3 +579,31 @@ def test_hinglish_pause_and_continue_phrases_count_as_hinglish():
 ])
 def test_match_brain_intent_tolerates_lead_ins(text, expected):
     assert match_brain_intent(text) == expected
+
+
+# -- voice profile ------------------------------------------------------------------
+@pytest.mark.parametrize("text, expected", [
+    ("Learn my voice.", "enrol"),
+    ("Veronica, learn my voice please", "enrol"),
+    ("Only listen to me.", "enrol"),
+    ("meri awaaz yaad rakho", "enrol"),
+    ("Sirf meri awaaz suno.", "enrol"),
+    ("Forget my voice.", "forget"),
+    ("Delete my voice profile", "forget"),
+    ("meri awaaz bhool jao", "forget"),
+    ("listen to everyone", "forget"),
+    ("forget my keys", None),
+    ("learn my voice and play music", None),
+    ("what does my voice sound like", None),
+])
+def test_match_speaker_intent(text, expected):
+    from veronica.brain.intents import match_speaker_intent
+
+    assert match_speaker_intent(text) == expected
+
+
+def test_speaker_hinglish_phrases_answer_in_hindi():
+    from veronica.brain import quick
+
+    assert quick.is_hinglish_phrase("meri awaaz yaad rakho")
+    assert not quick.is_hinglish_phrase("learn my voice")

@@ -414,3 +414,32 @@ async def test_spoken_name_still_wakes_without_the_bias(monkeypatch):
     monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["", "veronica"]))
     w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
     assert await _wait_for(w.wait(), 3) is True
+
+
+# -- voice isolation ----------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_speaker_check_can_drop_a_wake_match(monkeypatch):
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["hey veronica"]))
+    verdicts = [False, True]
+    windows = []
+
+    def verify(window):
+        windows.append(window.copy())
+        return verdicts.pop(0)
+
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000), verify=verify)
+    assert await _wait_for(w.wait(), 3) is True
+    assert len(windows) == 2 and windows[0].size > 0 and windows[0].max() == 1000
+
+
+@pytest.mark.asyncio
+async def test_wake_path_never_uses_the_noise_suppressor(monkeypatch):
+    from veronica.audio import denoise
+
+    def boom(settings):
+        raise AssertionError("the wake check must hear the raw mic")
+
+    monkeypatch.setattr(denoise, "make_denoiser", boom)
+    monkeypatch.setattr(WhisperWake, "_model_cls", scripted_model_cls(["hey veronica"]))
+    w = WhisperWake(Settings(), frames=lambda: const_frames(1000))
+    assert await _wait_for(w.wait(), 3) is True

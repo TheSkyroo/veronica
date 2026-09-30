@@ -489,6 +489,39 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 Briefings and nudges are announcements: they're spoken only when Veronica is idle and not muted (anything that
 fires mid-conversation or while muted waits, like a timer), and the schedule persists in `~/.veronica/prefs.json`.
 
+## Background noise & only my voice
+
+- **Background noise** — on by default (Settings → Listening → "Reduce background noise"). A small offline
+  noise-suppression network (GTCRN, 0.5 MB, fetched on first launch into `~/.veronica/models`) cleans what the
+  speech detector hears, so keyboard clatter, dishes and music no longer open or stretch a recording, and a
+  "Speech level floor" (`vad_min_rms`, default 0.001, only while suppression runs) keeps faint background talk
+  out while you from across the room still get in. Whisper itself still transcribes the unprocessed audio — measured, it understands noisy
+  speech better than cleaned-up speech — and the wake word check is untouched.
+- **Only my voice** — say "Veronica, learn my voice" ("meri awaaz yaad rakho"), or press **Learn my voice** in
+  Settings → Listening. She reads three short lines; repeat each after the beep. From then on a request,
+  follow-up, dictated line or yes/no answer in someone else's voice (the TV, a person in the room) is ignored as
+  if nothing was said, with an "Ignored another voice" card on the HUD: it never runs, and it never approves or
+  redirects a confirm — she just listens once more, and if it's still not you the action is skipped.
+  Push-to-talk is always trusted (the key is the proof), and "forget my voice" always gets through, so a
+  profile that stops matching you can't lock you out. The wake word stays open to anyone unless you also turn
+  on "Only wake for my voice" (off by default: a missed wake is worse than a stray one — which also means
+  someone else saying "Veronica" can still interrupt her). If the voice model can't load she hears everyone
+  and says so once on the HUD and in Settings.
+- **Forget it** — "forget my voice" / "meri awaaz bhool jao", or **Forget my voice** in Settings. The profile is
+  one small file, `~/.veronica/voice_profile.json` (readable only by you); the speaker model (CAM++, 29 MB,
+  SHA256-pinned) is fetched the first time you enrol.
+- **Tuning** — every check is logged: `speaker request: score=0.62 threshold=0.35 -> accepted (1.9 s voiced of
+  3.1 s, 40 ms)` in `~/.veronica/logs/veronica.log`, and the last few show under the Learn/Forget buttons.
+  In testing (synthetic voices) the enrolled voice scored 0.5–0.8 on whole sentences and other voices mostly
+  under 0.3; real voices will differ, so watch your own scores. If she ignores you, lower "Voice match
+  strictness" (`speaker_threshold`, default 0.35) a little below your low scores; if someone else gets through,
+  raise it. Short answers ("yes", "haan") get a proportionally lower bar, but in a loud room say "yes, go
+  ahead" or hold the push-to-talk key. Re-enrol ("learn my voice") after changing mics.
+
+How the defaults were chosen, with the numbers:
+`docs/superpowers/specs/2026-10-01-veronica-voice-isolation-design.md`. To re-measure on your machine (synthetic
+voices, no microphone): `uv run python scripts/eval_voice_isolation.py --quick`.
+
 ## Settings window
 
 A normal macOS window (tabs: General, Voice, Listening, Briefings, Brain, History, About) for everything that
@@ -500,7 +533,7 @@ used to need an environment variable or a voice command.
 - **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
   spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
   utterance limits, briefing/nudge schedule, facts carried into a new conversation, start at login,
-  push-to-talk.
+  push-to-talk, noise suppression, the speech level floor and the voice check.
 - **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
   brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
   Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a
