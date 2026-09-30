@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     confirm_listen_s: int = 10
     listen_wait_s: int = 6
     capture_extra_s: float = 3.0
+    # Voice isolation (docs/superpowers/specs/2026-10-01-veronica-voice-
+    # isolation-design.md). Noise suppression cleans what the recorder's VAD
+    # sees — so clatter and music stop opening captures — while whisper still
+    # gets the raw audio (it transcribes that better); the wake check is
+    # left alone.
+    # vad_min_rms is the level (of the cleaned audio) a 30 ms frame must
+    # reach to count as speech: faint background talk stays out, you from
+    # across the room still get in. 0 = off.
+    noise_suppression: bool = True
+    vad_min_rms: float = 0.001
     # How long a turn may stay silent before she says a short "On it." so a
     # slow brain doesn't feel like a dropped question. 0 turns the line off.
     ack_after_s: float = 8.0   # only for an unusually long wait; see Orchestrator.ACK_MIN_GAP_S
@@ -240,6 +250,16 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "hud_intensity": EditableField(
         "float", "HUD intensity", "Glow/brightness multiplier.", min=0.2, max=2.0, restart=False,
+    ),
+    "noise_suppression": EditableField(
+        "bool", "Reduce background noise",
+        "Keeps clatter, music and fan noise from being taken for speech.", restart=False,
+    ),
+    "vad_min_rms": EditableField(
+        "float", "Speech level floor",
+        "How loud (after noise reduction) a sound must be to count as speech. "
+        "Raise if room noise keeps her listening; lower if she misses you from across the room. 0 = off.",
+        min=0.0, max=0.01, restart=False,
     ),
     "wake_min_rms": EditableField(
         "float", "Wake sensitivity (min level)",

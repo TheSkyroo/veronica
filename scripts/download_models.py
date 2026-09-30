@@ -1,12 +1,16 @@
-"""Fetch Kokoro TTS model/voices and openwakeword base models into ~/.veronica/models.
+"""Fetch Kokoro TTS model/voices, the voice-isolation models and openwakeword base models into ~/.veronica/models.
 
 Whisper models are fetched on first use by faster-whisper (into its own
 Hugging Face cache); pass --whisper to prefetch the English pair now and
 --hindi to also prefetch the multilingual pair the Hindi/auto language
-modes use (~500 MB), so the first "speak hindi" doesn't stall on a download."""
+modes use (~500 MB), so the first "speak hindi" doesn't stall on a download.
+The noise suppressor (GTCRN, 0.5 MB) and the speaker model (CAM++, 29 MB)
+are SHA256-pinned in veronica.audio.models; the app also fetches them on
+first use."""
 import argparse
 import urllib.request
 
+from veronica.audio import models
 from veronica.config import settings
 
 KOKORO = {
@@ -46,6 +50,11 @@ def main(argv: list[str] | None = None) -> None:
             part.unlink(missing_ok=True)
             raise
         print(f"saved   {dest}")
+
+    for m in (models.GTCRN, models.CAMPPLUS):
+        existed = (settings.models_dir / m.name).exists()
+        dest = models.ensure(m, settings.models_dir)
+        print(f"ok      {dest}" if existed else f"saved   {dest} (sha256 verified)")
 
     import openwakeword
     openwakeword.utils.download_models()

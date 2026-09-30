@@ -3,8 +3,10 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 
 from veronica import prefs, proactive
+from veronica.audio import denoise
 from veronica.audio.input_level import InputLevelGuard
 from veronica.audio.play import Player, register_for_refresh
 from veronica.audio.record import Recorder
@@ -147,6 +149,11 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
             floor=lambda: s.input_volume_floor,
             on_corrected=lambda old, new, name: holder["orch"].input_volume_corrected(old, new, name),
         )
+    if audio:
+        # The noise suppressor's model (0.5 MB) is fetched (if missing) and
+        # loaded in the background so the first capture doesn't wait; until
+        # it lands the mic audio is used as is.
+        threading.Thread(target=denoise.prepare_model, args=(s,), name="veronica-models", daemon=True).start()
     player = Player()
     register_for_refresh(player)
     # One confirm gate for every brain; the switcher builds the backends on

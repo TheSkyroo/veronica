@@ -2,6 +2,7 @@ import asyncio
 import threading
 
 import numpy as np
+import pytest
 
 from veronica.audio.record import Recorder
 from veronica.config import Settings
@@ -601,3 +602,71 @@ async def test_followup_skip_grows_with_input_latency(monkeypatch):
     r2._frames = counting2
     await r2.capture(max_s=1, skip_ms=300)
     assert seen2["n"] < seen["n"]
+
+
+# -- voice isolation: energy gate and noise suppression ---------------------------
+def quiet_frames(pattern, level):
+    """Like frames(), with 's' frames at `level` (int16 amplitude)."""
+    for ch in pattern:
+        yield np.full(FRAME, level if ch == "s" else 0, dtype=np.int16).tobytes()
+    while True:
+        yield np.zeros(FRAME, dtype=np.int16).tobytes()
+
+
+async def test_frames_under_the_energy_gate_do_not_open_a_capture(monkeypatch):
+    # The VAD calls every non-zero frame speech; at amplitude 20 (rms ~0.0006)
+    # it is room noise to the gate.
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, vad_min_rms=0.002)
+    r = Recorder(s, frames=lambda: quiet_frames("...ssssss......", 20))
+    assert await r.capture(max_s=1) is None
+
+
+async def test_energy_gate_zero_lets_the_vad_decide_alone(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1, vad_min_rms=0.0)
+    r = Recorder(s, frames=lambda: quiet_frames("...ssssss......", 20))
+    assert await r.capture(max_s=1) is not None
+
+
+async def test_has_speech_applies_the_energy_gate(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    r = Recorder(Settings(vad_min_rms=0.002), frames=lambda: frames(""))
+    assert r.has_speech(np.full(FRAME * 6, 1000, dtype=np.int16))
+    assert not r.has_speech(np.full(FRAME * 6, 20, dtype=np.int16))
+
+
+class HalvingDenoiser:
+    def __init__(self):
+        self.calls = 0
+
+    def process_bytes(self, frame):
+        self.calls += 1
+        return (np.frombuffer(frame, dtype=np.int16) // 2).tobytes()
+
+
+async def test_suppression_decides_speech_but_the_capture_is_the_raw_audio(monkeypatch):
+    from veronica.audio import denoise
+
+    levels = []
+    den = HalvingDenoiser()
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: den)
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=1)
+    r = Recorder(s, frames=lambda: frames("..ssssss...."), on_level=levels.append)
+    pcm = await r.capture()
+    assert den.calls > 0
+    assert pcm.max() == 1000                     # what STT and the speaker check get
+    assert max(levels) == pytest.approx(500 / 32768, rel=1e-3)   # what the VAD/gate/HUD saw
+
+
+async def test_suppression_that_removes_a_noise_burst_keeps_it_from_opening(monkeypatch):
+    from veronica.audio import denoise
+
+    class Silencer:
+        def process_bytes(self, frame):
+            return bytes(len(frame))
+
+    monkeypatch.setattr(denoise, "make_denoiser", lambda settings: Silencer())
+    r = make("..ssssss....", monkeypatch)
+    assert await r.capture(max_s=1) is None

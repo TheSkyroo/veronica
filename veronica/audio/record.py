@@ -7,7 +7,7 @@ import numpy as np
 import sounddevice as sd
 import webrtcvad
 
-from veronica.audio import devices
+from veronica.audio import denoise, devices
 from veronica.config import Settings
 from veronica.ui.events import rms
 
@@ -167,6 +167,11 @@ class Recorder:
         self._armed = False
         self._hold = False
 
+    def _is_speech(self, vad, frame: bytes, level: float) -> bool:
+        """webrtcvad's call, and the frame loud enough (vad_min_rms) to be a
+        voice rather than room noise the VAD mistook for one."""
+        return vad.is_speech(frame, self.s.sample_rate) and level >= self.s.vad_min_rms
+
     def _frame_bytes(self) -> int:
         return self.s.sample_rate * self.s.frame_ms // 1000
 
@@ -197,7 +202,8 @@ class Recorder:
         usable = pcm.size - (pcm.size % n)
         count = 0
         for i in range(0, usable, n):
-            if vad.is_speech(pcm[i:i + n].tobytes(), self.s.sample_rate):
+            f = pcm[i:i + n]
+            if self._is_speech(vad, f.tobytes(), rms(f)):
                 count += 1
                 if count >= self._HAS_SPEECH_MIN_FRAMES:
                     return True
@@ -233,6 +239,14 @@ class Recorder:
             preroll_frame_total = (preroll.size - preroll.size % n) // n
 
         buf: list[bytes] = []
+        # Noise suppression decides *whether* someone is speaking (the VAD
+        # and the level gate see the cleaned frames), but the capture itself
+        # is the raw audio: whisper transcribes noisy speech better than
+        # suppressed speech (word error 3% vs 17% with a fan 5 dB under the
+        # voice, 11% vs 40% with a TV — see the voice-isolation spec), and
+        # the speaker check scores the raw voice too. Fresh per capture (the
+        # network is recurrent).
+        den = denoise.make_denoiser(self.s)
         speech_frames = 0
         silence_run = 0
         started = False
@@ -255,6 +269,7 @@ class Recorder:
         try:
             for frame in _all_frames():
                 frame_idx += 1
+                heard = den.process_bytes(frame) if den is not None else frame
                 if frame_idx >= preroll_frame_total:
                     # Hard cap on live-frame time spent waiting for an onset:
                     # repeated false onsets (e.g. a bursty noise source) each
@@ -277,10 +292,11 @@ class Recorder:
                 if hold and self._finish.is_set():
                     self._finish.clear()
                     break
-                is_speech = self._vad.is_speech(frame, self.s.sample_rate)
+                level = rms(np.frombuffer(heard, dtype=np.int16))
+                is_speech = self._is_speech(self._vad, heard, level)
                 if self._on_level is not None:
                     try:
-                        self._on_level(rms(np.frombuffer(frame, dtype=np.int16)))
+                        self._on_level(level)
                     except Exception:
                         if not self._level_error_logged:
                             log.exception("on_level callback failed")
