@@ -216,8 +216,11 @@ listening on that port is used as-is rather than replaced.
 *Local model* (`local_model`, default `~/Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf` — small, fast and
 instruction-tuned), *Local server* (`local_server_bin`, default `~/Github/sih/manas/runtime/bin/llama-server`),
 *Local context (tokens)* (`local_ctx`, default 8192) and *Local port* (`local_port`, default 8749). All live, no
-restart. To think with different weights, point *Local model* at any other `.gguf` — a bigger one is slower to
-load and to speak, a smaller one forgets more; the next local turn restarts the server on it.
+restart. To think with different weights, pick another model from the *Local model* dropdown (the `.gguf` files
+in the same folder as the current one, without `mmproj-*` projectors, embedding models such as `bge-*`, or the
+later shards of a split model), or type any other path under *Model path* — a bigger one is slower to load and to
+speak, a smaller one forgets more. The next local turn restarts the server on it (a change of context or port
+does the same).
 
 **When it takes over.** Before each turn she checks whether the active brain's vendor host is reachable (one TCP
 connect, cached for 20 seconds). If it isn't, she says "No internet — switching to the local model." and answers

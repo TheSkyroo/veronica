@@ -32,6 +32,7 @@ from veronica import updater as _updater
 from veronica import version as _version
 from veronica.audio import speaker as _speaker
 from veronica.brain.backends import check_backend as _check_backend
+from veronica.brain.backends.local import list_models
 from veronica.speech import voices
 from veronica.ui import login_item as _login_item
 
@@ -282,6 +283,9 @@ class SettingsBridge:
                 # What's actually answering right now ("Codex", "Claude (for
                 # Codex)" while standing in); "" until the switcher exists.
                 "brain_label": self._brain_label(orch),
+                # The picker beside the free-text path: the models found
+                # next to the current one.
+                "local_models": self._local_models(setting("local_model")),
                 # The tools that may be auto-allowed at all — one checkbox each.
                 "auto_allowable": [{"tool": t, "label": label} for t, label in AUTO_ALLOW_LABELS.items()],
             },
@@ -341,6 +345,18 @@ class SettingsBridge:
 
     def _orch_or_none(self):
         return self._get_orch()
+
+    @staticmethod
+    def _local_models(current) -> list[dict]:
+        out = []
+        for p in list_models(Path(str(current or ""))):
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            shown = f"{size / 1e9:.1f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
+            out.append({"path": str(p), "name": p.stem, "size": shown})
+        return out
 
     @staticmethod
     def _brain_label(orch) -> str:

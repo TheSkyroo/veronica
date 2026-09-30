@@ -220,7 +220,7 @@ def test_state_has_every_section_and_key(h):
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",
-                                "local_ctx", "local_port", "brain_session_max_age_h", "brain_label"}
+                                "local_ctx", "local_port", "local_models", "brain_session_max_age_h", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
     assert st["about"]["version"] == "0.1.0"
     assert st["about"]["build"] == "abc1234"
@@ -508,6 +508,21 @@ def test_set_offline_fallback_and_local_paths_are_live(h):
     assert h.bridge.set("brain", "local_port", 9000)["ok"] and h.orch.s.local_port == 9000
     st = h.bridge.get_state()["brain"]
     assert st["local_model"] == "/models/other.gguf" and st["local_ctx"] == 4096
+
+
+def test_local_models_lists_the_ggufs_next_to_the_current_one(h, tmp_path):
+    for name in ("granite-4.2-3b-q4_k_m.gguf", "qwen3-8b-q4.gguf", "mmproj-qwen3.gguf", "bge-m3.gguf",
+                 "nomic-embed-text.gguf", "big-00002-of-00002.gguf", "big-00001-of-00002.gguf", "notes.txt"):
+        (tmp_path / name).write_bytes(b"x" * 10)
+    assert h.bridge.set("brain", "local_model", str(tmp_path / "granite-4.2-3b-q4_k_m.gguf"))["ok"]
+    models = h.bridge.get_state()["brain"]["local_models"]
+    assert [m["name"] for m in models] == ["big-00001-of-00002", "granite-4.2-3b-q4_k_m", "qwen3-8b-q4"]
+    assert models[1]["path"] == str(tmp_path / "granite-4.2-3b-q4_k_m.gguf")
+
+
+def test_local_models_is_empty_when_the_directory_is_missing(h):
+    assert h.bridge.set("brain", "local_model", "/nowhere/at/all/m.gguf")["ok"]
+    assert h.bridge.get_state()["brain"]["local_models"] == []
 
 
 def test_set_restart_class_saves_while_warming():

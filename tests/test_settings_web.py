@@ -44,6 +44,8 @@ def fixture_state(**over) -> dict:
                   "codex_native_tools": True, "antigravity_native_tools": True, "copilot_native_tools": False,
                   "brain_offline_fallback": True, "local_server_bin": "/opt/llama-server",
                   "local_model": "/models/granite.gguf", "local_ctx": 8192, "local_port": 8749,
+                  "local_models": [{"path": "/models/granite.gguf", "name": "granite", "size": "2.1 GB"},
+                                   {"path": "/models/qwen3-8b.gguf", "name": "qwen3-8b", "size": "5.0 GB"}],
                   "brain_label": "Claude (for Codex)"},
         "about": {"version": "0.1.0", "build": "a517483", "built_at": "2026-09-17T10:00:00+05:30", "dirty": True,
                   "describe": "Veronica 0.1.0 (a517483, 17 Sep)", "update": {"available": False, "detail": ""},
@@ -468,4 +470,33 @@ def test_only_my_voice_section_learns_forgets_and_shows_scores():
         page.evaluate("s => window.settings.state(s)",
                       fixture_state(listening={"voice_profile": {**vp, "failed": True}}))
         assert "hearing everyone" in page.inner_text("#pane .voice-profile")
+        browser.close()
+
+
+@pytest.mark.live
+def test_local_model_picker_lists_models_and_keeps_the_path_field():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.evaluate("window.settings.select('brain')")
+        pick = "#pane select[data-key=local_model_pick]"
+        assert page.locator(pick + " option").all_text_contents() == ["granite (2.1 GB)", "qwen3-8b (5.0 GB)"]
+        assert page.input_value(pick) == "/models/granite.gguf"
+        assert page.input_value("#pane input[data-key=local_model]") == "/models/granite.gguf"
+        page.select_option(pick, "/models/qwen3-8b.gguf")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "set" and msg["args"] == {
+            "section": "brain", "key": "local_model", "value": "/models/qwen3-8b.gguf"}
+
+        # a path outside that folder still shows, as itself, in the picker
+        st = fixture_state(brain={"local_model": "/elsewhere/tiny.gguf"})
+        page.evaluate("s => window.settings.state(s)", st)
+        assert page.input_value(pick) == "/elsewhere/tiny.gguf"
+        assert page.locator(pick + " option").first.text_content() == "tiny.gguf"
+
+        # nothing found: no picker, just the path
+        page.evaluate("s => window.settings.state(s)", fixture_state(brain={"local_models": []}))
+        assert page.locator(pick).count() == 0
+        assert page.locator("#pane input[data-key=local_model]").count() == 1
         browser.close()

@@ -189,6 +189,21 @@ async def test_the_server_stays_up_between_turns(tmp_path):
     await brain.close()
 
 
+async def test_a_new_model_restarts_the_server_on_the_next_turn(tmp_path):
+    brain, client, spawned = make_brain(
+        tmp_path, rounds=[[sse(content="One.")], [sse(content="Two.")], [sse(content="Three.")]],
+        health=[False, True, False, True])
+    await drain(brain)
+    first = brain._proc
+    brain.s.local_model = tmp_path / "other.gguf"
+    await drain(brain, "again")
+    assert first.terminated and len(spawned) == 2
+    assert spawned[1][spawned[1].index("--model") + 1] == str(tmp_path / "other.gguf")
+    await drain(brain, "and again")          # unchanged: no third start
+    assert len(spawned) == 2
+    await brain.close()
+
+
 async def test_a_server_that_will_not_start_raises_for_failover(tmp_path, monkeypatch):
     monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
     brain, client, spawned = make_brain(tmp_path, health=[False])

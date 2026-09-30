@@ -106,7 +106,8 @@
   }
 
   // ---- rows / controls ---------------------------------------------------------------
-  // spec: {kind, label, help, choices|options, min, max, step, restart, disabled}
+  // spec: {kind, label, help, choices|options, min, max, step, restart, disabled,
+  //        setKey (post under this key instead of the row's own)}
   function row(sec, key, spec, value) {
     const status = el('span', {class: 'status'});
     const r = el('div', {class: 'row' + (spec.disabled ? ' disabled' : ''), 'data-section': sec, 'data-key': key});
@@ -124,7 +125,7 @@
     let revert = () => {};   // per control: put the model's value back after a refused change
     const commit = v => {
       setStatus('Applying…');
-      post('set', {section: sec, key, value: v}).then(res => {
+      post('set', {section: sec, key: spec.setKey || key, value: v}).then(res => {
         if (res.restart_required) { restartRequired = true; updateBanner(); }
         if (res.ok === false) { setStatus(res.message || 'Failed', true); revert(); return; }
         setStatus(res.message || '');
@@ -182,6 +183,19 @@
   function labelled(input, labelId, helpId) {
     input.setAttribute('aria-labelledby', labelId);
     if (helpId) input.setAttribute('aria-describedby', helpId);
+  }
+
+  // The .gguf files found next to the current model, as a dropdown that
+  // sets local_model. A path from anywhere else stays selectable as itself.
+  function localModelRow(b) {
+    const models = Array.isArray(b.local_models) ? b.local_models : [];
+    if (!models.length) return null;
+    const options = models.map(m => [m.path, m.size ? m.name + ' (' + m.size + ')' : m.name]);
+    const current = b.local_model == null ? '' : String(b.local_model);
+    if (current && !models.some(m => m.path === current)) options.unshift([current, current.split('/').pop()]);
+    const f = fields().local_model || {};
+    return row('brain', 'local_model_pick', {kind: 'choice', label: f.label || 'Local model', options, setKey: 'local_model',
+                                             help: 'Models in the same folder. Applies on the next local turn.'}, current);
   }
 
   function settingRow(sec, key, extra) {
@@ -346,7 +360,9 @@
       frag.push(settingRow('brain', 'copilot_native_tools'));
       frag.push(el('h3', {text: 'Offline'}));
       frag.push(settingRow('brain', 'brain_offline_fallback'));
-      frag.push(settingRow('brain', 'local_model', {wide: true}));
+      const picker = localModelRow(b);
+      if (picker) frag.push(picker);
+      frag.push(settingRow('brain', 'local_model', picker ? {wide: true, label: 'Model path', help: 'Or any other .gguf.'} : {wide: true}));
       frag.push(settingRow('brain', 'local_server_bin', {wide: true}));
       frag.push(settingRow('brain', 'local_ctx'));
       frag.push(settingRow('brain', 'local_port'));
