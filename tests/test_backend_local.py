@@ -10,7 +10,8 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from veronica.brain.backends import check_backend, local as local_mod
-from veronica.brain.backends.local import START_FAILED, LocalBrain
+from veronica.brain.backends.local import START_FAILED, LocalBrain, LocalStartError
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
 from veronica.tools import registry
@@ -188,15 +189,32 @@ async def test_the_server_stays_up_between_turns(tmp_path):
     await brain.close()
 
 
-async def test_a_server_that_will_not_start_speaks_the_hint(tmp_path, monkeypatch):
-    monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
-    brain, client, spawned = make_brain(tmp_path, health=[False])
-    brain.start_timeout_s = 0
-    assert await drain(brain) == [START_FAILED]
+async def test_a_new_model_restarts_the_server_on_the_next_turn(tmp_path):
+    brain, client, spawned = make_brain(
+        tmp_path, rounds=[[sse(content="One.")], [sse(content="Two.")], [sse(content="Three.")]],
+        health=[False, True, False, True])
+    await drain(brain)
+    first = brain._proc
+    brain.s.local_model = tmp_path / "other.gguf"
+    await drain(brain, "again")
+    assert first.terminated and len(spawned) == 2
+    assert spawned[1][spawned[1].index("--model") + 1] == str(tmp_path / "other.gguf")
+    await drain(brain, "and again")          # unchanged: no third start
+    assert len(spawned) == 2
     await brain.close()
 
 
-async def test_a_server_that_exits_speaks_the_hint(tmp_path, monkeypatch):
+async def test_a_server_that_will_not_start_raises_for_failover(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
+    brain, client, spawned = make_brain(tmp_path, health=[False])
+    brain.start_timeout_s = 0
+    with pytest.raises(LocalStartError) as e:
+        await drain(brain)
+    assert isinstance(e.value, BrainUnavailable) and str(e.value) == START_FAILED
+    await brain.close()
+
+
+async def test_a_server_that_exits_raises_for_failover(tmp_path, monkeypatch):
     monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
     s = Settings(home=tmp_path)
     async def yes(summary, detail):
@@ -210,7 +228,8 @@ async def test_a_server_that_exits_speaks_the_hint(tmp_path, monkeypatch):
         return proc
 
     brain = LocalBrain(s, gate, spawn=spawn, client=FakeClient(health=[False]))
-    assert await drain(brain) == [START_FAILED]
+    with pytest.raises(LocalStartError):
+        await drain(brain)
 
 
 # -- streaming -----------------------------------------------------------------
@@ -562,3 +581,20 @@ async def test_catch_all_tools_are_not_offered_to_the_local_model():
     assert "mcp__mac__applescript" not in names and "mcp__mac__applescript" not in index
     assert not any(n.startswith("mcp__computer__") for n in names)
     assert "mcp__mac__volume_get" in names        # ordinary tools still offered
+
+
+async def test_a_tool_error_is_reported_to_the_gate(tmp_path, monkeypatch):
+    class ErrServer(FakeToolServer):
+        def get_request_handler(self, kind):
+            async def handler(_ctx, params):
+                return CallToolResult(content=[TextContent(type="text", text="error: nope")], isError=True)
+            return type("H", (), {"handler": staticmethod(handler)})()
+
+    fake_catalog(monkeypatch, ErrServer())
+    cards = []
+    brain, *_ = make_brain(tmp_path, rounds=[[tool_delta(0, "mcp__mac__volume_get", "{}", "c1")],
+                                              [sse(content="Sorry.")]])
+    brain.gate._on_tool = lambda su, d: cards.append((su, d))
+    await drain(brain)
+    assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
+    await brain.close()

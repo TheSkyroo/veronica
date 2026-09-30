@@ -347,6 +347,47 @@ def test_front_window_id_without_pid_still_filters_alpha_and_size(monkeypatch):
     assert screen.front_window_id() == 3
 
 
+def _cwin(number, x, y, w, h, *, pid=100, name=""):
+    return {"kCGWindowNumber": number, "kCGWindowOwnerPID": pid, "kCGWindowLayer": 0, "kCGWindowAlpha": 1.0,
+            "kCGWindowName": name, "kCGWindowBounds": {"X": x, "Y": y, "Width": w, "Height": h}}
+
+
+def test_front_window_id_skips_chromes_untitled_sliver(monkeypatch):
+    """Chrome publishes several layer-0 windows; the first in z-order can
+    be a 2560x115 strip with no title. The browser window itself wins."""
+    monkeypatch.setattr(screen, "_frontmost_pid", lambda: 100)
+    monkeypatch.setattr(screen, "_window_list", lambda: [
+        _cwin(11, 0, 25, 2560, 115),                             # the sliver, frontmost
+        _cwin(12, 0, 25, 2560, 1415, name="Inbox - Gmail"),      # the real window
+        _cwin(13, 3000, 0, 1920, 1080, pid=200, name="Other app"),
+    ])
+    assert screen.front_window_id() == 12
+
+
+def test_front_window_id_keeps_the_frontmost_of_two_real_windows(monkeypatch):
+    monkeypatch.setattr(screen, "_frontmost_pid", lambda: 100)
+    monkeypatch.setattr(screen, "_window_list", lambda: [
+        _cwin(21, 100, 100, 1400, 900, name="front"),
+        _cwin(22, 0, 25, 2560, 1415, name="behind, bigger"),
+    ])
+    assert screen.front_window_id() == 21
+
+
+def test_front_window_id_prefers_the_main_window_over_a_small_panel(monkeypatch):
+    monkeypatch.setattr(screen, "_frontmost_pid", lambda: 100)
+    monkeypatch.setattr(screen, "_window_list", lambda: [
+        _cwin(31, 900, 300, 420, 240),                           # a small popup in front
+        _cwin(32, 0, 25, 2560, 1415, name="main"),
+    ])
+    assert screen.front_window_id() == 32
+
+
+def test_front_window_id_falls_back_when_only_strips_are_left(monkeypatch):
+    monkeypatch.setattr(screen, "_frontmost_pid", lambda: 100)
+    monkeypatch.setattr(screen, "_window_list", lambda: [_cwin(41, 0, 0, 2560, 115), _cwin(42, 0, 200, 900, 90)])
+    assert screen.front_window_id() == 41
+
+
 def test_front_window_id_none_when_nothing_qualifies(monkeypatch):
     monkeypatch.setattr(screen, "_frontmost_pid", lambda: 100)
     monkeypatch.setattr(screen, "_window_list", lambda: [_win(1, alpha=0.0), _win(2, pid=5)])

@@ -243,6 +243,10 @@ def _info_plist(version: str) -> dict:
             "behalf (reading events, mail, reminders and web pages; creating notes), and uses "
             "System Events to see which app is in front and to type dictation."
         ),
+        "NSContactsUsageDescription": (
+            "Veronica looks up a contact's phone number or email when you ask her to message "
+            "someone by name in Messages."
+        ),
         "NSHighResolutionCapable": True,
     }
 

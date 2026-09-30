@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterator
 
@@ -14,6 +15,10 @@ from veronica.config import Settings
 from veronica.ui.events import rms
 
 log = logging.getLogger("veronica.audio")
+
+# No audio at all for this long means the stream is dead, not quiet (see
+# mic.STALL_S): the capture ends with what it has instead of waiting forever.
+STALL_S = 2.0
 
 
 class Recorder:
@@ -50,6 +55,8 @@ class Recorder:
 
     def _mic_frames(self) -> Iterator[bytes]:
         n = self.s.sample_rate * self.s.frame_ms // 1000
+        frame_bytes = n * 2          # int16 mono
+        poll_s = self.s.frame_ms / 1000 / 4
         # Opened under refresh_lock (and with _capturing already True, see
         # arm()) so a default-input-device refresh can't terminate PortAudio
         # underneath this stream; each capture opens fresh, so after a
@@ -57,6 +64,7 @@ class Recorder:
         with devices.refresh_lock:
             stream = sd.RawInputStream(samplerate=self.s.sample_rate, channels=1, dtype="int16", blocksize=n)
             stream.__enter__()
+            opened_gen = devices.generation
             # Remembered so a follow-up capture's echo skip can grow with
             # the device's own latency (Bluetooth mics deliver audio
             # hundreds of ms late, past the default followup_skip_ms).
@@ -64,12 +72,43 @@ class Recorder:
                 self.input_latency_s = float(stream.latency or 0.0)
             except Exception:
                 self.input_latency_s = 0.0
+        # Like mic.mic_frames, never a blocking read: only what is buffered
+        # (read_available) is read, so a stream PortAudio stopped mid-capture
+        # (-10863 when AirPods leave or the Mac sleeps) ends the capture after
+        # STALL_S instead of holding the turn forever. The lock is held only
+        # for the copy out of the ring, never while waiting for audio.
+        pending = bytearray()
+        last_audio = time.monotonic()
         try:
             while True:
-                data, _ = stream.read(n)
-                yield bytes(data)
+                with devices.refresh_lock:
+                    if devices.generation != opened_gen:
+                        log.warning("capture: PortAudio was re-initialised under the stream; ending the capture")
+                        return
+                    avail = stream.read_available
+                    data = stream.read(avail)[0] if avail > 0 else None
+                if data is not None:
+                    last_audio = time.monotonic()
+                    pending.extend(data)
+                    while len(pending) >= frame_bytes:
+                        yield bytes(pending[:frame_bytes])
+                        del pending[:frame_bytes]
+                    continue
+                if self._stop.is_set() or (self._hold and self._finish.is_set()):
+                    return               # _capture sees the flag and answers it
+                if time.monotonic() - last_audio >= STALL_S:
+                    log.warning("capture: no audio for %.1fs (stream active=%s); ending the capture with what it has",
+                                STALL_S, getattr(stream, "active", "?"))
+                    return
+                time.sleep(poll_s)
         finally:
-            stream.__exit__(None, None, None)
+            if devices.generation == opened_gen:
+                # A stream PortAudio stopped on its own may complain on the
+                # way out; the capture still returns.
+                try:
+                    stream.__exit__(None, None, None)
+                except Exception:
+                    log.debug("capture: closing the mic stream failed", exc_info=True)
 
     def stop(self) -> None:
         """Request that the in-flight capture() stop early, returning None.
@@ -375,6 +414,14 @@ class Recorder:
                         frames_since_partial = 0
                         continue
                     break
+            else:
+                # The frame source ended on its own: a dead stream (logged
+                # there), or a stop()/finish() it noticed while waiting.
+                if self._stop.is_set():
+                    self._stop.clear()
+                    return None
+                if hold:
+                    self._finish.clear()
         finally:
             self._capturing = False
 

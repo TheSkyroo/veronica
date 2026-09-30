@@ -462,6 +462,14 @@ def _frontmost_pid() -> int | None:
 
 
 MIN_WINDOW_PX = 50
+# A window whose shorter side is under this is a strip, not somewhere the
+# user works: Chrome publishes a 2560x115 untitled layer-0 window in front
+# of the real one.
+STRIP_PX = 200
+# Among the app's real windows, the frontmost one at least this share of the
+# largest one's area wins, so a size-alike window behind never beats the one
+# in front, but a popup or panel never beats the main window.
+MAIN_AREA_SHARE = 0.25
 
 
 def front_window_id() -> int | None:
@@ -471,8 +479,14 @@ def front_window_id() -> int | None:
     PID can be determined — owned by that app. Without those filters the
     first layer-0 entry is often an invisible alpha-0 helper window (menu
     bar extras, input-method panels, screen-recording overlays), whose
-    capture is a blank image. Returns None if nothing qualifies."""
+    capture is a blank image.
+
+    Of those, strips (shorter side under STRIP_PX) are passed over and the
+    frontmost window with at least MAIN_AREA_SHARE of the largest one's
+    area wins; if only strips are left, the first as before. Returns None
+    if nothing qualifies."""
     pid = _frontmost_pid()
+    found: list[tuple[int, float, float]] = []      # (id, w, h), z-order
     for w in _window_list():
         if w.get("kCGWindowLayer", 0) != 0:
             continue
@@ -481,12 +495,19 @@ def front_window_id() -> int | None:
         if pid is not None and w.get("kCGWindowOwnerPID") != pid:
             continue
         bounds = w.get("kCGWindowBounds") or {}
-        if float(bounds.get("Width", 0) or 0) <= MIN_WINDOW_PX or float(bounds.get("Height", 0) or 0) <= MIN_WINDOW_PX:
+        ww, hh = float(bounds.get("Width", 0) or 0), float(bounds.get("Height", 0) or 0)
+        if ww <= MIN_WINDOW_PX or hh <= MIN_WINDOW_PX:
             continue
         wid = w.get("kCGWindowNumber")
         if wid is not None:
-            return int(wid)
-    return None
+            found.append((int(wid), ww, hh))
+    if not found:
+        return None
+    real = [(wid, ww * hh) for wid, ww, hh in found if min(ww, hh) >= STRIP_PX]
+    if not real:
+        return found[0][0]
+    largest = max(area for _, area in real)
+    return next(wid for wid, area in real if area >= largest * MAIN_AREA_SHARE)
 
 
 def _capture_argv(

@@ -112,6 +112,10 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
   re-checks its position on its own whenever a display is plugged in or unplugged, so it can't be stranded on a
   monitor that's no longer there.
 
+A turn that runs more than one tool shows them in the full card as a checklist: ○ waiting on your yes, ▸ running,
+✓ done, ✕ declined or failed — failed when the tool itself returned an error. (A Codex, Antigravity or Copilot
+built-in tool, such as their own shell, reports no result to Veronica, so its step only ever shows done.)
+
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
 switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
 
@@ -216,8 +220,11 @@ listening on that port is used as-is rather than replaced.
 *Local model* (`local_model`, default `~/Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf` — small, fast and
 instruction-tuned), *Local server* (`local_server_bin`, default `~/Github/sih/manas/runtime/bin/llama-server`),
 *Local context (tokens)* (`local_ctx`, default 8192) and *Local port* (`local_port`, default 8749). All live, no
-restart. To think with different weights, point *Local model* at any other `.gguf` — a bigger one is slower to
-load and to speak, a smaller one forgets more; the next local turn restarts the server on it.
+restart. To think with different weights, pick another model from the *Local model* dropdown (the `.gguf` files
+in the same folder as the current one, without `mmproj-*` projectors, embedding models such as `bge-*`, or the
+later shards of a split model), or type any other path under *Model path* — a bigger one is slower to load and to
+speak, a smaller one forgets more. The next local turn restarts the server on it (a change of context or port
+does the same).
 
 **When it takes over.** Before each turn she checks whether the active brain's vendor host is reachable (one TCP
 connect, cached for 20 seconds). If it isn't, she says "No internet — switching to the local model." and answers
@@ -235,7 +242,10 @@ is text-only, so she says she can't see. A small model that ignores the tool sch
 that is normal and not an error. Expect a short answer in a handful of seconds, and expect it to be less sharp
 than the hosted brains — it is a three-billion-parameter model on a laptop.
 
-If the server won't start she says "The local model wouldn't start — check the Local settings." The Local brain
+If the server won't start she moves to the next ready brain in the failover order and says so once ("The local
+model wouldn't start — switching to Codex."), re-running the request there; the local model gets another try
+after the usage-limit cooldown, and while it cools a dead wire doesn't put it back in. With nothing else ready
+(or failover off) she says "The local model wouldn't start and no other brain is ready." The Local brain
 is offered only when both the binary and the model file exist ("The local model server isn't there — set its
 path in Settings.").
 
@@ -314,7 +324,9 @@ Ask "what's on my screen", "look at my screen", "summarize this page/screen", or
 Veronica takes a screenshot herself (downscaled to fit within 1568 px on the long edge) and
 sends it to Claude along with your question in one turn — the HUD shows a "Look at screen" action line. Claude can
 also decide to look at the screen on its own mid-conversation via the `screenshot` tool (allow-class, runs
-automatically). With more than one monitor she captures the display your frontmost window is on; Claude can ask for
+automatically). With more than one monitor she captures the display your frontmost window is on (the app's real
+window: helper strips such as Chrome's untitled 115 px-tall one, and small popups in front of the main window,
+don't count); Claude can ask for
 one by number (`display=2`) or for every screen at once (`display=all`), and clicks map back to the right monitor.
 Requires **Screen Recording** access — see Permissions below.
 
@@ -392,7 +404,7 @@ playback and search for a track/artist mid-conversation via `music_play`, `music
 | Tool | Can | Cannot |
 | --- | --- | --- |
 | `mac.run_shortcut` | Run any shortcut installed in Shortcuts.app by name ("run the Morning shortcut"), case-insensitively, with optional text input handed over as a file (`shortcuts run <name> --input-path …`). A shortcut gets 2 minutes. | Create or edit shortcuts, or hand back what one returned — the CLI prints nothing on success, so she just says she ran it. A name that isn't installed is refused ("there's no shortcut called 'Morning' on this Mac") rather than guessed at. |
-| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number or Apple ID ("message +15551234567: on my way"). | Read your messages, look a name up in Contacts, or send attachments. A bare first name isn't a handle, so Messages refuses it and she asks you for the number. |
+| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number, an Apple ID, or a contact by name ("message Priya: on my way") — the name is looked up in Contacts. | Read your messages, send attachments, or guess: two Priyas ("Which Priya — Priya Shah or Priya Nair?"), a contact with several numbers, or no match comes back as a question instead of a send. |
 
 **Which shortcuts run without asking.** Every shortcut is confirm-class by default — a shortcut is a program you
 wrote, and Veronica can't see what's in it. Settings → Brain → "Shortcuts she may run without asking" is a
@@ -401,11 +413,12 @@ everything else still asks "Run the shortcut 'X'?" first.
 
 **Sending a message always asks.** `message_send` is in `policy.always_confirm` alongside sending mail: the
 screen-control trust window never covers it, saying "just do it" in your request never pre-approves it, and no
-setting turns the question off. The confirm reads the recipient and the first 40 characters — "Message Priya: on
-my way".
+setting turns the question off. The confirm reads the resolved contact, their handle and the first 40 characters
+— "Message Priya Shah (+91 98765 43210): on my way" — and the send goes to that exact handle.
 
 Messages.app needs the usual one-time automation permission the first time she sends (System Settings → Privacy &
-Security → Automation), and Shortcuts must have been opened once for `shortcuts list` to report anything.
+Security → Automation). Messaging someone by name asks once for Contacts access (System Settings → Privacy &
+Security → Contacts); without it she says so and asks for the number. Shortcuts must have been opened once for `shortcuts list` to report anything.
 
 ## Voice & speed
 
@@ -661,7 +674,9 @@ to see how loud your voice actually lands at the mic.
 **AirPods / USB mic / headphones.** Mic switching is automatic: Veronica polls macOS's default input device
 every couple of seconds and reopens the mic on the new device (`input device changed (...); reopening mic` in
 the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
-in-flight recording finishes.
+in-flight recording finishes. If the mic disappears mid-sentence (AirPods taken out, the Mac sleeping), the
+recording ends within about two seconds with what it already heard (`capture: no audio for 2.0s` in the log)
+instead of holding up the turn.
 
 **She stopped hearing me after a call / after switching mics.** Call apps with auto-gain (Zoom, Meet,
 FaceTime) and device switches quietly drop the Mac's input volume to ~30 %, which starves the wake check.

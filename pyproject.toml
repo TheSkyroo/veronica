@@ -20,6 +20,7 @@ dependencies = [
   "pyobjc-framework-Quartz>=10",
   "pyobjc-framework-vision>=10",
   "pyobjc-framework-applicationservices>=10",
+  "pyobjc-framework-contacts>=10",
 ]
 
 [project.optional-dependencies]

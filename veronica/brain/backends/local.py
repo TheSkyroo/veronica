@@ -19,11 +19,14 @@ import contextlib
 import datetime as dt
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import ToolGate
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
@@ -61,7 +64,24 @@ HIDDEN_SERVERS_FOR_LOCAL = frozenset({"computer"})
 CHARS_PER_TOKEN = 3.5
 HISTORY_SHARE = 0.35
 
+# A models folder also holds files that aren't chat weights: vision
+# projectors (mmproj-*), embedding models (bge-*, *embed*), and the later
+# shards of a split model (only -00001-of-N is loaded by name).
+_NOT_CHAT = re.compile(r"^(mmproj|bge-|e5-|gte-)|embed", re.IGNORECASE)
+_LATER_SHARD = re.compile(r"-(?!00001)\d{5}-of-\d{5}$")
+
 _tools: tuple[list[dict], set[str]] | None = None
+
+
+def list_models(current: Path) -> list[Path]:
+    """The chat `.gguf` files in `current`'s folder, by name — what the
+    Settings picker offers. Empty when the folder can't be read."""
+    try:
+        files = sorted(p for p in Path(current).expanduser().parent.iterdir()
+                       if p.suffix.lower() == ".gguf" and p.is_file())
+    except OSError:
+        return []
+    return [p for p in files if not _NOT_CHAT.search(p.stem) and not _LATER_SHARD.search(p.stem)]
 
 
 async def tool_catalog() -> tuple[list[dict], set[str]]:
@@ -86,6 +106,10 @@ async def tool_catalog() -> tuple[list[dict], set[str]]:
             names.add(full)
     _tools = (schemas, names)
     return _tools
+
+
+class LocalStartError(BrainUnavailable):
+    """`llama-server` didn't come up; the orchestrator fails over on it."""
 
 
 @dataclass
@@ -136,6 +160,7 @@ class LocalBrain:
         self._clock = clock
         self._client = client or httpx.AsyncClient()
         self._proc = None
+        self._argv: list[str] = []  # what _proc was started with
         self._adopted = False      # a server that was already listening: not ours to kill
         self._history: list[dict] = []
         self._response = None      # the in-flight streamed response, for interrupt()
@@ -212,17 +237,24 @@ class LocalBrain:
         rather than fought with. Caller holds `_server_lock`."""
         if self._proc is not None:
             if self._proc.returncode is None:
-                return
-            # Our child died on its own: reap it before adopting anything,
-            # or it is left behind unwaited with _proc still pointing at it.
-            await self._proc.wait()
-            self._proc = None
+                if self._argv == self.argv():
+                    return
+                # Settings changed under it (another model, context or
+                # port): the change applies on this turn.
+                log.info("local: settings changed, restarting the server")
+                await self._stop_server()
+            else:
+                # Our child died on its own: reap it before adopting anything,
+                # or it is left behind unwaited with _proc still pointing at it.
+                await self._proc.wait()
+                self._proc = None
         if await self._healthy(1.0):
             self._adopted = True
             return
         argv = self.argv()
         log.info("local: spawning %s", argv)
         self._proc = await self._spawn(argv)
+        self._argv = argv
         self._adopted = False
         deadline = self._clock() + self.start_timeout_s
         while True:
@@ -377,7 +409,8 @@ class LocalBrain:
         decision = await self.gate.decide(name, args)
         if not decision.allow:
             return f"Not allowed: {decision.message}"
-        content, _is_error = await call_tool(name, args)
+        content, is_error = await call_tool(name, args)
+        self.gate.tool_result(name, args, is_error)
         # This model is text-only, so an image block has nothing to say to it.
         return "\n".join(c["text"] for c in content if c.get("type") == "text") or "ok"
 
@@ -392,10 +425,11 @@ class LocalBrain:
             text = f"{text}\n\n(A screenshot was taken but you cannot see images; say so.)"
         try:
             await self._ensure_server()
-        except Exception:
+        except Exception as e:
+            # Raised, not spoken: the switcher can put another brain in and
+            # the orchestrator re-runs the request there.
             log.exception("local: server would not start")
-            yield START_FAILED
-            return
+            raise LocalStartError(START_FAILED) from e
         self._touch()
 
         schemas, names = await tool_catalog()

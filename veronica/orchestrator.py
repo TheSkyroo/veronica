@@ -23,6 +23,7 @@ from veronica.brain import quick
 from veronica.brain.agent import confirm_prompt
 from veronica.brain.backends import BACKENDS, check_backend
 from veronica.brain.backends.cli import LimitError
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import GateServer
 from veronica.brain.intents import (
     is_pause_phrase,
@@ -605,7 +606,12 @@ class Orchestrator:
     def tool_card(self, summary: str, decision: str) -> None:
         """ToolGate's on_tool hook: the cards it reports (auto, trusted,
         pre-approved) go out through here rather than straight to the HUD, so
-        they land in the plan alongside the ones confirm() emits."""
+        they land in the plan alongside the ones confirm() emits. A "failed"
+        (the tool's result was an error) only settles its plan step: it is
+        not an action, so it gets no card of its own."""
+        if decision == "failed":
+            self._plan_fail(summary)
+            return
         self._emit("tool", {"summary": summary, "decision": decision})
 
     def _plan_reset(self) -> None:
@@ -636,6 +642,18 @@ class Orchestrator:
         else:
             return          # "limit" and the like: swapping brains is not a step
         self._plan_emit()
+
+    def _plan_fail(self, summary: str) -> None:
+        """An allowed call's tool returned an error: its step (the latest one
+        with that summary still running, or already marked done by a later
+        call) shows failed."""
+        if not self._plan_turn:
+            return
+        for step in reversed(self._plan):
+            if step["summary"] == summary and step["state"] in ("running", "done"):
+                step["state"] = "failed"
+                self._plan_emit()
+                return
 
     def _plan_emit(self) -> None:
         """Only a multi-step turn gets a card: one tool call keeps the plain
@@ -1100,6 +1118,17 @@ class Orchestrator:
                     return None     # the switcher said "no other brain is ready"
                 self._emit("tool", {"summary": f"{old}: usage limit — on {BACKENDS[new].label}",
                                     "decision": "limit"})
+            except BrainUnavailable as e:
+                # Couldn't start at all (the local server): same hop, its own line.
+                if self.switcher is None:
+                    await self.say(str(e))
+                    return None
+                old = self._brain_label()
+                new = await self.switcher.unavailable(str(e))
+                if new is None:
+                    return None
+                self._emit("tool", {"summary": f"{old}: wouldn't start — on {BACKENDS[new].label}",
+                                    "decision": "limit"})
         return None
 
     # -- brains -----------------------------------------------------------------
@@ -1143,6 +1172,10 @@ class Orchestrator:
             label = self._brain_label()
             if sw.standing_in and sw.brain.name == "local" and sw._standin_reason == "offline":
                 await self.say("I'm on the local model — there's no internet.")
+                return
+            if sw.standing_in and sw.brain.name in BACKENDS and sw._standin_reason == "down":
+                pref = "the local model" if sw.preferred == "local" else BACKENDS[sw.preferred].label
+                await self.say(f"I'm on {BACKENDS[sw.brain.name].label} — {pref} wouldn't start.")
                 return
             if sw.standing_in and sw.brain.name in BACKENDS:
                 until = sw.limited_until.get(sw.preferred, 0.0)

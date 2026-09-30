@@ -39,6 +39,24 @@ def _no_real_audio_models(request, monkeypatch):
     monkeypatch.setattr(speaker.SpeakerModel, "_session_factory", staticmethod(no_models))
 
 
+@pytest.fixture(autouse=True)
+def _fake_contacts(monkeypatch):
+    """Hermetic: the real Contacts framework is never read. One contact
+    ("Priya Shah") unless a test swaps the list; returns it so tests can."""
+    from veronica.tools import pim
+
+    book = [("Priya Shah", ["+91 98765 43210"])]
+
+    def search(name):
+        n = name.casefold()
+        return [c for c in book if any(part.startswith(n) or c[0].casefold().startswith(n)
+                                        for part in c[0].casefold().split())]
+
+    monkeypatch.setattr(pim, "_contacts_search", search)
+    monkeypatch.setattr(pim, "_resolved", {})
+    return book
+
+
 _EXIT_STATUS = 0
 
 
