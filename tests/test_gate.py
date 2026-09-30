@@ -461,3 +461,116 @@ async def test_a_hand_typed_ineligible_tool_is_asked_every_single_time(tool, inp
     for _ in range(3):
         assert (await g.decide(tool, inp)).kind == "approved"
     assert len(calls) == 3
+
+
+# -- busy: the brain's silence clock stops while the gate works ---------------
+
+
+async def test_the_gate_is_busy_through_the_confirm_and_the_tool_run(sock):
+    seen = []
+
+    async def confirm(summary, detail="", *, question=None):
+        seen.append(("confirm", g.busy))
+        return True
+
+    async def run_tool(tool, args):
+        seen.append(("run", g.busy))
+        return [{"type": "text", "text": "ran"}], False
+
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm)
+    srv = GateServer(g, sock, run_tool=run_tool)
+    await srv.start()
+    try:
+        assert not g.busy
+        await _roundtrip(sock, CALL)
+    finally:
+        await srv.stop()
+    assert seen == [("confirm", True), ("run", True)]
+    assert not g.busy
+
+
+async def test_wait_quiet_restarts_the_clock_when_the_gate_goes_idle():
+    g, _, _ = make([])
+
+    async def line_after(s):
+        await asyncio.sleep(s)
+        return b"line"
+
+    async def busy_for(s):
+        with g.working():
+            await asyncio.sleep(s)
+
+    t = asyncio.create_task(busy_for(0.2))
+    await asyncio.sleep(0)
+    # 0.25 s of quiet, but only 0.05 of it with the gate idle
+    assert await g.wait_quiet(line_after(0.25), 0.1) == b"line"
+    await t
+    with pytest.raises(TimeoutError):
+        await g.wait_quiet(line_after(1), 0.05)
+
+
+# -- a slow answer: the gate answers before its caller gives up ---------------
+
+
+async def test_a_confirm_past_the_callers_budget_is_denied_and_said(sock, caplog):
+    """The caller (the CLI's hook, tools.serve) stops waiting at its budget
+    and reads that as a deny. The gate answers just before that instead:
+    a deny, never an approval — and she says why, rather than the step
+    quietly vanishing."""
+    said, cancelled = [], []
+
+    async def confirm(summary, detail="", *, question=None):
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(summary)
+            raise
+        return True
+
+    async def say(text):
+        said.append(text)
+
+    ran = []
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm, say=say)
+    srv = GateServer(g, sock, run_tool=runner(ran))
+    srv.reply_margin_s = 0.1
+    await srv.start()
+    try:
+        resp = await asyncio.wait_for(_roundtrip(sock, dict(CALL, budget=0.4)), 2)
+    finally:
+        await srv.stop()
+    assert resp["allow"] is False and resp["kind"] == "denied"
+    assert ran == [] and cancelled == ["Copy to clipboard: a"]
+    assert said == ["You took a while to answer, so I skipped that step."]
+    assert "reason=gate_timeout" in caplog.text
+    assert not g.busy
+
+
+async def test_a_request_that_never_got_its_turn_to_ask_is_denied_quietly(sock, caplog):
+    """Queued behind another confirm until its caller's budget ran out: it
+    was never asked, so there is no answer to blame — deny, log, no line."""
+    said = []
+    release = asyncio.Event()
+
+    async def confirm(summary, detail="", *, question=None):
+        await release.wait()
+        return True
+
+    async def say(text):
+        said.append(text)
+
+    g = ToolGate(Settings(auto_allow_tools=[]), confirm, say=say)
+    srv = GateServer(g, sock, run_tool=runner([]))
+    srv.reply_margin_s = 0.1
+    await srv.start()
+    try:
+        first = asyncio.ensure_future(_roundtrip(sock, dict(CALL, budget=30)))
+        await asyncio.sleep(0.05)
+        second = await asyncio.wait_for(_roundtrip(sock, dict(CALL, input={"text": "b"}, budget=0.4)), 2)
+    finally:
+        release.set()
+        await first
+        await srv.stop()
+    assert second["allow"] is False
+    assert said == []
+    assert "reason=gate_busy" in caplog.text

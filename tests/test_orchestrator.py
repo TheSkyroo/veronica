@@ -5224,3 +5224,64 @@ def test_confirm_result_carries_the_always_flag():
     assert bool(ConfirmResult("approved", "always", always=True)) is True
     # a "no, and don't ask again" is a no: never a standing approval
     assert ConfirmResult(Orchestrator.classify_answer("no dont ask again")).outcome == "denied"
+
+
+# -- a confirm that hears its own question back ---------------------------------
+
+
+async def test_confirm_that_hears_its_own_prompt_listens_again(caplog):
+    """The question leaking back in through the mic (speakers + laptop mic,
+    a late Bluetooth input) used to read as "other": the step was declined,
+    the task stopped, and her own words were run as the next request."""
+    caplog.set_level("INFO", logger="veronica.orchestrator")
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)] * 2,
+                 stt_texts=["Type porting Veronica, my Mac voice assistant.", "yes"])
+    r = await o.confirm("Type 'Porting Veronica (my Mac voice assistant'")
+    assert r.outcome == "approved"
+    assert o.tts.said == ["Type 'Porting Veronica (my Mac voice assistant'?"]
+    assert "confirm heard its own question" in caplog.text
+
+
+async def test_confirm_echo_then_silence_is_the_usual_skip():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16), None],
+                 stt_texts=["Type porting Veronica, my Mac voice assistant."])
+    r = await o.confirm("Type 'Porting Veronica (my Mac voice assistant'")
+    assert r.outcome == "denied" and not r
+    assert o.tts.said[-1] == "Okay, skipping that."
+
+
+async def test_confirm_listens_again_only_once():
+    echo = "Type porting Veronica, my Mac voice assistant."
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)] * 3, stt_texts=[echo, echo, "yes"])
+    r = await o.confirm("Type 'Porting Veronica (my Mac voice assistant'")
+    assert r.outcome == "denied" and not r
+    assert o.stt.texts == ["yes"]
+
+
+async def test_a_barge_says_in_the_log_why_the_turn_ended(caplog):
+    """Wake word or PTT mid-turn is a deliberate stop — but when a task
+    "just stopped", the log has to say it was one, and what she was doing."""
+    caplog.set_level("INFO", logger="veronica.orchestrator")
+    o, _ = build()
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    async def interrupt():
+        pass
+
+    o.brain.interrupt = interrupt
+    o.wake = EventWake()
+    fut = asyncio.ensure_future(o._run_with_barge(hang()))
+    await _settle()
+    o.wake.q.put_nowait(True)
+    assert await fut == "wake"
+    assert "turn ended early: reason=barge_wake" in caplog.text
+
+    o.wake = EventWake()
+    fut = asyncio.ensure_future(o._run_with_barge(hang()))
+    await _settle()
+    o._ptt_event.set()
+    assert await fut == "ptt"
+    o._ptt_event.clear()
+    assert "turn ended early: reason=barge_ptt" in caplog.text

@@ -52,7 +52,8 @@ def test_ask_gate_allow(sock):
     d = ask_gate("mcp__mac__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
     t.join(2)
     assert d.allow and d.kind == "approved"
-    assert box["req"] == {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "hi"}, "origin": "mcp", "backend": "codex"}
+    assert box["req"] == {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "hi"}, "origin": "mcp",
+                          "backend": "codex", "budget": gateclient.GATE_ANSWER_BUDGET_S}
 
 
 def test_ask_gate_fails_closed_without_socket(sock):
@@ -150,7 +151,8 @@ def test_call_gate_returns_the_tools_content(sock):
     t.join(2)
     assert d.allow and content == blocks and not is_error
     assert box["req"] == {"v": 1, "op": "call", "tool": "mcp__screen__screenshot",
-                          "input": {"region": "screen"}, "origin": "mcp", "backend": "codex"}
+                          "input": {"region": "screen"}, "origin": "mcp", "backend": "codex",
+                          "budget": gateclient.GATE_CALL_BUDGET_S}
 
 
 def test_call_gate_deny_has_no_content(sock):
@@ -188,3 +190,13 @@ def test_call_gate_denies_when_the_tool_takes_too_long(sock):
         stop.set()
         t.join(2)
     assert not d.allow and d.message == gateclient.NO_ANSWER and content == []
+
+
+def test_the_request_carries_the_callers_own_timeout(sock, monkeypatch):
+    """The gate answers before this runs out (GateServer), so a slow answer
+    comes back as a spoken, explicit skip instead of a silent timeout."""
+    monkeypatch.setenv("VERONICA_GATE_TIMEOUT_S", "7")
+    t, box = _serve_once(sock, {"allow": False, "kind": "denied", "reason": "user declined"})
+    ask_gate("Bash", {"command": "ls"}, origin="hook", backend="codex", sock=str(sock))
+    t.join(2)
+    assert box["req"]["budget"] == 7.0

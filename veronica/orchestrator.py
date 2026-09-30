@@ -1814,10 +1814,18 @@ class Orchestrator:
                 # here can't leave barge-in disabled for the rest of the turn.
                 self._confirm_listening = True
                 try:
-                    pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
+                    heard = await self._confirm_listen()
+                    if heard and self._is_own_speech(heard):
+                        # The question itself leaking back in through the mic.
+                        # Read as an answer it was "other": the step declined
+                        # and her own words run as the next request. It's no
+                        # answer at all, so listen once more.
+                        log.info("confirm heard its own question (%r); listening again", heard)
+                        heard = await self._confirm_listen()
+                        if heard and self._is_own_speech(heard):
+                            heard = None
                 finally:
                     self._confirm_listening = False
-                heard = await self.stt.atranscribe(pcm) if pcm is not None else None
                 if self._barged:
                     # barged while we were listening for / transcribing the
                     # reply (a barge unblocks the capture, so pcm is None).
@@ -1837,6 +1845,12 @@ class Orchestrator:
             self._set(prev)
             self._emit("tool", {"summary": summary, "decision": self._DECISION_EVENT[result.outcome]})
         return result
+
+    async def _confirm_listen(self) -> str | None:
+        pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
+        if pcm is None or self._barged:
+            return None
+        return await self.stt.atranscribe(pcm)
 
     # `allowed` stays the wire value for an approved confirm (the HUD and
     # older tests know it); "other" shows as a redirect.
@@ -1908,7 +1922,7 @@ class Orchestrator:
                         ptt = asyncio.ensure_future(self._ptt_event.wait())
                         pending.add(ptt)
                     else:
-                        log.info("ptt barge-in")
+                        log.info("turn ended early: reason=barge_ptt detail=state=%s", self.state)
                         await self._barge_teardown(turn)
                         return "ptt"
                 if listener in done:
@@ -1939,7 +1953,11 @@ class Orchestrator:
                             )
                             pending.add(listener)
                         else:
-                            log.info("barge-in")
+                            # Whether it was her own voice is the first thing to
+                            # rule out when a task "just stopped": say what she
+                            # was saying.
+                            log.info("turn ended early: reason=barge_wake detail=state=%s speaking=%r",
+                                     self.state, self._suppress_text()[:80])
                             await self._barge_teardown(turn)
                             return "wake"
                     # listener resolved False (a stop() consumed), or its True
@@ -2325,7 +2343,7 @@ class Orchestrator:
         try:
             await self.one_turn(ptt=ptt)
         except Exception as exc:
-            log.exception("turn failed")
+            log.exception("turn ended early: reason=error detail=%s", type(exc).__name__)
             try:
                 self.player.reset()
                 detail = f"{type(exc).__name__} {exc}".lower()

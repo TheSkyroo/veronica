@@ -1385,3 +1385,61 @@ def test_session_file_in_the_old_plain_format_is_dated_not_dropped(tmp_home):
     s.session_file.write_text("legacy-sid")
     assert b._load_session() == "legacy-sid"
     assert "\n" in s.session_file.read_text()     # now dated
+
+
+async def test_a_long_tool_call_does_not_time_the_turn_out(brain, monkeypatch, caplog):
+    """The SDK stream is quiet between a tool_use and its result (a page
+    loading, a screen sequence) — that's the tool, not the model stalling."""
+    from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage
+
+    use = _Assistant()
+    use.content = [ToolUseBlock(id="t1", name="mcp__browser__browser_open", input={})]
+
+    async def paced(self):
+        yield use
+        await asyncio.sleep(0.3)
+        yield UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="ok")])
+        yield _Assistant("Opened it.")
+        yield _Result("s")
+
+    monkeypatch.setattr(FakeClient, "receive_response", paced)
+    brain.s = Settings(brain_timeout_s=0.1)
+    assert [s async for s in brain.ask("x")] == ["Opened it."]
+    assert "turn ended early" not in caplog.text
+
+
+async def test_a_confirm_in_progress_pauses_the_silence_clock(brain, monkeypatch):
+    """can_use_tool is awaiting the user's yes/no: the gate is busy, and the
+    stream is quiet until it answers."""
+    async def waits_on_gate(self):
+        yield _Assistant("Let me check.")
+        await asyncio.sleep(0.3)
+        yield _Result("s")
+
+    monkeypatch.setattr(FakeClient, "receive_response", waits_on_gate)
+    brain.s = Settings(brain_timeout_s=0.1)
+
+    async def slow_confirm(summary, detail="", **kw):
+        await asyncio.sleep(0.25)
+        return True
+
+    brain._confirm = slow_confirm
+    out = []
+    async for s in brain.ask("x"):
+        out.append(s)
+        if s == "Let me check.":
+            gate = FakeClient.instances[0].options.can_use_tool
+            asyncio.ensure_future(gate("Write", {"file_path": "a"}, None))
+            await asyncio.sleep(0)
+    assert out == ["Let me check."]
+
+
+async def test_timeout_logs_why_the_turn_ended(brain, monkeypatch, caplog):
+    async def silent(self):
+        await asyncio.Event().wait()
+        yield _Result("s")
+
+    monkeypatch.setattr(FakeClient, "receive_response", silent)
+    brain.s = Settings(brain_timeout_s=0.05)
+    assert [s async for s in brain.ask("x")] == ["Taking too long, cancelled."]
+    assert "turn ended early: reason=brain_timeout" in caplog.text

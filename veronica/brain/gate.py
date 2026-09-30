@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from veronica.brain.agent import (
     summarize_tool,
 )
 from veronica.brain.base import Decision
+from veronica.brain.gateclient import GATE_ANSWER_BUDGET_S, GATE_CALL_BUDGET_S
 from veronica.brain.policy import (
     AUTO_ALLOWABLE,
     TRUST_EXCLUDED_BUNDLES,
@@ -36,6 +38,20 @@ ALWAYS_HINT = " Say always and I'll stop asking."
 # What she says when "always" lands on something that can never be
 # auto-allowed. The call itself still goes ahead.
 ALWAYS_ASK = "That one I'll always ask about."
+# How long a brain may sit on one tool call (or wait on the gate) before the
+# turn is given up on anyway. Only a wedged tool gets near it: the gate's
+# own call budget is well under it.
+BUSY_CEILING_S = 600.0
+# The gate answers this long before its caller's own budget runs out, so a
+# confirm nobody answered in time is a deny WE send (and say), not a socket
+# timeout the brain reads as "Veronica didn't answer".
+GATE_REPLY_MARGIN_S = 3.0
+TOO_SLOW = "You took a while to answer, so I skipped that step."
+
+
+class ToolStall(TimeoutError):
+    """wait_quiet gave up because a tool (or the gate) never finished, not
+    because the model went quiet."""
 
 
 def _confirm_outcome(result) -> tuple[str, str, bool]:
@@ -88,6 +104,64 @@ class ToolGate:
         # other than yes/no: the orchestrator picks it up after the turn
         # and runs it as the next request. Cleared when a turn starts.
         self.pending_redirect: str | None = None
+        # Confirms and tool runs in flight (working()), and an event that
+        # fires on every change, so a brain waiting on its stream can stop
+        # counting silence while the gate is the one keeping it quiet.
+        self._busy = 0
+        self._changed = asyncio.Event()
+        self.busy_ceiling_s = BUSY_CEILING_S
+
+    # -- busy: the silence clock ---------------------------------------------
+    @contextlib.contextmanager
+    def working(self):
+        """Held around a confirm and a tool run. While any is held, a
+        brain's stream going quiet is the gate's doing, not the model's."""
+        self._busy += 1
+        self._pulse()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            self._pulse()
+
+    @property
+    def busy(self) -> bool:
+        return self._busy > 0
+
+    def _pulse(self) -> None:
+        ev, self._changed = self._changed, asyncio.Event()
+        ev.set()
+
+    async def wait_quiet(self, aw, silence_s: float, *, tool_running: bool = False):
+        """Await `aw` (a brain's next stream line), raising TimeoutError only
+        after `silence_s` of silence nothing accounts for. While the gate is
+        busy, or `tool_running` (the stream itself says a call is in
+        flight), the clock stops; it starts again from zero when the gate
+        goes idle. The model gets its full allowance after every tool
+        result. A wait that stays busy past busy_ceiling_s raises ToolStall."""
+        task = asyncio.ensure_future(aw)
+        loop = asyncio.get_running_loop()
+        give_up = loop.time() + self.busy_ceiling_s
+        try:
+            while True:
+                busy = tool_running or self.busy
+                changed = asyncio.ensure_future(self._changed.wait())
+                timeout = give_up - loop.time() if busy else silence_s
+                try:
+                    done, _ = await asyncio.wait({task, changed}, timeout=max(0.0, timeout),
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    changed.cancel()
+                if task in done:
+                    return task.result()
+                if changed in done:
+                    continue
+                raise ToolStall() if busy else TimeoutError()
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
 
     def _card(self, summary: str, decision: str) -> None:
         if self._on_tool:
@@ -280,6 +354,7 @@ class GateServer:
         self._run_tool = run_tool
         self._server: asyncio.AbstractServer | None = None
         self._lock = asyncio.Lock()
+        self.reply_margin_s = GATE_REPLY_MARGIN_S
 
     async def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,6 +373,7 @@ class GateServer:
             self.path.unlink()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        too_slow = False
         try:
             line = await reader.readline()
             try:
@@ -313,18 +389,50 @@ class GateServer:
                 if op == "call" and self._run_tool is None:
                     resp = {"allow": False, "kind": "denied", "reason": NO_RUNNER}
                 else:
-                    async with self._lock:              # the confirm, and only the confirm
-                        d = await self.gate.decide(tool, inp)
-                    resp = {"allow": d.allow, "kind": d.kind, "reason": d.message}
-                    if op == "call" and d.allow:
-                        content, is_error = await self._run(tool, inp)
-                        resp["content"], resp["is_error"] = content, is_error
+                    # The asking brain's stream is quiet from here until it
+                    # hears back: its silence clock stops (ToolGate.working).
+                    with self.gate.working():
+                        budget = req.get("budget") or (GATE_CALL_BUDGET_S if op == "call" else GATE_ANSWER_BUDGET_S)
+                        d, too_slow = await self._decide(tool, inp, float(budget) - self.reply_margin_s)
+                        resp = {"allow": d.allow, "kind": d.kind, "reason": d.message}
+                        if op == "call" and d.allow:
+                            content, is_error = await self._run(tool, inp)
+                            resp["content"], resp["is_error"] = content, is_error
             writer.write((json.dumps(resp) + "\n").encode())
             await writer.drain()
         except Exception:
             log.exception("gate request failed")
         finally:
             writer.close()
+        if too_slow and self.gate._say is not None:
+            # After the reply, so saying it can't eat into the caller's budget.
+            with contextlib.suppress(Exception):
+                await self.gate._say(TOO_SLOW)
+
+    async def _decide(self, tool: str, inp: dict, answer_in: float) -> tuple[Decision, bool]:
+        """gate.decide, bounded by the caller's budget. Past it the question
+        is withdrawn and the answer is a deny — a slow answer is never an
+        approval. The bool: the user was asked and didn't answer in time
+        (she says so); a request still queued behind another confirm was
+        never asked, and is refused without a word."""
+        asked = False
+
+        async def ask() -> Decision:
+            nonlocal asked
+            async with self._lock:              # the confirm, and only the confirm
+                asked = True
+                return await self.gate.decide(tool, inp)
+
+        try:
+            async with asyncio.timeout(max(0.0, answer_in)):
+                return await ask(), False
+        except TimeoutError:
+            if asked:
+                log.warning("turn step skipped: reason=gate_timeout detail=%s: no answer within %.0fs", tool, answer_in)
+                return Decision(False, "denied", "the user didn't answer in time, so the step was skipped"), True
+            log.warning("turn step skipped: reason=gate_busy detail=%s: still queued behind another confirm "
+                        "after %.0fs", tool, answer_in)
+            return Decision(False, "denied", "Veronica was busy asking about something else; try again"), False
 
     async def _run(self, tool: str, inp: dict) -> tuple[list[dict], bool]:
         """Run an allowed tool. A runner that raises is reported to the
