@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # across the room still get in. 0 = off.
     noise_suppression: bool = True
     vad_min_rms: float = 0.001
+    # Only my voice: with a profile enrolled ("learn my voice"), a request,
+    # follow-up or confirm answer whose speaker score is under the threshold
+    # (lower for short answers, SpeakerGate.threshold_for) is ignored as if
+    # nothing was said. The wake word stays open to anyone unless
+    # speaker_verification_wake is on too.
+    speaker_verification: bool = True
+    speaker_verification_wake: bool = False
+    speaker_threshold: float = 0.35
     # How long a turn may stay silent before she says a short "On it." so a
     # slow brain doesn't feel like a dropped question. 0 turns the line off.
     ack_after_s: float = 8.0   # only for an unusually long wait; see Orchestrator.ACK_MIN_GAP_S
@@ -260,6 +268,20 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "How loud (after noise reduction) a sound must be to count as speech. "
         "Raise if room noise keeps her listening; lower if she misses you from across the room. 0 = off.",
         min=0.0, max=0.01, restart=False,
+    ),
+    "speaker_verification": EditableField(
+        "bool", "Only listen to my voice",
+        "After \"learn my voice\", she ignores requests and yes/no answers in other voices.", restart=False,
+    ),
+    "speaker_threshold": EditableField(
+        "float", "Voice match strictness",
+        "Higher ignores more of other people and may miss you in noise. Recent scores are listed below.",
+        min=0.2, max=0.7, restart=False,
+    ),
+    "speaker_verification_wake": EditableField(
+        "bool", "Only wake for my voice",
+        "The wake word must be your voice too. Off by default: a missed wake is worse than a stray one.",
+        restart=False,
     ),
     "wake_min_rms": EditableField(
         "float", "Wake sensitivity (min level)",

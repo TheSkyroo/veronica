@@ -62,9 +62,14 @@ class WhisperWake:
     _model_cls = WhisperModel  # swapped in tests
     _warned_threshold = False
 
-    def __init__(self, settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None) -> None:
+    def __init__(self, settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None,
+                 verify: Callable[[np.ndarray], bool] | None = None) -> None:
         self.s = settings
         self._frames = frames or self._mic_frames
+        # Optional speaker check on a matched window (raw audio); False drops
+        # the match. SpeakerGate.check_wake: a no-op unless the user turned
+        # speaker_verification_wake on and has a voice profile.
+        self._verify = verify
         self._model = self._model_cls(settings.wake_whisper_model, device="cpu", compute_type="int8")
         self._stop = threading.Event()
         self._window_samples = int(settings.wake_window_s * settings.sample_rate)
@@ -155,6 +160,10 @@ class WhisperWake:
         return p
 
     def _wait(self, suppress: Callable[[], str] | None = None, strict: bool = False) -> bool:
+        # No noise suppression here (the recorder has it): measured, it cost
+        # wake hits — tiny.en hears the name worse in suppressed audio (75% ->
+        # 33% of "Veronica"s at pink 5 dB), and the level gate on suppressed
+        # audio let a quiet "Veronica" through less often (12/12 -> 9/12).
         self._buf = np.zeros(0, dtype=np.int16)
         since_hop = 0
         for frame in self._frames():
@@ -179,10 +188,14 @@ class WhisperWake:
             if _matches(text, self.s.wake_phrases, strict=strict):
                 window_dur_s = self._buf.size / self.s.sample_rate
                 end_s = self._last_wake_word_end(segments, window_dur_s)
+                window = self._buf
                 self.preroll = self._buf[int(end_s * self.s.sample_rate):].copy()
                 self._buf = np.zeros(0, dtype=np.int16)
                 if suppress is not None and _matches(suppress(), self.s.wake_phrases):
                     log.debug("wake match suppressed (own speech)")
+                    self.preroll = np.zeros(0, dtype=np.int16)
+                    continue
+                if self._verify is not None and not self._verify(window):
                     self.preroll = np.zeros(0, dtype=np.int16)
                     continue
                 return True

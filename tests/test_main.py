@@ -161,7 +161,7 @@ class _FakeWakeWord:
         self.s = settings
 
 
-def _fake_make_wake(settings, frames=None):
+def _fake_make_wake(settings, frames=None, verify=None):
     return _FakeWakeWord(settings)
 
 

@@ -17,6 +17,7 @@ from veronica import proactive as proactive_mod
 from veronica import version
 from veronica.audio import devices, input_level
 from veronica.audio.chime import tone
+from veronica.audio.speaker import ENROL_MIN_S, voiced
 from veronica.brain import quick
 from veronica.brain.agent import confirm_prompt
 from veronica.brain.backends import BACKENDS, check_backend
@@ -36,6 +37,7 @@ from veronica.brain.intents import (
     match_proactive_intent,
     match_screen_intent,
     match_settings_intent,
+    match_speaker_intent,
     match_update_intent,
     match_version_intent,
     match_voice_intent,
@@ -59,6 +61,10 @@ log = logging.getLogger("veronica.orchestrator")
 # when the push-to-talk key went down while the capture was waiting: the
 # caller should switch to a hold-mode (push-to-talk) capture instead.
 PTT = object()
+
+# What confirm()'s listen returns for an answer in a voice that isn't the
+# enrolled one: never an answer, only a reason to listen once more.
+_NOT_THE_USER = object()
 
 # Trailing "stop dictation" (etc.) spoken in the same breath as the last
 # dictated sentence: stripped from what gets typed, and ends the dictation.
@@ -361,8 +367,13 @@ class Orchestrator:
                  relaunch: Callable[[], bool] | None = None,
                  can_relaunch: Callable[[], bool] | None = None,
                  version_describe: Callable[[], str] | None = None,
-                 switcher=None) -> None:
+                 switcher=None,
+                 speaker=None) -> None:
         self.s = settings
+        # Optional veronica.audio.speaker.SpeakerGate ("only my voice"): with
+        # a voice profile, a capture in someone else's voice is dropped as if
+        # nothing was said (see _speaker_ok). None = every voice is heard.
+        self.speaker = speaker
         # Optional veronica.brain.switch.BrainSwitcher: owns the active
         # brain (`self.brain` reads through to it), manual switches and the
         # usage-limit failover. None (tests, older callers) pins `brain`.
@@ -426,6 +437,9 @@ class Orchestrator:
         # the turn — whether that capture belongs to confirm(), dictation,
         # the follow-up window, or anything else.
         self._capture_in_flight = False
+        # Whether the last capture was a hold (push-to-talk) one: the key
+        # press is the proof it's the user, so it skips the speaker check.
+        self._last_capture_hold = False
         self._barged = False
         # True only while confirm() has the mic open for its yes/no. Inside
         # that window the user speaking IS the answer, so _run_with_barge
@@ -1373,6 +1387,92 @@ class Orchestrator:
             return "hi"
         return "en"
 
+    # -- only my voice ------------------------------------------------------------
+    async def _speaker_ok(self, pcm: np.ndarray | None, where: str) -> bool:
+        """False when a voice profile is active and `pcm` (just captured) is
+        someone else's voice: the caller then treats it as silence — never
+        as a request, a follow-up, or a confirm answer. The score is logged
+        either way (SpeakerGate.check). Push-to-talk captures pass: the key
+        is the proof."""
+        sp = self.speaker
+        if sp is None or pcm is None or not sp.active or self._last_capture_hold:
+            return True
+        ok, _score = await asyncio.to_thread(sp.check, pcm, where)
+        return ok
+
+    # Read aloud one at a time, the user repeats each: ~3 s of speech apiece
+    # is what the embedding needs. Plain English on purpose (a speaker
+    # embedding doesn't care about the language), and no wake word in them.
+    ENROL_LINES = (
+        "The quick brown fox jumps over the lazy dog.",
+        "I like my coffee strong, with no sugar.",
+        "Remind me to water the plants this evening.",
+    )
+
+    async def _speaker_turn(self, action: str) -> None:
+        """"learn my voice" / "forget my voice" (and the Settings buttons)."""
+        hi = self._utterance_lang == "hi"
+        sp = self.speaker
+        if sp is None:
+            await self.say("I can't learn voices here.")
+            return
+        if action == "forget":
+            had = await asyncio.to_thread(sp.forget)
+            self._emit("tool", {"summary": "Forget my voice", "decision": "auto"})
+            if hi:
+                await self.say("ठीक है, अब मैं सबकी सुनूँगी।" if had else "मेरे पास आपकी आवाज़ नहीं थी।", lang="hi")
+            else:
+                await self.say("Done, I'll listen to anyone now." if had else "I didn't have your voice.")
+            return
+        await self._enrol_voice(hi)
+
+    async def _enrol_voice(self, hi: bool) -> None:
+        sp = self.speaker
+        if not sp.model_ready():
+            await self.say("One moment, getting the voice model.")
+        self._set("thinking")
+        if not await asyncio.to_thread(sp.prepare):
+            await self.say("Couldn't get the voice model, check the log.")
+            return
+        if hi:
+            await self.say("मैं एक-एक लाइन बोलूँगी, बीप के बाद आप दोहराइए।", lang="hi")
+        else:
+            await self.say("I'll say three lines. Repeat each after the beep.")
+        clips: list[np.ndarray] = []
+        for line in self.ENROL_LINES:
+            clip = None
+            for _attempt in range(2):
+                await self.say(line)
+                self._set("listening")
+                await self.chime(self.s.chime_followup_hz, 100)
+                pcm = await self._capture(max_s=6, skip_ms=self.s.followup_skip_ms)
+                # the voice itself, not the VAD's trailing silence, must last
+                if pcm is not None and voiced(pcm).size >= self.s.sample_rate * ENROL_MIN_S:
+                    clip = pcm
+                    break
+                await self.say("Once more, a little louder.")
+            if clip is None:
+                await self.say("I couldn't hear you. Let's try later.")
+                return
+            clips.append(clip)
+        self._set("thinking")
+        profile, agreement = await asyncio.to_thread(sp.enrol, clips)
+        self._emit("tool", {"summary": "Learn my voice", "decision": "auto" if profile else "declined"})
+        if profile is None:
+            await self.say("Those didn't sound like one voice. Let's try again somewhere quieter.")
+        elif not self.s.speaker_verification:
+            await self.say("Got your voice. Turn on the voice check in Settings to use it.")
+        elif hi:
+            await self.say("आपकी आवाज़ याद हो गई। अब मैं सिर्फ़ आपकी सुनूँगी।", lang="hi")
+        else:
+            await self.say("Got it. I'll only listen to you now.")
+
+    async def queue_turn(self, turn: Callable[[], Any]) -> None:
+        """Run `turn()` (a coroutine factory) as the next idle turn — for the
+        Settings window's voice buttons, which must not run beside a turn
+        that already has the mic. It rides the announcement queue."""
+        await self._announce_queue.put((turn, None))
+
     # -- push-to-talk (A2) --------------------------------------------------------
     def ptt_start(self) -> None:
         """Called (on the event-loop thread, via the hotkey monitor's
@@ -1448,6 +1548,7 @@ class Orchestrator:
         draining the mic — and a stop() meant for the old capture could
         be consumed by the new one."""
         self._capture_in_flight = True
+        self._last_capture_hold = bool(kw.get("hold", False))
         # Arm the recorder's flags synchronously: capture()'s own body only
         # runs on the task's first step, and a stop()/finish() landing in
         # that gap (a PTT quick tap, a barge from the SDK's confirm task)
@@ -1721,6 +1822,8 @@ class Orchestrator:
             self._end_partial_window()
             if pcm is None:
                 break
+            if not await self._speaker_ok(pcm, "dictation"):
+                continue   # someone else talking: not typed, keep listening
             text = await self.stt.atranscribe(pcm)
             self._emit("heard", text)
             if not text:
@@ -1815,14 +1918,17 @@ class Orchestrator:
                 self._confirm_listening = True
                 try:
                     heard = await self._confirm_listen()
-                    if heard and self._is_own_speech(heard):
+                    if heard is _NOT_THE_USER or (heard and self._is_own_speech(heard)):
                         # The question itself leaking back in through the mic.
                         # Read as an answer it was "other": the step declined
                         # and her own words run as the next request. It's no
-                        # answer at all, so listen once more.
-                        log.info("confirm heard its own question (%r); listening again", heard)
+                        # answer at all, so listen once more. The same goes for
+                        # someone else's voice (the TV, a person in the room):
+                        # it is never a yes, never a redirect.
+                        log.info("confirm heard %s; listening again",
+                                 "another voice" if heard is _NOT_THE_USER else f"its own question ({heard!r})")
                         heard = await self._confirm_listen()
-                        if heard and self._is_own_speech(heard):
+                        if heard is _NOT_THE_USER or (heard and self._is_own_speech(heard)):
                             heard = None
                 finally:
                     self._confirm_listening = False
@@ -1846,10 +1952,14 @@ class Orchestrator:
             self._emit("tool", {"summary": summary, "decision": self._DECISION_EVENT[result.outcome]})
         return result
 
-    async def _confirm_listen(self) -> str | None:
+    async def _confirm_listen(self):
+        """The answer's text, None for silence, or _NOT_THE_USER for a voice
+        the speaker check rejected (never transcribed, so never classified)."""
         pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
         if pcm is None or self._barged:
             return None
+        if not await self._speaker_ok(pcm, "confirm"):
+            return _NOT_THE_USER
         return await self.stt.atranscribe(pcm)
 
     # `allowed` stays the wire value for an approved confirm (the HUD and
@@ -2026,6 +2136,10 @@ class Orchestrator:
             return
         is_followup = False
         while True:
+            if not await self._speaker_ok(pcm, "follow-up" if is_followup else "request"):
+                # Someone else's voice: as if nothing was said, so the turn
+                # ends here quietly (no "didn't catch that", no brain turn).
+                break
             text, detected = await self._transcribe(pcm)
             self._utterance_lang = self._lang_for(text, detected)
             if is_followup and text and self._is_own_speech(text):
@@ -2093,7 +2207,8 @@ class Orchestrator:
                 self._emit("hud", {"mode": "hide"})
                 self._set("idle")
                 return
-            mem = None if intent is not None else match_memory_intent(text)
+            speaker_action = None if intent is not None else match_speaker_intent(text)
+            mem = None if (intent is not None or speaker_action is not None) else match_memory_intent(text)
             screen_intent = intent is None and mem is None and match_screen_intent(text)
             music_action = (
                 None if (intent is not None or mem is not None or screen_intent)
@@ -2181,6 +2296,9 @@ class Orchestrator:
                     self._on_quit()
                     self._set("idle")
                     return
+            elif speaker_action is not None:
+                self.player.reset()
+                await self._speaker_turn(speaker_action)
             elif mem is not None:
                 kind, arg = mem
                 self.player.reset()
@@ -2309,7 +2427,7 @@ class Orchestrator:
         idle either way."""
         self._loop = asyncio.get_running_loop()
         pcm = await self._capture(max_s=self.s.listen_wait_s)
-        if pcm is None:
+        if pcm is None or not await self._speaker_ok(pcm, "unmute"):
             return
         text = await self.stt.atranscribe(pcm)
         if match_intent(text) == "unmute":
@@ -2325,8 +2443,17 @@ class Orchestrator:
         minutes" nudge that sat behind a long turn) is dropped, not spoken."""
         await self._announce_queue.put((text, expires_at))
 
-    async def _deliver_announcement(self, item: tuple[str, dt.datetime | None]) -> None:
+    async def _deliver_announcement(self, item: tuple[Any, dt.datetime | None]) -> None:
         text, expires_at = item
+        if callable(text):
+            # a queued local turn (queue_turn), not something to read out
+            try:
+                await text()
+            except Exception:
+                log.exception("queued turn failed")
+            finally:
+                self._set("idle")
+            return
         if expires_at is not None and expires_at < dt.datetime.now():
             log.info("announcement expired: %r", text)
             return

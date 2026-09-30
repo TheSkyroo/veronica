@@ -96,10 +96,13 @@ class WakeWord:
         return False
 
 
-def make_wake(settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None):
-    """Return the configured wake-word engine (WhisperWake or WakeWord)."""
+def make_wake(settings: Settings, frames: Callable[[], Iterator[bytes]] | None = None,
+              verify: Callable[[np.ndarray], bool] | None = None):
+    """Return the configured wake-word engine (WhisperWake or WakeWord).
+    `verify` (the speaker check on a matched wake) is whisper-engine only:
+    openwakeword fires on 80 ms scores with no window to embed."""
     if settings.wake_engine == "whisper":
         from veronica.audio.wake_whisper import WhisperWake
 
-        return WhisperWake(settings, frames=frames)
+        return WhisperWake(settings, frames=frames, verify=verify)
     return WakeWord(settings, frames=frames)
