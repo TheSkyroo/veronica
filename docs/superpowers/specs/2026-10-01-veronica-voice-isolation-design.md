@@ -24,10 +24,10 @@ Two independent parts:
 | `noise_suppression` (GTCRN + AGC + 60 Hz high-pass) on what the **VAD and level floor** see | **on** | Clatter and music stopped opening captures (100% → 0%) with no loss of near or across-the-room speech; ~2.7% of one core, only while a capture is open |
 | STT input | **raw audio** | Every suppressor we tried made whisper worse (pink 5 dB: 3.0% → 16.7% WER; TV 5 dB: 10.6% → 40.2%) |
 | Wake path (`WhisperWake`) | **untouched** (raw) | Suppressed audio cost wake hits (75% → 33% at pink 5 dB); a level gate on suppressed audio missed quiet "Veronica"s (12/12 → 9/12) |
-| `vad_min_rms` (level floor on the suppressed frame) | **0.001** | Keeps a quiet background voice (0.002 rms) from opening a capture (100% → 0%) and still misses ≤5% of far speech (0.0015 rms); 0.002 missed 88% of it |
+| `vad_min_rms` (level floor on the suppressed frame; off whenever suppression isn't running) | **0.001** | Keeps a quiet background voice (0.002 rms) from opening a capture (100% → 0%) and still misses ≤5% of far speech (0.0015 rms); 0.002 missed 88% of it |
 | `vad_aggressiveness` | **2 (unchanged)** | 3 missed 40% of across-the-room speech over clatter even with suppression |
 | `speaker_verification` | **on, inert until enrolled** | Nothing happens without a profile; enrolling is the opt-in |
-| `speaker_threshold` | **0.35**, scaled down for short audio | Enrolled voice accepted on 100% of commands (clean and noisy), other voices 4% (synthetic voices, which are closer than real people) |
+| `speaker_threshold` | **0.35**, scaled down for short audio (never under 80% for a confirm answer) | Enrolled voice accepted on 100% of commands (clean and noisy), other voices 4% (synthetic voices, which are closer than real people) |
 | `speaker_verification_wake` | **off** | The wake word is as short as a "yes", where 8% (quiet) to ~55% (noisy) of the user's own takes scored under the bar; a missed wake is worse than a stray one |
 | Speaker model | 3D-Speaker **CAM++** (VoxCeleb), ONNX, Apache-2.0, 29 MB | Best separation in stationary noise of the three tried, 11 ms per 3 s utterance, clean licence |
 
@@ -74,6 +74,13 @@ Word error, raw audio vs the shipped suppressor:
 Whisper is trained on noisy audio and is thrown by enhancement artefacts; this matches the literature. So the
 recorder runs suppression to decide **whether** someone is speaking, and hands whisper (and the speaker check) the
 **raw** capture.
+
+Two details of that split (both from review): the suppressed frame lags the raw one by 32 ms (`denoise.LAG`), so
+the onset it reveals is 1–2 raw frames late — the recorder keeps the last `ceil(LAG / frame) + 1` raw frames and
+puts them in front of the capture (without that, every capture lost its first ~30 ms). And the floor only applies
+to suppressed frames: with suppression off (or failed) the VAD decides alone, exactly as before. The HUD's mic
+meter shows the raw level. A suppressor that raises mid-capture is logged once and switched off until restart;
+the capture carries on raw.
 
 What opens a capture (the recorder's decision, 10 × 4 s clips each; "before" = raw audio, VAD only; "now" = the
 VAD and the 0.001 floor on suppressed audio):
@@ -151,8 +158,12 @@ over (0.3 s lead-in, 1.2 s tail, a quiet room floor). Share of checks that go th
 | noise alone accepted — pink / TV | 0 / 0% | **0 / 0%** | 0 / 0% | 0 / 0% |
 
 Short utterances embed less reliably (the user's own "yes" scored 0.43 on average against 0.73 for a sentence),
-so the bar scales linearly from 60% of the threshold with no voiced audio to 100% at 2 s. Babble noise "accepted"
-(8%) is babble made of the same Kokoro voices as the profiles.
+so the bar scales linearly from 60% of the threshold with no voiced audio to 100% at 2 s. "Voiced" counts only
+30 ms frames within 20 dB of the loud part and above 0.0005 rms, and fewer than ten count as none, so more speech
+can never lower the bar. A confirm answer's bar never drops under 80% of the threshold: at 0.35 that costs the
+user's quiet short answers 8% → 15% ignored, and cuts other voices' short answers accepted 1.9% → 1.4% (noisy
+takes are voiced long enough to be unaffected). Babble noise "accepted" (8%) is babble made of the same Kokoro
+voices as the profiles.
 
 **0.35** keeps every one of the user's commands, even in noise, and lets ~4% of other (synthetic) voices through;
 real people are further apart than Kokoro's blended voices, so that is pessimistic. The cost is short answers in
@@ -166,16 +177,23 @@ score is logged.
 
 - **Checked:** the turn request, every follow-up, every confirm answer, each dictated utterance, the unmute
   utterance while muted. `Orchestrator._speaker_ok` → `SpeakerGate.check` on a worker thread.
-- **Rejected = silence.** Request / follow-up: the turn ends quietly (no "didn't catch that", no brain turn, not
-  even transcribed). Dictation: not typed, keep listening. **Confirm:** never transcribed, so never classified — it
+- **Rejected = silence.** Request / follow-up: the turn ends (no "didn't catch that", no brain turn) and the HUD
+  shows an "Ignored another voice" card. It is transcribed only so that "forget my voice" can still get through —
+  a profile that stopped matching the user (new mic, a cold) must not lock them out; that phrase is the one
+  exemption. Dictation: not typed, keep listening (same card). **Confirm:** never transcribed, so never classified — it
   can't approve and it can't redirect. The confirm listens once more (as it already does for its own echo); a second
   rejection, like silence, is a deny ("Okay, skipping that."). The confirm gate only ever gets stricter.
 - **Push-to-talk captures are not checked:** the key is the proof. (PTT during a confirm is a normal confirm
   capture, so it is checked.)
 - **Wake:** speaker-agnostic unless `speaker_verification_wake` is on (whisper engine only; openwakeword has no
   window to embed). On, a rejected wake match is dropped and the engine keeps listening; barge-in uses the same wait.
-- **Fails open.** No profile, verification off, or a model that won't load all mean "accept" (logged once) — a
-  broken model must not make her deaf, and it's exactly the behaviour before this feature.
+- **Never waits, fails open.** `check()` never downloads or loads: until the model is loaded (at startup when a
+  profile exists, or by enrolment) it accepts and starts a background load. No profile, verification off, or a
+  model that won't load all mean "accept" — a broken model must not make her deaf, and it's exactly the
+  behaviour before this feature. A load failure is visible: a one-time "Voice check unavailable, hearing
+  everyone" card, and Settings says so; it is retried in the background at most every 10 minutes. A single
+  scoring error accepts that one capture and is logged, without latching. Downloads have a 30 s timeout per
+  socket operation and run one at a time.
 - **Logged:** `speaker confirm: score=0.123 threshold=0.30 -> ignored (0.7 s voiced of 2.2 s, 9 ms)`. The last 8
   (where, score, verdict, time) are shown in Settings → Listening under the buttons.
 
@@ -184,8 +202,11 @@ score is logged.
 - "learn my voice" / "only listen to me" / "meri awaaz yaad rakho" / "sirf meri awaaz suno", or **Learn my voice**
   in Settings. The Settings button queues the turn on the announcement queue so it runs when she's idle, never
   beside a capture that already has the mic.
-- She reads three fixed English lines (no wake word in them); the user repeats each after the chime (≥1 s of audio,
-  one retry each). The profile is the normalised mean of the three embeddings; if any clip agrees with the mean
+- She reads three fixed English lines (no wake word in them); the user repeats each after the chime; each take gets
+  one retry. A take is refused unless it has ≥1 s of voiced audio, whisper hears at least half the line's words
+  in it, and its voice is not hers (similarity to her own synthesised line under 0.5 — `_is_own_speech` can't
+  tell, since a correct take *is* her words). Without these, three takes of the same wrong source (her tail, a
+  TV, a fan) would agree with each other and make a profile that ignores the user. The profile is the normalised mean of the three embeddings; if any clip agrees with the mean
   of the others under 0.3 (someone else answered a line) nothing is saved: "Those didn't sound like one voice."
 - Stored as `~/.veronica/voice_profile.json` (0600, written atomically): version, model name, date, clip count,
   the 512 floats. A profile made with another model is ignored with a warning.

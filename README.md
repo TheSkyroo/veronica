@@ -494,16 +494,19 @@ fires mid-conversation or while muted waits, like a timer), and the schedule per
 - **Background noise** — on by default (Settings → Listening → "Reduce background noise"). A small offline
   noise-suppression network (GTCRN, 0.5 MB, fetched on first launch into `~/.veronica/models`) cleans what the
   speech detector hears, so keyboard clatter, dishes and music no longer open or stretch a recording, and a
-  "Speech level floor" (`vad_min_rms`, default 0.001) keeps faint background talk out while you from across the
-  room still get in. Whisper itself still transcribes the unprocessed audio — measured, it understands noisy
+  "Speech level floor" (`vad_min_rms`, default 0.001, only while suppression runs) keeps faint background talk
+  out while you from across the room still get in. Whisper itself still transcribes the unprocessed audio — measured, it understands noisy
   speech better than cleaned-up speech — and the wake word check is untouched.
 - **Only my voice** — say "Veronica, learn my voice" ("meri awaaz yaad rakho"), or press **Learn my voice** in
   Settings → Listening. She reads three short lines; repeat each after the beep. From then on a request,
   follow-up, dictated line or yes/no answer in someone else's voice (the TV, a person in the room) is ignored as
-  if nothing was said: it never runs, and it never approves or redirects a confirm — she just listens once more,
-  and if it's still not you the action is skipped. Push-to-talk is always trusted (the key is the proof). The
-  wake word stays open to anyone unless you also turn on "Only wake for my voice" (off by default: a missed
-  wake is worse than a stray one).
+  if nothing was said, with an "Ignored another voice" card on the HUD: it never runs, and it never approves or
+  redirects a confirm — she just listens once more, and if it's still not you the action is skipped.
+  Push-to-talk is always trusted (the key is the proof), and "forget my voice" always gets through, so a
+  profile that stops matching you can't lock you out. The wake word stays open to anyone unless you also turn
+  on "Only wake for my voice" (off by default: a missed wake is worse than a stray one — which also means
+  someone else saying "Veronica" can still interrupt her). If the voice model can't load she hears everyone
+  and says so once on the HUD and in Settings.
 - **Forget it** — "forget my voice" / "meri awaaz bhool jao", or **Forget my voice** in Settings. The profile is
   one small file, `~/.veronica/voice_profile.json` (readable only by you); the speaker model (CAM++, 29 MB,
   SHA256-pinned) is fetched the first time you enrol.
