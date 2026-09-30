@@ -243,7 +243,7 @@ def test_mic_frames_buffers_while_consumer_stalls(monkeypatch):
         def read(self, n):
             self.n += 1
             time.sleep(0.001)
-            frame = self.n.to_bytes(4, "little") * (n // 4)
+            frame = self.n.to_bytes(4, "little") * (n // 2)   # n int16 frames
             produced.append(frame)
             return frame, False
 

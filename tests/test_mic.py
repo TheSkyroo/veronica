@@ -28,7 +28,7 @@ class FakeStream:
     def read(self, n):
         self.n += 1
         time.sleep(0.0005)
-        return self.n.to_bytes(4, "little") * (n // 4), False
+        return self.n.to_bytes(4, "little") * (n // 2), False   # n int16 frames = 2n bytes
 
 
 class FakeSD:
@@ -87,8 +87,8 @@ def test_mic_frames_reopens_stream_when_input_device_changes(fake_sd, caplog):
     assert devices.pending is False and devices.initialised_for == 2
     # frames keep flowing through the same generator: the new stream's
     # counter restarts at 1, and nothing was dropped from the old one.
-    assert got[:3] == [(i).to_bytes(4, "little") * 320 for i in (1, 2, 3)]
-    assert (1).to_bytes(4, "little") * 320 in got[3:]
+    assert got[:3] == [(i).to_bytes(4, "little") * 640 for i in (1, 2, 3)]
+    assert (1).to_bytes(4, "little") * 640 in got[3:]
 
 
 def test_mic_frames_defers_reopen_while_capture_in_flight(fake_sd, monkeypatch, caplog):
@@ -235,10 +235,36 @@ def test_a_device_that_overflows_every_chunk_does_not_flood_the_log(fake_sd, mon
     chunk (~15 a second) rotated the whole log away within hours. It is
     summarised at most once per OVERFLOW_LOG_EVERY_S instead."""
     monkeypatch.setattr(FakeStream, "read",
-                        lambda self, n: (b"\0" * n, True))
+                        lambda self, n: (b"\0" * (2 * n), True))
     with caplog.at_level(logging.WARNING, logger="veronica.audio"):
         gen = mic.mic_frames(Settings(), 1280, "wake")
         _drain(gen, 200)
         gen.close()
     lines = [r for r in caplog.records if "mic overflow" in r.getMessage()]
     assert len(lines) == 1
+
+
+# -- PortAudio ring size ---------------------------------------------------
+
+
+def test_stream_latency_keeps_portaudios_ring_at_least_two_chunks(fake_sd):
+    """PortAudio's CoreAudio blocking-read ring is sized from the suggested
+    latency and the device's IO buffer, never from our blocksize
+    (computeRingBufferSize). A Bluetooth hands-free mic whose snapshotted
+    'high' latency is ~30 ms got a 1024-frame ring under a 1280-frame block:
+    every callback overflowed and 20% of the audio was dropped. The latency
+    we ask for must make the ring hold at least two chunks."""
+    fake_sd.query_devices = lambda kind=None: {"default_high_input_latency": 0.02}
+    gen = mic.mic_frames(Settings(), 1280, "wake")
+    next(gen)
+    gen.close()
+    # ring >= 2 * latency * rate  ->  latency >= chunk / rate
+    assert fake_sd.streams[0].kw["latency"] >= 1280 / 16000
+
+
+def test_stream_latency_never_lowers_the_devices_own_high_latency(fake_sd):
+    fake_sd.query_devices = lambda kind=None: {"default_high_input_latency": 0.3}
+    gen = mic.mic_frames(Settings(), 1280, "wake")
+    next(gen)
+    gen.close()
+    assert fake_sd.streams[0].kw["latency"] == pytest.approx(0.3)

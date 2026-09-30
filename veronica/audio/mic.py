@@ -17,6 +17,28 @@ log = logging.getLogger("veronica.audio")
 OVERFLOW_LOG_EVERY_S = 60
 
 
+def base_latency(chunk: int, sample_rate: int) -> float:
+    """Suggested input latency for a `chunk`-frame blocking stream.
+
+    PortAudio's CoreAudio blocking read buffers input in a ring sized
+    `pow2ceil(max(2 * latency * rate, 3 * device IO buffer))`
+    (pa_mac_core_utilities.c computeRingBufferSize) — it ignores our
+    blocksize, yet its callback writes a whole block at once. sounddevice's
+    default 'high' latency is the device's, snapshotted when PortAudio was
+    initialised; for a Bluetooth hands-free mic seen right at launch that was
+    ~30 ms with a small IO buffer, so the ring was 1024 frames under a
+    1280-frame block: every callback overflowed and dropped 256 frames (20%),
+    ~10 overflows a second for days. Asking for at least one chunk's worth
+    of latency makes the ring at least two chunks whatever the device says;
+    a device whose own high latency is larger keeps it."""
+    floor = chunk / sample_rate
+    try:
+        high = float(sd.query_devices(kind="input")["default_high_input_latency"])
+    except Exception:
+        high = 0.0
+    return max(floor, high)
+
+
 def mic_frames(
     settings: Settings,
     chunk: int,
@@ -59,7 +81,8 @@ def mic_frames(
 
     def open_stream():
         with devices.refresh_lock:
-            stream = sd.RawInputStream(samplerate=settings.sample_rate, channels=1, dtype="int16", blocksize=chunk)
+            stream = sd.RawInputStream(samplerate=settings.sample_rate, channels=1, dtype="int16",
+                                       blocksize=chunk, latency=base_latency(chunk, settings.sample_rate))
             stream.__enter__()
             return stream
 
