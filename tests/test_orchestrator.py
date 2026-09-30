@@ -4638,6 +4638,63 @@ async def test_claude_weekly_limit_fails_over():
     assert standin.asked == ["what time is it in tokyo"] and "It's 9 pm in Tokyo." in o.tts.said
 
 
+class DeadBrain(NamedBrain):
+    """ask() can't even start (the local server wouldn't come up)."""
+    async def ask(self, text):
+        from veronica.brain.backends.local import START_FAILED, LocalStartError
+        self.asked.append(text)
+        raise LocalStartError(START_FAILED)
+        yield  # noqa: unreachable — makes this an async generator
+
+
+class UnavailSwitcher(FakeSwitcher):
+    async def unavailable(self, reason):
+        self.failovers.append(("down", reason))
+        if self.fail_to is not None:
+            self.brain = self.fail_to
+            self.standing_in = True
+            return self.fail_to.name
+        return None
+
+
+async def test_a_brain_that_wont_start_fails_over_and_reruns():
+    o, _, ev = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's the weather"])
+    dead = DeadBrain("local")
+    standin = NamedBrain("codex", replies=["Sunny."])
+    o.brain = dead
+    o.switcher = UnavailSwitcher(dead, fail_to=standin)
+    await o.one_turn()
+    assert o.switcher.failovers == [("down", "The local model wouldn't start — check the Local settings.")]
+    assert standin.asked == ["what's the weather"] and "Sunny." in o.tts.said
+    assert ("tool", {"summary": "Local: wouldn't start — on Codex", "decision": "limit"}) in ev
+
+
+async def test_a_brain_that_wont_start_with_nothing_ready_stops_quietly():
+    o, _ = build_brain(["tell me a joke"])
+    o.brain = DeadBrain("local")
+    o.switcher = UnavailSwitcher(o.brain)
+    await o.one_turn()
+    assert o.tts.said == []
+
+
+async def test_a_brain_that_wont_start_without_switcher_speaks_the_hint():
+    o, _, _ = build3(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["tell me a joke"])
+    o.brain = DeadBrain("local")
+    await o.one_turn()
+    assert o.tts.said == ["The local model wouldn't start — check the Local settings."]
+
+
+async def test_which_brain_after_a_start_failure_says_why():
+    o, _ = build_brain(["which brain are you on"])
+    o.switcher.preferred = "local"
+    o.brain.name = "codex"
+    o.switcher.standing_in = True
+    o.switcher._standin_reason = "down"
+    o.switcher.limited_until = {"local": 5000.0}
+    await o.one_turn()
+    assert o.tts.said == ["I'm on Codex — the local model wouldn't start."]
+
+
 async def test_limit_error_without_standin_stops_quietly():
     """The switcher speaks the "no other brain is ready" line itself."""
     o, _ = build_brain(["tell me a joke"])

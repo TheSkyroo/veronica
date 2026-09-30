@@ -235,7 +235,10 @@ is text-only, so she says she can't see. A small model that ignores the tool sch
 that is normal and not an error. Expect a short answer in a handful of seconds, and expect it to be less sharp
 than the hosted brains — it is a three-billion-parameter model on a laptop.
 
-If the server won't start she says "The local model wouldn't start — check the Local settings." The Local brain
+If the server won't start she moves to the next ready brain in the failover order and says so once ("The local
+model wouldn't start — switching to Codex."), re-running the request there; the local model gets another try
+after the usage-limit cooldown, and while it cools a dead wire doesn't put it back in. With nothing else ready
+(or failover off) she says "The local model wouldn't start and no other brain is ready." The Local brain
 is offered only when both the binary and the model file exist ("The local model server isn't there — set its
 path in Settings.").
 

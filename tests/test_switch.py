@@ -447,3 +447,49 @@ async def test_online_candidate_skips_the_local_model(tmp_path, monkeypatch):
     sw2, *_ = make_switcher(tmp_path, monkeypatch,
                             {n: "not installed" for n in LABELS if n != "local"})
     assert sw2.online_candidate() is None
+
+
+# -- a brain that won't start at all -------------------------------------------
+
+async def test_a_manual_local_that_wont_start_moves_to_the_next_brain(tmp_path, monkeypatch):
+    sw, said, backends, *_ , clock = make_switcher(tmp_path, monkeypatch, {"codex": "not logged in"},
+                                                   brain_backend="local")
+    await sw.start()
+    assert await sw.unavailable("llama-server exited 1") == "antigravity"
+    assert sw.brain.name == "antigravity" and sw.standing_in is True and sw.preferred == "local"
+    assert said == ["The local model wouldn't start — switching to Antigravity."]
+    assert backends[-1] == ("Antigravity (for Local)", True)
+    await sw.maybe_return()                  # cooling down: stays put
+    assert sw.brain.name == "antigravity"
+    clock.t += sw.s.brain_limit_cooldown_min * 60 + 1
+    await sw.maybe_return()                  # then tries local again, silently
+    assert sw.brain.name == "local" and len(said) == 1
+
+
+async def test_an_offline_local_that_wont_start_hands_back_and_is_not_retried(tmp_path, monkeypatch):
+    sw, said, *_ = make_switcher(tmp_path, monkeypatch, {})
+    wire_up(sw, {"up": False})
+    await sw.start()
+    await sw.maybe_offline()
+    assert sw.brain.name == "local"
+    assert await sw.unavailable("timeout") == "codex"
+    assert sw.brain.name == "codex" and sw.standing_in is False
+    await sw.maybe_offline()                 # still offline, but local is cooling: no bounce
+    assert sw.brain.name == "codex"
+    assert said == [switch_mod.OFFLINE_LINE, "The local model wouldn't start — switching to Codex."]
+
+
+async def test_a_brain_that_wont_start_with_nothing_else_ready_says_so(tmp_path, monkeypatch):
+    sw, said, *_ = make_switcher(tmp_path, monkeypatch,
+                                 {n: "not logged in" for n in ("codex", "antigravity", "claude", "copilot")},
+                                 brain_backend="local")
+    await sw.start()
+    assert await sw.unavailable("x") is None
+    assert sw.brain.name == "local" and said == ["The local model wouldn't start and no other brain is ready."]
+
+
+async def test_a_brain_that_wont_start_with_failover_off_just_says_so(tmp_path, monkeypatch):
+    sw, said, *_ = make_switcher(tmp_path, monkeypatch, {}, brain_backend="local", brain_failover=False)
+    await sw.start()
+    assert await sw.unavailable("x") is None
+    assert sw.brain.name == "local" and said == ["The local model wouldn't start."]

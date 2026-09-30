@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 import httpx
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import ToolGate
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
@@ -86,6 +87,10 @@ async def tool_catalog() -> tuple[list[dict], set[str]]:
             names.add(full)
     _tools = (schemas, names)
     return _tools
+
+
+class LocalStartError(BrainUnavailable):
+    """`llama-server` didn't come up; the orchestrator fails over on it."""
 
 
 @dataclass
@@ -392,10 +397,11 @@ class LocalBrain:
             text = f"{text}\n\n(A screenshot was taken but you cannot see images; say so.)"
         try:
             await self._ensure_server()
-        except Exception:
+        except Exception as e:
+            # Raised, not spoken: the switcher can put another brain in and
+            # the orchestrator re-runs the request there.
             log.exception("local: server would not start")
-            yield START_FAILED
-            return
+            raise LocalStartError(START_FAILED) from e
         self._touch()
 
         schemas, names = await tool_catalog()

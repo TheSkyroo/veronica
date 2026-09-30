@@ -23,6 +23,7 @@ from veronica.brain import quick
 from veronica.brain.agent import confirm_prompt
 from veronica.brain.backends import BACKENDS, check_backend
 from veronica.brain.backends.cli import LimitError
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import GateServer
 from veronica.brain.intents import (
     is_pause_phrase,
@@ -1100,6 +1101,17 @@ class Orchestrator:
                     return None     # the switcher said "no other brain is ready"
                 self._emit("tool", {"summary": f"{old}: usage limit — on {BACKENDS[new].label}",
                                     "decision": "limit"})
+            except BrainUnavailable as e:
+                # Couldn't start at all (the local server): same hop, its own line.
+                if self.switcher is None:
+                    await self.say(str(e))
+                    return None
+                old = self._brain_label()
+                new = await self.switcher.unavailable(str(e))
+                if new is None:
+                    return None
+                self._emit("tool", {"summary": f"{old}: wouldn't start — on {BACKENDS[new].label}",
+                                    "decision": "limit"})
         return None
 
     # -- brains -----------------------------------------------------------------
@@ -1143,6 +1155,10 @@ class Orchestrator:
             label = self._brain_label()
             if sw.standing_in and sw.brain.name == "local" and sw._standin_reason == "offline":
                 await self.say("I'm on the local model — there's no internet.")
+                return
+            if sw.standing_in and sw.brain.name in BACKENDS and sw._standin_reason == "down":
+                pref = "the local model" if sw.preferred == "local" else BACKENDS[sw.preferred].label
+                await self.say(f"I'm on {BACKENDS[sw.brain.name].label} — {pref} wouldn't start.")
                 return
             if sw.standing_in and sw.brain.name in BACKENDS:
                 until = sw.limited_until.get(sw.preferred, 0.0)

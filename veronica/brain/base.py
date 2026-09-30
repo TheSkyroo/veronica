@@ -16,6 +16,12 @@ class Decision:
     heard: str = ""
 
 
+class BrainUnavailable(Exception):
+    """The brain couldn't run this turn at all (the local model's server
+    wouldn't start). Raised out of ask() so the switcher can move to
+    another brain; the message is what to say when it can't."""
+
+
 class Brain(Protocol):
     """What the orchestrator needs from any backend: sentences streamed
     from ask(), an interrupt, a close, and the shared gate."""

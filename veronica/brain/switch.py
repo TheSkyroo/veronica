@@ -239,6 +239,32 @@ class BrainSwitcher:
         await self._speak(f"{label} hit its usage limit and no other brain is ready.")
         return None
 
+    async def unavailable(self, reason: str) -> str | None:
+        """The active brain couldn't run at all (the local model's server
+        wouldn't start): cool it down like a usage limit and move to the
+        next ready brain. Returns the new name, or None when nothing else
+        is ready (or failover is off)."""
+        current = self.brain.name
+        label = "The local model" if current == LOCAL else _label(current)
+        log.warning("brain: %s wouldn't start: %s", current, reason)
+        if not self.s.brain_failover:
+            await self._speak(f"{label} wouldn't start.")
+            return None
+        # Cooling also keeps maybe_offline from putting a dead local model
+        # straight back in on the next turn.
+        self.limited_until[current] = self._clock() + self.s.brain_limit_cooldown_min * 60
+        for n in self._candidates():
+            if n == current or self._cooling(n) or not self._check(n).ok:
+                continue
+            await self._speak(f"{label} wouldn't start — switching to {_label(n)}.")
+            await self._activate(n)
+            if self.standing_in:
+                self._standin_reason = "down"
+            self._notify()
+            return n
+        await self._speak(f"{label} wouldn't start and no other brain is ready.")
+        return None
+
     async def maybe_return(self) -> None:
         """Before each turn: go back to the preferred brain silently once
         its cooldown has passed / it has become available."""
@@ -249,7 +275,7 @@ class BrainSwitcher:
             # net.online is itself cached, so this costs nothing most turns.
             if not await self._is_online(self.preferred):
                 return
-        elif self._standin_reason == "limit":
+        elif self._standin_reason in ("limit", "down"):
             if self._cooling(self.preferred):
                 return
         elif now < self._next_recheck:
@@ -281,6 +307,9 @@ class BrainSwitcher:
             return
         if not self._check(LOCAL).ok:
             log.warning("brain: offline and the local model isn't set up")
+            return
+        if self._cooling(LOCAL):
+            log.warning("brain: offline, but the local model failed to start recently")
             return
         await self._speak(OFFLINE_LINE)
         await self._activate(LOCAL)

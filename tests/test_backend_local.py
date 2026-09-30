@@ -10,7 +10,8 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from veronica.brain.backends import check_backend, local as local_mod
-from veronica.brain.backends.local import START_FAILED, LocalBrain
+from veronica.brain.backends.local import START_FAILED, LocalBrain, LocalStartError
+from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
 from veronica.tools import registry
@@ -188,15 +189,17 @@ async def test_the_server_stays_up_between_turns(tmp_path):
     await brain.close()
 
 
-async def test_a_server_that_will_not_start_speaks_the_hint(tmp_path, monkeypatch):
+async def test_a_server_that_will_not_start_raises_for_failover(tmp_path, monkeypatch):
     monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
     brain, client, spawned = make_brain(tmp_path, health=[False])
     brain.start_timeout_s = 0
-    assert await drain(brain) == [START_FAILED]
+    with pytest.raises(LocalStartError) as e:
+        await drain(brain)
+    assert isinstance(e.value, BrainUnavailable) and str(e.value) == START_FAILED
     await brain.close()
 
 
-async def test_a_server_that_exits_speaks_the_hint(tmp_path, monkeypatch):
+async def test_a_server_that_exits_raises_for_failover(tmp_path, monkeypatch):
     monkeypatch.setattr(local_mod, "HEALTH_POLL_S", 0)
     s = Settings(home=tmp_path)
     async def yes(summary, detail):
@@ -210,7 +213,8 @@ async def test_a_server_that_exits_speaks_the_hint(tmp_path, monkeypatch):
         return proc
 
     brain = LocalBrain(s, gate, spawn=spawn, client=FakeClient(health=[False]))
-    assert await drain(brain) == [START_FAILED]
+    with pytest.raises(LocalStartError):
+        await drain(brain)
 
 
 # -- streaming -----------------------------------------------------------------
