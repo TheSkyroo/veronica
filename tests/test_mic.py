@@ -231,7 +231,7 @@ def test_reader_reopens_without_closing_when_portaudio_refreshed_elsewhere(fake_
 
 
 def test_a_device_that_overflows_every_chunk_does_not_flood_the_log(fake_sd, monkeypatch, caplog):
-    """AirPods' hands-free profile overflowed on every chunk: one warning per
+    """A Bluetooth headset's hands-free profile overflowed on every chunk: one warning per
     chunk (~15 a second) rotated the whole log away within hours. It is
     summarised at most once per OVERFLOW_LOG_EVERY_S instead."""
     monkeypatch.setattr(FakeStream, "read",
@@ -249,9 +249,9 @@ def test_a_device_that_overflows_every_chunk_does_not_flood_the_log(fake_sd, mon
 class PolledStream(FakeStream):
     """A stream shaped like sounddevice's: `read_available` says how many
     frames are buffered, and `read()` never has to block. `dead_after` reads
-    in, it stops delivering for good (what PortAudio's CoreAudio input
-    callback does after AudioUnitRender fails: it stops the unit, and a
-    blocking read then waits forever)."""
+    in, it stops delivering for good (what PortAudio's input callback does
+    when the endpoint goes away under the stream: it stops, and a blocking
+    read then waits forever)."""
 
     def __init__(self, registry, chunk=1280, dead_after=None, overflow=False, **kw):
         super().__init__(registry, **kw)
@@ -290,12 +290,11 @@ def _polled(fake_sd, *streams_kw):
 
 
 def test_stream_latency_keeps_portaudios_ring_at_least_two_chunks(fake_sd):
-    """PortAudio's CoreAudio blocking-read ring is sized from the suggested
-    latency and the device's IO buffer, never from our blocksize
-    (computeRingBufferSize). A Bluetooth hands-free mic whose snapshotted
-    'high' latency is ~30 ms got a 1024-frame ring under a 1280-frame block:
-    every callback overflowed and 20% of the audio was dropped. The latency
-    we ask for must make the ring hold at least two chunks."""
+    """PortAudio's blocking-read ring is sized from the suggested latency,
+    never from our blocksize. A Bluetooth hands-free mic whose snapshotted
+    'high' latency is ~30 ms got a ring smaller than a 1280-frame block:
+    every callback overflowed and audio was dropped. The latency we ask for
+    must make the ring hold at least two chunks."""
     fake_sd.query_devices = lambda kind=None: {"default_high_input_latency": 0.02}
     gen = mic.mic_frames(Settings(), 1280, "wake")
     next(gen)
@@ -314,11 +313,11 @@ def test_stream_latency_never_lowers_the_devices_own_high_latency(fake_sd):
 
 def test_reader_reopens_a_stream_that_stopped_delivering(fake_sd, monkeypatch, caplog):
     """The wedge behind two days of a deaf wake word: the device went away
-    (AirPods out, sleep), PortAudio stopped the input unit, and read() waited
+    (headset disconnected, sleep), PortAudio stopped the input, and read() waited
     forever — holding refresh_lock, so no device refresh could run either.
     The reader must notice no audio arriving, say so, and reopen."""
     monkeypatch.setattr(mic, "STALL_S", 0.1)
-    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "AirPods - Find My")
+    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "Headset (WH-1000XM4 Hands-Free)")
     _polled(fake_sd, {"dead_after": 3}, {})
     with caplog.at_level(logging.INFO, logger="veronica.audio"):
         gen = mic.mic_frames(Settings(), 1280, "wake")
@@ -326,7 +325,7 @@ def test_reader_reopens_a_stream_that_stopped_delivering(fake_sd, monkeypatch, c
         gen.close()
     assert len(got) == 6                                  # frames resumed on the new stream
     assert fake_sd.calls == ["open", "open"]              # a plain reopen first
-    assert "no audio from AirPods - Find My" in caplog.text
+    assert "no audio from Headset (WH-1000XM4 Hands-Free)" in caplog.text
     assert "reopening the stream" in caplog.text
 
 
@@ -366,7 +365,7 @@ def test_persistent_overflow_reopens_with_a_bigger_buffer_and_says_so(fake_sd, m
     the latency (a bigger ring), naming the device, until MAX_LATENCY_S."""
     monkeypatch.setattr(mic, "OVERFLOW_HEAL_S", 0.05)
     monkeypatch.setattr(mic, "MAX_LATENCY_S", 0.4)
-    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "AirPods - Find My")
+    monkeypatch.setattr(devices, "default_input_name", lambda *a, **k: "Headset (WH-1000XM4 Hands-Free)")
     fake_sd.query_devices = lambda kind=None: {"default_high_input_latency": 0.0}
     _polled(fake_sd, {"overflow": True})
     with caplog.at_level(logging.WARNING, logger="veronica.audio"):
@@ -377,7 +376,7 @@ def test_persistent_overflow_reopens_with_a_bigger_buffer_and_says_so(fake_sd, m
         gen.close()
     lat = [s.kw["latency"] for s in fake_sd.streams]
     assert lat == pytest.approx([0.08, 0.16, 0.32, 0.4])
-    assert "overflowing on" in caplog.text and "AirPods - Find My" in caplog.text
+    assert "overflowing on" in caplog.text and "Headset (WH-1000XM4 Hands-Free)" in caplog.text
     assert "reopening with latency 0.16s" in caplog.text
     assert "not reopening again" in caplog.text
 

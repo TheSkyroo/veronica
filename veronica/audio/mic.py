@@ -17,10 +17,10 @@ log = logging.getLogger("veronica.audio")
 # Mic overflow warnings are summarised at most this often (see the read loop).
 OVERFLOW_LOG_EVERY_S = 60
 # No audio at all for this long means the stream is dead, not quiet (a live
-# input delivers frames even when muted): PortAudio's CoreAudio input callback
-# stops the unit for good when AudioUnitRender fails (-10863 "cannot do in
-# current context", -50 — seen in launchd.log when AirPods leave or the Mac
-# sleeps), and a blocking read() on it then waits forever.
+# input delivers frames even when muted): when the endpoint goes away under
+# an open stream (a USB/Bluetooth mic is unplugged or disconnects, the PC
+# sleeps — WASAPI reports AUDCLNT_E_DEVICE_INVALIDATED) PortAudio's input
+# callback simply stops, and a blocking read() on it then waits forever.
 STALL_S = 2.0
 # Overflowing on at least half the reads for this long is a broken stream
 # configuration, not a CPU hiccup: reopen with a bigger buffer.
@@ -35,17 +35,16 @@ QUEUE_MAX = 750
 def base_latency(chunk: int, sample_rate: int) -> float:
     """Suggested input latency for a `chunk`-frame blocking stream.
 
-    PortAudio's CoreAudio blocking read buffers input in a ring sized
-    `pow2ceil(max(2 * latency * rate, 3 * device IO buffer))`
-    (pa_mac_core_utilities.c computeRingBufferSize) — it ignores our
-    blocksize, yet its callback writes a whole block at once. sounddevice's
-    default 'high' latency is the device's, snapshotted when PortAudio was
-    initialised; for a Bluetooth hands-free mic seen right at launch that was
-    ~30 ms with a small IO buffer, so the ring was 1024 frames under a
-    1280-frame block: every callback overflowed and dropped 256 frames (20%),
-    ~10 overflows a second for days. Asking for at least one chunk's worth
-    of latency makes the ring at least two chunks whatever the device says;
-    a device whose own high latency is larger keeps it."""
+    PortAudio's blocking read buffers input in a host-side ring sized from
+    the stream's suggested latency, not from our blocksize, yet the device
+    callback can deliver a whole block at once. sounddevice's default
+    'high' latency is the device's, snapshotted when PortAudio was
+    initialised; for a low-latency device (e.g. a Bluetooth hands-free mic
+    seen right at launch) that ring can be smaller than one 1280-frame
+    block, so every callback overflows and drops frames — ~10 overflows a
+    second, indefinitely. Asking for at least one chunk's worth of latency
+    makes the ring at least two chunks whatever the device says; a device
+    whose own high latency is larger keeps it."""
     floor = chunk / sample_rate
     try:
         high = float(sd.query_devices(kind="input")["default_high_input_latency"])
@@ -55,7 +54,7 @@ def base_latency(chunk: int, sample_rate: int) -> float:
 
 
 def _input_label() -> str:
-    """The default input's name for log lines ("AirPods - Find My"), else its id."""
+    """The default input's name for log lines ("Headset (WH-1000XM4 Hands-Free)"), else its id."""
     with contextlib.suppress(Exception):
         name = devices.default_input_name()
         if name:

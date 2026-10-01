@@ -52,11 +52,12 @@ class Player:
         self._stream = None
         # Streams we've stopped/closed (or that died on their own) are kept
         # alive here for a while instead of being dropped immediately: their
-        # cffi callback closures must outlive PortAudio/CoreAudio's last
-        # start/stop notification, which on CoreAudio can arrive *after*
-        # Pa_CloseStream returns — freeing the closure first segfaults the
-        # CoreAudio IO thread inside ffi_closure_SYSV (seen when AirPods
-        # took over the output mid-sentence).
+        # cffi callback closures must outlive PortAudio's last callback /
+        # finished notification from the host API's audio thread, which can
+        # arrive *after* Pa_CloseStream returns when the device vanished
+        # under the stream — freeing the closure first crashes that thread
+        # inside the cffi trampoline (a Bluetooth headset taking over the
+        # output mid-sentence).
         self._dead: deque = deque(maxlen=8)
         self._queue: deque[np.ndarray] = deque()
         self._lock = threading.Lock()
@@ -101,8 +102,8 @@ class Player:
                 stream = self._open_stream()
             except _PortAudioError as e:
                 # PortAudio's device table goes stale when the default output
-                # device changes mid-session (headphones plugged in, AirPods
-                # connected): opening a new stream then fails with an internal
+                # device changes mid-session (headphones plugged in, a
+                # Bluetooth headset connected): opening a new stream then fails with an internal
                 # error until PortAudio is re-initialised. One retry, routed
                 # through devices.refresh_portaudio so the other registered
                 # Players close first and the generation bump tells the wake

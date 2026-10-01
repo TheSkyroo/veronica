@@ -126,11 +126,13 @@ class VoiceProfile:
                 "clips": self.clips, "embedding": [round(float(v), 6) for v in self.embedding]}
 
     def save(self, path: Path) -> None:
-        """Atomic and private: written to a 0600 temp file, then renamed."""
+        """Atomic and private: written to a temp file, then renamed over the
+        old one. (On Windows the 0600 mode only clears the read-only bit; the
+        profile is private through the user profile directory's ACL.)"""
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(self.to_json(), f)
         os.chmod(tmp, 0o600)
         tmp.replace(path)
@@ -140,7 +142,7 @@ class VoiceProfile:
         if not path.exists():
             return None
         try:
-            d = json.loads(path.read_text())
+            d = json.loads(path.read_text(encoding="utf-8"))
             emb = np.asarray(d["embedding"], dtype=np.float32)
             if d.get("version") != PROFILE_VERSION or emb.ndim != 1 or emb.size == 0:
                 raise ValueError("unexpected profile layout")
