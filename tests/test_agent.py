@@ -854,7 +854,7 @@ def test_system_prompt_has_computer_use_rules():
 from veronica.tools.computer_events import Front
 
 _FINDER = Front(app="File Explorer", bundle_id="explorer.exe", window_title="Desktop", pid=1)
-_SAFARI = Front(app="Microsoft Edge", bundle_id="msedge.exe", window_title="GitHub", pid=2)
+_EDGE = Front(app="Microsoft Edge", bundle_id="msedge.exe", window_title="GitHub", pid=2)
 _SECAGENT = Front(app="Consent UI", bundle_id="consent.exe", window_title="User Account Control", pid=3)
 _PRIVACY = Front(app="Settings", bundle_id="systemsettings.exe",
                  window_title="Privacy & security", pid=4)
@@ -910,7 +910,7 @@ async def test_trust_yes_allows_next_action_in_same_app_without_asking(tmp_home,
 async def test_trust_different_app_asks_again(tmp_home):
     t = _Trust(tmp_home, answers=(True, True))
     await t.click()
-    t.front = _SAFARI
+    t.front = _EDGE
     await t.click(1, 2)
     assert t.asked == ["Click (10, 20)", "Click (1, 2)"]
     assert t.tools == []
@@ -977,7 +977,7 @@ async def test_trust_no_clears_window(tmp_home):
     await t.click()
     res = await t.click(1, 1)                      # trusted, no ask
     assert res.behavior == "allow" and len(t.asked) == 1
-    t.front = _SAFARI
+    t.front = _EDGE
     res = await t.click(2, 2)                      # asks; user says no
     assert res.behavior == "deny" and t.brain.gate._trust_app is None
     t.front = _FINDER
@@ -1081,7 +1081,7 @@ async def test_trust_window_uses_frontmost_and_clock_after_the_yes(tmp_home, cap
 
     async def confirm(summary, detail=""):
         calls.append(summary)
-        t.front = _SAFARI                             # switched while the question was asked
+        t.front = _EDGE                             # switched while the question was asked
         t.now += 20
         return True
 
@@ -1185,7 +1185,7 @@ async def test_computer_gate_other_result_denies_with_text_and_clears_trust(tmp_
     t = _Trust(tmp_home, answers=(True, _Answer("other", "yes, but in Chrome")))
     await t.click()
     assert t.brain.gate._trust_app == "explorer.exe"
-    t.front = _SAFARI
+    t.front = _EDGE
     res = await t.click(1, 2)
     assert res.behavior == "deny"
     assert res.message == "user declined and said: 'yes, but in Chrome'"

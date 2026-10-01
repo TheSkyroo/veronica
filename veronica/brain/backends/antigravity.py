@@ -1,6 +1,6 @@
 r"""Antigravity (`agy` 1.2.7) as a Veronica brain.
 
-How it runs (verified against agy 1.2.7 on macOS, 2026-09-19; the paths
+How it runs (verified against agy 1.2.7 on macOS, 2026-09-19 — recheck on Windows; the paths
 below are under %USERPROFILE% on Windows):
 - One long-lived child in persistent stream mode: `agy --output-format
   stream-json --input-format stream-json --print= ...` (`--print=` with

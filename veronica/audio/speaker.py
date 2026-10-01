@@ -179,7 +179,7 @@ class SpeakerGate:
         self._not_ready_logged = False
         self._error_logged_at = -1e9
         # The last few checks, newest first, for the Settings window (read
-        # from the AppKit thread while checks append from worker threads).
+        # from the UI thread while checks append from worker threads).
         self.recent: deque[dict] = deque(maxlen=RECENT_MAX)
         self._recent_lock = threading.Lock()
 

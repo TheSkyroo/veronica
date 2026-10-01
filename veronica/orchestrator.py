@@ -1204,7 +1204,7 @@ class Orchestrator:
 
     def request_brain_switch(self, name: str) -> None:
         """Menu bar / settings: run the "switch to <name>" turn on the
-        orchestrator loop. Safe to call from the AppKit thread."""
+        orchestrator loop. Safe to call from the UI thread."""
         async def _turn():
             self.player.reset()
             await self._brain_switch_turn(("switch", name))
@@ -1217,7 +1217,7 @@ class Orchestrator:
         if here is not None:
             here.create_task(_turn())                    # called on the loop itself
         elif loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(_turn(), loop)   # the AppKit thread
+            asyncio.run_coroutine_threadsafe(_turn(), loop)   # the UI thread
         else:
             log.warning("brain switch to %s requested before the loop started; ignored", name)
 
