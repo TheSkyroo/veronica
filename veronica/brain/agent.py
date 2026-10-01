@@ -37,11 +37,23 @@ COMPUTER_PREFIX = "mcp__computer__"
 ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
 
 
+# A shell command longer than this isn't read out: hearing "Run Bash:
+# Start-Process explorer.exe shell colon My Computer Folder?" takes so long
+# that the answer often came while she was still asking, and was lost. The
+# full command is on the HUD card either way.
+SPOKEN_COMMAND_MAX = 30
+_SHELL_PREFIXES = ("Bash: ", "PowerShell: ")
+
+
 def confirm_prompt(summary: str) -> str:
     """The spoken question for a tool `summary`: "Click 'Save'?" for a
-    screen action, "Run Bash: ls?" for everything else."""
+    screen action, "Run Bash: ls?" for everything else, and just "Run this
+    command?" for a long shell command."""
     if summary.startswith(ACTION_SUMMARY_PREFIXES):
         return f"{summary}?"
+    for prefix in _SHELL_PREFIXES:
+        if summary.startswith(prefix) and len(summary) - len(prefix) > SPOKEN_COMMAND_MAX:
+            return "Run this command?"
     return f"Run {summary}?"
 
 
