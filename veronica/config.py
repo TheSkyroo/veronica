@@ -18,10 +18,11 @@ log = logging.getLogger("veronica.config")
 # in veronica.brain.backends is the source of truth for everything else.
 BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot", "local")
 
-# The offline brain's defaults: the llama.cpp server and weights the user
-# already keeps on this Mac. Both are plain paths, editable in Settings.
-LOCAL_SERVER_BIN = Path.home() / "Github/sih/manas/runtime/bin/llama-server"
-LOCAL_MODEL = Path.home() / "Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf"
+# The offline brain's defaults: a llama.cpp server and weights kept under
+# Veronica's own folder. Both are plain paths, editable in Settings (point
+# them at an existing llama.cpp release and .gguf instead).
+LOCAL_SERVER_BIN = Path.home() / ".veronica" / "llama" / "llama-server.exe"
+LOCAL_MODEL = Path.home() / ".veronica" / "models" / "granite-4.2-3b-q4_k_m.gguf"
 
 
 class Settings(BaseSettings):
@@ -80,8 +81,8 @@ class Settings(BaseSettings):
     wake_phrases: list[str] = Field(
         default_factory=lambda: ["veronica", "veronika", "hey veronica", "hi veronica"]
     )
-    # macOS input volume floor (0-100): call apps' auto-gain and device
-    # switches keep dropping it (27, 33 seen), which kills far-field wake
+    # Windows microphone level floor (0-100): call apps' auto-gain and
+    # device switches keep dropping it, which kills far-field wake
     # detection. The guard raises it back to this; 0 = off.
     input_volume_floor: int = 85
 
@@ -121,10 +122,6 @@ class Settings(BaseSettings):
     # ahead skips the yes/no for the ONE confirm-class action it produces
     # (never for always-confirm tools, see policy.always_confirm).
     preapprove_by_wording: bool = True
-    # Shortcuts the user has marked safe: `run_shortcut` runs these without
-    # asking. Everything else is confirm-class, so an empty list (the
-    # default) means every shortcut is asked about.
-    shortcut_allowlist: list[str] = Field(default_factory=list)
     # Confirm-class tools the user has approved for good, by ticking them in
     # Settings or answering a confirm with "always". Only the names in
     # policy.AUTO_ALLOWABLE take effect: anything else here is ignored, so a
@@ -137,7 +134,7 @@ class Settings(BaseSettings):
     antigravity_native_tools: bool = True
     copilot_native_tools: bool = True
     # Offline brain (veronica.brain.backends.local): a llama.cpp server on
-    # this Mac. Started lazily, on a port of ours, and never asked to reach
+    # this PC. Started lazily, on a port of ours, and never asked to reach
     # the network.
     local_server_bin: Path = Field(default_factory=lambda: LOCAL_SERVER_BIN)
     local_model: Path = Field(default_factory=lambda: LOCAL_MODEL)
@@ -156,7 +153,7 @@ class Settings(BaseSettings):
 
     # push-to-talk
     ptt_enabled: bool = True
-    ptt_keycode: int = 61   # Right Option
+    ptt_keycode: int = 0xA3   # Right Ctrl (Windows virtual-key code)
     ptt_max_s: int = 30     # hard cap on one held capture (onset wait + recording)
 
     # dictation
@@ -198,9 +195,11 @@ class Settings(BaseSettings):
         return self.home / "memory.db"
 
     @property
-    def gate_socket(self) -> Path:
-        """Unix socket the external brains' processes ask for tool permission on."""
-        return self.home / "gate.sock"
+    def gate_endpoint(self) -> Path:
+        """Where the gate (GateServer) publishes its loopback port and
+        token, for the external brains' processes to ask for tool
+        permission on. Written at start, deleted at stop."""
+        return self.home / "run" / "gate.json"
 
     def backend_dir(self, name: str) -> Path:
         """Per-brain workspace (session id, hook config, hook log); private."""
@@ -301,10 +300,10 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "wake_phrases": EditableField("list", "Wake phrases", "Comma-separated; 'veronica' is recommended."),
     "input_volume_floor": EditableField(
         "int", "Input volume floor",
-        "Raise the Mac's input volume back to this when a call app or device switch lowers it. 0 = off.",
+        "Raise the microphone level back to this when a call app or device switch lowers it. 0 = off.",
         min=0, max=100, restart=False,
     ),
-    "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Option)"),
+    "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Ctrl)"),
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
@@ -331,16 +330,10 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "(never for sending mail, deleting, shutdown, or Enter).",
         restart=False,
     ),
-    "shortcut_allowlist": EditableField(
-        "list", "Shortcuts she may run without asking",
-        "Comma-separated shortcut names, exactly as they're named in Shortcuts. "
-        "Anything not listed still asks first.",
-        restart=False,
-    ),
     "auto_allow_tools": EditableField(
         "list", "Tools she may use without asking",
         "Ticked above. Comma-separated tool names; clear one to start asking again. "
-        "Only the tools listed here can ever be added — sending, screen control and the shell always ask.",
+        "Only the tools listed here can ever be added — sending, screen control, PowerShell and the shell always ask.",
         restart=False,
     ),
     "brain_backend": EditableField(
@@ -377,11 +370,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     ),
     "brain_offline_fallback": EditableField(
         "bool", "Use the local model when offline",
-        "No internet? Answer on the model running on this Mac, and go back when it returns.",
+        "No internet? Answer on the model running on this PC, and go back when it returns.",
         restart=False,
     ),
     "local_server_bin": EditableField(
-        "str", "Local server", "Path to llama-server.", restart=False,
+        "str", "Local server", "Path to llama-server.exe.", restart=False,
     ),
     "local_model": EditableField(
         "str", "Local model", "Path to the .gguf weights she thinks with offline.", restart=False,
@@ -391,7 +384,7 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         min=1024, max=131072, restart=False,
     ),
     "local_port": EditableField(
-        "int", "Local port", "Where the local server listens, on this Mac only.",
+        "int", "Local port", "Where the local server listens, on this PC only.",
         min=1024, max=65535, restart=False,
     ),
 }
@@ -498,8 +491,8 @@ def setup_logging(level: int | None = None) -> logging.Logger:
     fh = RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=5)
     fh.setFormatter(fmt)
     log.addHandler(fh)
-    # When launched from the .app bundle (no controlling terminal), stderr
-    # (logging.StreamHandler's default stream) isn't a TTY: skip the
+    # When launched windowless (pythonw.exe, a Start-menu or login
+    # shortcut), stderr is None or isn't a TTY: skip the
     # StreamHandler so nothing tries to write to a closed/redirected stream,
     # and rely on the log file alone.
     if sys.stderr is not None and sys.stderr.isatty():

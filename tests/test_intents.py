@@ -428,7 +428,7 @@ def test_clause_split_on_danda():
     ("what did I ask you earlier?", "history"), ("history", "history"), ("history dikhao", "history"),
     ("conversation history", "history"),
     # whole-utterance only: never hijack a longer request
-    ("open safari settings", None), ("history of rome", None), ("what did i ask you to buy", None),
+    ("open edge settings", None), ("history of rome", None), ("what did i ask you to buy", None),
     ("settings for the hud", None), ("", None),
 ])
 def test_match_settings_intent(text, expected):
@@ -575,7 +575,7 @@ def test_hinglish_pause_and_continue_phrases_count_as_hinglish():
     ("use gemini", None),
     ("switch to spanish", None),
     ("use a british voice", None),
-    ("now open safari", None),
+    ("now open edge", None),
 ])
 def test_match_brain_intent_tolerates_lead_ins(text, expected):
     assert match_brain_intent(text) == expected

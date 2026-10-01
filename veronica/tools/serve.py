@@ -3,14 +3,16 @@ over stdio for an external brain (Codex/Antigravity/Copilot/Qwen).
 
 This process is a proxy, not an implementation. It advertises the server's
 tools (tools/list is pure, so it is answered from the same server objects
-the app uses) and forwards every tools/call over the gate socket
-(VERONICA_GATE_SOCK): the app asks the same question the in-process gate
-would — policy, trust window, voice confirm — and, when it allows, runs the
-tool ITSELF and sends the content back. Nothing here touches the screen,
-the keyboard or Apple Events, because macOS attributes what this process
-does to the CLI that spawned it, and that binary holds none of Veronica's
-TCC grants. Running the tool in the app is also why a timer set from an
-external brain announces like any other.
+the app uses) and forwards every tools/call to the gate (GateServer, on
+the loopback port and token named by the endpoint file in $VERONICA_GATE):
+the app asks the same question the in-process gate would — policy, trust
+window, voice confirm — and, when it allows, runs the tool ITSELF and sends
+the content back. Nothing here touches the screen, the keyboard, the
+clipboard or Outlook: this process belongs to the CLI that spawned it and
+has none of the app's state (the HUD, the screenshot handling, the
+timers). Running the
+tool in the app is also why a timer set from an external brain announces
+like any other.
 
 stdout is the protocol; log to stderr only."""
 import asyncio

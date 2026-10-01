@@ -1,7 +1,7 @@
-"""`LocalBrain`: llama.cpp on this Mac, for when there is no internet (or
+"""`LocalBrain`: llama.cpp on this PC, for when there is no internet (or
 the user just asks for it). Nothing leaves the machine.
 
-The server (`llama-server`) is started lazily on the first turn — a model
+The server (`llama-server.exe`) is started lazily on the first turn — a model
 load costs seconds — and left running until `close()` or ten idle minutes.
 Turns are streamed `/v1/chat/completions` calls whose deltas feed the same
 `SentenceSplitter` the other brains use, so TTS overlaps identically.
@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+from veronica.brain.backends import winproc
 from veronica.brain.base import BrainUnavailable
 from veronica.brain.gate import ToolGate
 from veronica.brain.prompts import system_prompt
@@ -51,12 +52,12 @@ IDLE_SHUTDOWN_S = 600.0
 MAX_TOOL_ROUNDS = 4
 
 # A small local model reaches for the most general tool it can see when
-# nothing fits, which means an out-of-nowhere "Run AppleScript…?" confirm
+# nothing fits, which means an out-of-nowhere "Run PowerShell…?" confirm
 # for a question like "what's the battery at". These stay out of its
 # catalogue: every one is either a catch-all or needs judgement the bigger
 # brains have. Hiding them changes nothing about the gate — they are simply
 # not offered.
-HIDDEN_FROM_LOCAL = frozenset({"mcp__system__applescript"})
+HIDDEN_FROM_LOCAL = frozenset({"mcp__system__powershell"})
 HIDDEN_SERVERS_FOR_LOCAL = frozenset({"computer"})
 # History budget. Rough on purpose: a token is ~3.5 characters of English,
 # and the system prompt, the 40-odd tool schemas and the reply need most of
@@ -209,9 +210,11 @@ class LocalBrain:
         ]
 
     async def _subprocess_spawn(self, argv: list[str]):
+        # No console window: Veronica usually runs without one, and Windows
+        # would otherwise open one for the server.
         return await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL, creationflags=winproc.no_window_flags(),
         )
 
     async def _healthy(self, timeout: float) -> bool:
@@ -317,7 +320,7 @@ class LocalBrain:
             facts = self._memory.facts_for_prompt(self.s.memory_facts_max)
             recent = [(heard, reply) for _ts, heard, reply in self._memory.recent(self.s.memory_recent_turns)]
         return system_prompt(dt.date.today(), facts, recent) + (
-            " You are running offline on this Mac, so you cannot search the web or open "
+            " You are running offline on this PC, so you cannot search the web or open "
             "a page — say so instead of guessing. Use a tool only when the request needs "
             "one; otherwise just answer."
         )

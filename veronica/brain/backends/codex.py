@@ -1,6 +1,8 @@
 """Codex (`codex` 0.155.1) as a Veronica brain.
 
-How it runs (verified on this Mac, 2026-09-19):
+How it runs (verified against codex 0.155 on macOS, 2026-09-19; the
+Windows specifics below follow the same contract and are noted where they
+differ):
 - One `codex exec --json` child per turn (`per_turn`), the prompt last
   on the command line, stdin closed (a stdin pipe makes it wait on
   "Reading additional input from stdin..."). The stream is JSONL:
@@ -9,7 +11,8 @@ How it runs (verified on this Mac, 2026-09-19):
   The next turn resumes with `codex exec resume <thread_id>` (which
   takes no `-C`: it reuses the session's recorded cwd, our workspace).
 - The system prompt goes in as `-c developer_instructions=<TOML basic
-  string>`; there is no prompt file to write. `include_permissions_
+  string>`; there is no prompt file to write. The whole prompt rides on
+  the command line, well inside Windows' 32 767-character limit. `include_permissions_
   instructions=false` keeps Codex from explaining its own approvals.
 - Approvals are off (`approval_policy="never"`) and the sandbox is
   `workspace-write` with `brain_cwd` as a writable root, so our hook is
@@ -21,9 +24,10 @@ How it runs (verified on this Mac, 2026-09-19):
   the decision JSON `hook.emit` prints; a deny blocks the command with
   our reason. With native tools OFF the sandbox is `read-only`.
 - Canary: the hook sees `tool_input.command = "echo x"` while the
-  stream's `command_execution.command` is `/bin/zsh -lc 'echo x'`, so
-  `canary_matches` unwraps the `<shell> -lc <cmd>` wrapper (falling back
-  to substring) instead of the base's equality. File edits: the hook
+  stream's `command_execution.command` wraps it in the shell Codex used
+  (`powershell.exe -Command 'echo x'` on Windows, `bash -lc 'echo x'` in
+  Git Bash), so `canary_matches` unwraps `<shell> -Command|-c|/c <cmd>`
+  (falling back to substring) instead of the base's equality. File edits: the hook
   gets `tool_name:"apply_patch"` with the whole patch as
   `tool_input.command` (logged as the key, confirmed as an Edit) while
   the stream shows a `file_change` item with `changes:[{path,kind}]`;
@@ -37,11 +41,12 @@ How it runs (verified on this Mac, 2026-09-19):
   (`server`, `tool`, `arguments`) and are gated inside tools.serve.
 """
 import json
-import shlex
+import re
 import sys
 from pathlib import Path
 
 from veronica.brain import hook
+from veronica.brain.backends import winproc
 from veronica.brain.backends.cli import (
     CliBrain,
     Done,
@@ -65,15 +70,36 @@ def toml_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False).replace("\x7f", "\\u007F")
 
 
+# `<shell> [-NoProfile ...] -Command <cmd>`, `cmd.exe /c <cmd>`, `bash -lc <cmd>`:
+# the shell (bare or quoted path), any switches, then the one that takes the
+# command, then the command itself.
+_SHELL_WRAP = re.compile(
+    r"""^\s*(?:"(?P<qshell>[^"]*)"|'(?P<sshell>[^']*)'|(?P<shell>\S+))"""
+    r"(?:\s+-(?!command\b|c\b|lc\b|lic\b|ic\b)\w+)*"
+    r"\s+(?:-command|-c|-lc|-lic|-ic|/c)\s+(?P<cmd>.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SHELLS = ("powershell", "pwsh", "cmd", "bash", "sh", "zsh")
+
+
 def unwrap_shell(command: str) -> str:
-    """`/bin/zsh -lc 'echo hi'` -> `echo hi`; anything else unchanged."""
-    try:
-        argv = shlex.split(command)
-    except ValueError:
+    """`powershell.exe -NoProfile -Command 'echo hi'` -> `echo hi` (and the
+    same for pwsh, `cmd.exe /c`, `bash -lc`); anything else unchanged.
+    One layer of matching quotes around the command is dropped (a
+    PowerShell '...' also gives back its doubled quotes)."""
+    m = _SHELL_WRAP.match(command)
+    if not m:
         return command
-    if len(argv) == 3 and argv[1] in ("-lc", "-c", "-lic", "-ic"):
-        return argv[2]
-    return command
+    shell = m.group("qshell") or m.group("sshell") or m.group("shell")
+    name = shell.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    if name not in _SHELLS:
+        return command
+    inner = m.group("cmd")
+    if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in "'\"":
+        quote, inner = inner[0], inner[1:-1]
+        if quote == "'" and name in ("powershell", "pwsh"):
+            inner = inner.replace("''", "'")
+    return inner
 
 
 class CodexBrain(CliBrain):
@@ -90,7 +116,7 @@ class CodexBrain(CliBrain):
             key = f"mcp_servers.veronica-{server}"
             out += ["-c", f"{key}.command={toml_str(sys.executable)}",
                     "-c", f'{key}.args=["-m","veronica.tools.serve","{server}"]',
-                    "-c", f"{key}.env.VERONICA_GATE_SOCK={toml_str(str(self.s.gate_socket))}",
+                    "-c", f"{key}.env.VERONICA_GATE={toml_str(str(self.s.gate_endpoint))}",
                     "-c", f'{key}.env.VERONICA_BRAIN="codex"',
                     "-c", f"{key}.env.VERONICA_HOOK_LOG={toml_str(str(self.hook_log))}",
                     # Codex 0.155 wants its own approval per MCP tool call, and with
@@ -126,9 +152,10 @@ class CodexBrain(CliBrain):
     # -- workspace ----------------------------------------------------------------
     def hook_command(self) -> str:
         # The child inherits VERONICA_* from us, but the flags make the hook
-        # independent of that.
-        return (f"{sys.executable} -m veronica.brain.hook codex --sock {self.s.gate_socket} "
-                f"--log {self.hook_log}")
+        # independent of that. Codex hands the string to a shell, so it is
+        # written to read the same in cmd.exe and PowerShell.
+        return winproc.neutral_command([sys.executable, "-m", "veronica.brain.hook", "codex",
+                                        "--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log)])
 
     def prepare_workspace(self, prompt_text: str, native: bool) -> None:
         if not native:
@@ -142,7 +169,7 @@ class CodexBrain(CliBrain):
         # gate's answer can never outlive it.
         hooks = {"hooks": {"PreToolUse": [{"matcher": "*", "timeoutSec": HOOK_TIMEOUT_S, "hooks": [
             {"type": "command", "command": self.hook_command(), "timeout": HOOK_TIMEOUT_S}]}]}}
-        (d / "hooks.json").write_text(json.dumps(hooks, indent=2) + "\n")
+        (d / "hooks.json").write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
 
     # -- stream -------------------------------------------------------------------
     def native_key(self, tool: str, input: dict) -> str:

@@ -1,15 +1,23 @@
-"""The Settings window: a normal titled NSWindow hosting a WKWebView that
-loads `index.html`, wired to `SettingsBridge` with a script-message bridge.
+"""The Settings window: a normal titled pywebview (WebView2) window loading
+`index.html`, wired to `SettingsBridge` through a js_api object.
 
-JS → Python: `window.webkit.messageHandlers.veronica.postMessage({id, cmd,
-args})` lands in `_on_message` (main thread), which calls `bridge.handle`
-and answers with `window.settings.reply(id, result)`. Long commands
-(`LONG_COMMANDS`) run on a worker via `bridge.run_thread` and reply when
-done. Python → JS: `push_state(state)` → `window.settings.state(json)`.
+JS → Python: settings.js calls `window.pywebview.api.handle(id, cmd, args)`;
+pywebview runs that on one of its own threads, which hops onto the UI thread
+(`_on_message`) so commands run in order, one at a time, as they did on the
+old AppKit main thread. `bridge.handle` answers and the reply goes back as
+`window.settings.reply(id, result)`. Long commands (`LONG_COMMANDS`) run on a
+worker via `bridge.run_thread` and reply when done. Python → JS:
+`push_state(state)` → `window.settings.state(json)`.
 
-Same lazy-PyObjC/factory shape as `HudWindow`: the module imports without
-AppKit/WebKit, `webview_factory`/`window_factory` let tests pass fakes, and
-JS is queued until the page has finished loading (`_pending_js`).
+The window is created on first `show()` (webview.create_window is allowed
+once webview.start() is running) — or up front, hidden, with
+`create_hidden()` when the app needs it as the GUI loop's first window.
+Closing it only hides it, so it's reused for the app's life; `close()` (on
+quit) really destroys it.
+
+Same factory shape as `HudWindow`: the module imports without pywebview,
+`window_factory` lets tests pass a fake, and JS is queued until the page has
+finished loading (`_pending_js`).
 """
 from __future__ import annotations
 
@@ -18,18 +26,23 @@ import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from importlib.resources import files
+from pathlib import Path
 
 from veronica.config import Settings
-from veronica.ui.hud import _main_thread
+from veronica.ui import win32
+from veronica.ui.dispatch import on_ui_thread
 
 log = logging.getLogger("veronica.ui.settings")
 
 TITLE = "Veronica Settings"
 WIDTH, HEIGHT = 720, 520
-MESSAGE_HANDLER = "veronica"
-#: Commands that may block (git fetch/pull, build): run off the main thread.
+MIN_SIZE = (560, 400)
+BACKGROUND = "#080a0f"
+#: Commands that may block (git fetch/pull, build): run off the UI thread.
 LONG_COMMANDS = frozenset({"check_update", "update_now"})
 TABS = ("general", "voice", "listening", "briefings", "brain", "history", "about")
+
+_main_thread = on_ui_thread
 
 
 def _thread(fn: Callable[[], None]) -> None:
@@ -37,174 +50,138 @@ def _thread(fn: Callable[[], None]) -> None:
 
 
 def _plain(obj):
-    """NSDictionary/NSArray/NSString from a WKScriptMessage → plain Python
-    (json-able, and what the bridge's coercion expects)."""
+    """A message body as the bridge's coercion expects it: plain, json-able
+    dicts/lists/strs (pywebview already hands us those; mapping/sequence
+    look-alikes are normalised too)."""
     if isinstance(obj, Mapping):
         return {str(k): _plain(v) for k, v in obj.items()}
     if isinstance(obj, bytes):
         return obj.decode("utf-8", "replace")
     if isinstance(obj, str):
-        return str(obj)   # objc.pyobjc_unicode → plain str
+        return str(obj)
     if isinstance(obj, Sequence):
         return [_plain(v) for v in obj]
     return obj
 
 
-def _make_message_handler_class():
-    """Lazily build the WKScriptMessageHandler PyObjC class (module-level
-    import of Foundation would break importing this file without PyObjC)."""
-    import objc
-    from Foundation import NSObject
+class _SettingsApi:
+    """The js_api object settings.js talks to. Only public methods are
+    exposed to the page."""
 
-    class _SettingsMessageHandler(NSObject):
-        def initWithWindow_(self, window):
-            self = objc.super(_SettingsMessageHandler, self).init()
-            if self is None:
-                return None
-            self._window = window
-            return self
+    def __init__(self, owner: SettingsWindow) -> None:
+        self._owner = owner
 
-        def userContentController_didReceiveScriptMessage_(self, ucc, message):
-            try:
-                body = message.body()
-            except Exception:
-                log.warning("bad script message", exc_info=True)
-                return
-            self._window._on_message(body)
-
-    return _SettingsMessageHandler
+    def handle(self, id, cmd, args=None) -> None:  # noqa: A002 — the page's own field name
+        body = {"id": id, "cmd": cmd, "args": args}
+        self._owner._hop(lambda: self._owner._on_message(body))
 
 
-def _make_nav_delegate_class():
-    import objc
-    from Foundation import NSObject
+def _real_window(s: Settings, owner: SettingsWindow, hidden: bool):
+    import webview
 
-    class _SettingsNavDelegate(NSObject):
-        def initWithWindow_(self, window):
-            self = objc.super(_SettingsNavDelegate, self).init()
-            if self is None:
-                return None
-            self._window = window
-            return self
-
-        def webView_didFinishNavigation_(self, webView, nav):
-            self._window._on_loaded()
-
-    return _SettingsNavDelegate
-
-
-def _make_window_delegate_class():
-    import objc
-    from Foundation import NSObject
-
-    class _SettingsWindowDelegate(NSObject):
-        def initWithWindow_(self, window):
-            self = objc.super(_SettingsWindowDelegate, self).init()
-            if self is None:
-                return None
-            self._window = window
-            return self
-
-        def windowShouldClose_(self, sender):
-            # Hide, never destroy: the window is reused for the app's life.
-            self._window.hide()
-            return False
-
-    return _SettingsWindowDelegate
-
-
-def _real_webview(s: Settings, owner: SettingsWindow):
-    import AppKit
-    import Foundation
-    import WebKit
-
-    cfg = WebKit.WKWebViewConfiguration.alloc().init()
-    handler_cls = _make_message_handler_class()
-    owner._handler = handler_cls.alloc().initWithWindow_(owner)
-    cfg.userContentController().addScriptMessageHandler_name_(owner._handler, MESSAGE_HANDLER)
-    web = WebKit.WKWebView.alloc().initWithFrame_configuration_(
-        Foundation.NSMakeRect(0, 0, WIDTH, HEIGHT), cfg)
-    web.setValue_forKey_(False, "drawsBackground")
-    web.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
-    nav_cls = _make_nav_delegate_class()
-    owner._nav_delegate = nav_cls.alloc().initWithWindow_(owner)
-    web.setNavigationDelegate_(owner._nav_delegate)
     html = files("veronica.ui.settings") / "index.html"
-    url = Foundation.NSURL.fileURLWithPath_(str(html))
-    web.loadFileURL_allowingReadAccessToURL_(url, url.URLByDeletingLastPathComponent())
-    return web
+    window = webview.create_window(
+        TITLE, url=Path(str(html)).as_uri(), js_api=owner.api, width=WIDTH, height=HEIGHT,
+        min_size=MIN_SIZE, background_color=BACKGROUND, hidden=hidden, text_select=True,
+    )
+    # pywebview fires these on its own threads (closing on the GUI thread,
+    # where the handler's return value decides whether the close goes ahead).
+    window.events.loaded += lambda: owner._hop(owner._on_loaded)
+    window.events.closing += owner._on_closing
+    window.events.closed += owner._on_closed
+    return window
 
 
-def _real_window(s: Settings, web, owner: SettingsWindow):
-    import AppKit
-    import Foundation
-
-    style = (AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable
-             | AppKit.NSWindowStyleMaskMiniaturizable | AppKit.NSWindowStyleMaskResizable)
-    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-        Foundation.NSMakeRect(0, 0, WIDTH, HEIGHT), style, AppKit.NSBackingStoreBuffered, False)
-    win.setTitle_(TITLE)
-    win.setReleasedWhenClosed_(False)
-    win.setLevel_(AppKit.NSNormalWindowLevel)
-    win.setMinSize_(Foundation.NSMakeSize(560, 400))
-    win.setBackgroundColor_(AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.03, 0.04, 0.06, 1.0))
-    try:
-        win.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameDarkAqua))
-    except Exception:  # cosmetic: the page is dark regardless
-        log.debug("dark appearance unavailable", exc_info=True)
-    win.setContentView_(web)
-    delegate_cls = _make_window_delegate_class()
-    owner._win_delegate = delegate_cls.alloc().initWithWindow_(owner)   # NSWindow.delegate is weak
-    win.setDelegate_(owner._win_delegate)
-    win.center()
-    return win
-
-
-def _activate_app() -> None:
-    import AppKit
-
-    app = AppKit.NSApp
-    if app is not None:
-        app.activateIgnoringOtherApps_(True)
+def _activate_window(window) -> None:
+    """Bring the (just shown) window to the front, best effort."""
+    hwnd = win32.hwnd_of(window, timeout=5.0)
+    if hwnd is not None:
+        win32.bring_to_front(hwnd)
 
 
 class SettingsWindow:
-    def __init__(self, settings: Settings, bridge, *, webview_factory=None, window_factory=None,
+    def __init__(self, settings: Settings, bridge, *, window_factory=None,
                  main: Callable[[Callable[[], None]], None] = _main_thread,
-                 activate: Callable[[], None] = _activate_app) -> None:
+                 activate: Callable[[object], None] = _activate_window) -> None:
         self.s = settings
         self._bridge = bridge
         self._main = main
         self._activate = activate
+        self._factory = window_factory or _real_window
         self._run_thread = getattr(bridge, "run_thread", None) or _thread
-        self.available = False
+        #: False once creating the window has failed (no pywebview/WebView2).
+        self.available = True
         self._loaded = False
+        self._quitting = False
         self._pending_js: list[str] = []
-        # Strong refs for the PyObjC delegates/handlers (AppKit holds them weakly).
-        self._handler = self._nav_delegate = self._win_delegate = None
-        self._web = self._window = None
-        try:
-            self._web = (webview_factory or _real_webview)(settings, self)
-            self._window = (window_factory or _real_window)(settings, self._web, self)
-            self.available = True
-        except Exception:
-            log.warning("settings window unavailable", exc_info=True)
-            self._web = self._window = None
+        self._window = None
+        self.api = _SettingsApi(self)
         try:
             bridge.on_state_changed = self.push_state
         except Exception:
             log.warning("failed to attach state listener", exc_info=True)
 
+    # -- window lifecycle -----------------------------------------------------------
+    def _ensure_window(self, hidden: bool) -> bool:
+        """Create the window if it doesn't exist yet. True if it was created
+        just now (shown already unless `hidden`)."""
+        if self._window is not None or not self.available:
+            return False
+        self._loaded = False
+        try:
+            self._window = self._factory(self.s, self, hidden)
+        except Exception:
+            log.warning("settings window unavailable", exc_info=True)
+            self._window = None
+            self.available = False
+            self._pending_js = []
+            return False
+        return True
+
+    def create_hidden(self) -> None:
+        """Create the window now, hidden (before webview.start(): the GUI
+        loop needs at least one window to start with)."""
+        self._ensure_window(hidden=True)
+
+    def _on_closing(self):
+        """The user closed the window: hide it instead (returning False
+        cancels the close), unless the app is quitting."""
+        if self._quitting:
+            return True
+        self._hop(self.hide)
+        return False
+
+    def _on_closed(self) -> None:
+        def _do() -> None:
+            self._window = None
+            self._loaded = False
+            self._pending_js = []
+        self._hop(_do)
+
+    def close(self) -> None:
+        """Quit: destroy the window for good."""
+        self._quitting = True
+
+        def _do() -> None:
+            window, self._window = self._window, None
+            self._pending_js = []
+            if window is not None:
+                try:
+                    window.destroy()
+                except Exception:
+                    log.warning("failed to destroy settings window", exc_info=True)
+        self._hop(_do)
+
     # -- JS dispatch / page load --------------------------------------------------
     def _js(self, js: str) -> None:
-        """Main thread only. Queued until index.html has finished loading."""
-        if not self.available:
+        """UI thread only. Queued until index.html has finished loading."""
+        if self._window is None:
             return
         if not self._loaded:
             self._pending_js.append(js)
             return
         try:
-            self._web.evaluateJavaScript_completionHandler_(js, None)
+            self._window.run_js(js)
         except Exception:
             log.warning("settings JS eval failed", exc_info=True)
 
@@ -218,12 +195,12 @@ class SettingsWindow:
             self._js(js)
 
     def _hop(self, fn: Callable[[], None]) -> None:
-        """Run `fn` on the main thread; never raises (callers include the
+        """Run `fn` on the UI thread; never raises (callers include the
         bridge's worker threads, which must not die on a UI hiccup)."""
         try:
             self._main(fn)
         except Exception:
-            log.warning("settings main-thread hop failed", exc_info=True)
+            log.warning("settings UI-thread hop failed", exc_info=True)
 
     # -- Python → JS ------------------------------------------------------------------
     def push_state(self, state: dict) -> None:
@@ -246,8 +223,7 @@ class SettingsWindow:
 
     # -- JS → Python ------------------------------------------------------------------
     def _on_message(self, body) -> None:
-        """Called by the script-message handler on the main thread with the
-        posted `{id, cmd, args}`."""
+        """Runs on the UI thread with the page's `{id, cmd, args}`."""
         if not isinstance(body, Mapping):
             log.warning("ignoring non-dict settings message: %r", body)
             return
@@ -282,9 +258,13 @@ class SettingsWindow:
         tab = tab if tab in TABS else "general"
 
         def _do() -> None:
+            created = self._ensure_window(hidden=False)
+            if self._window is None:
+                return
             try:
-                self._window.makeKeyAndOrderFront_(None)
-                self._activate()
+                if not created:
+                    self._window.show()
+                self._activate(self._window)
             except Exception:
                 log.warning("failed to show settings window", exc_info=True)
             self._js("window.settings.select(" + json.dumps(tab) + ")")
@@ -297,12 +277,11 @@ class SettingsWindow:
         self._hop(_do)
 
     def hide(self) -> None:
-        if not self.available:
-            return
-
         def _do() -> None:
+            if self._window is None:
+                return
             try:
-                self._window.orderOut_(None)
+                self._window.hide()
             except Exception:
                 log.warning("failed to hide settings window", exc_info=True)
         self._hop(_do)

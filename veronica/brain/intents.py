@@ -124,7 +124,7 @@ def match_language_intent(text: str) -> LanguageMode | None:
 
 
 # Settings window / history tab / version / self-update (Batch D). All
-# whole-utterance only (no clause split): "open safari settings", "history
+# whole-utterance only (no clause split): "open edge settings", "history
 # of rome" and "update my calendar" must stay with the brain.
 SettingsTab = Literal["general", "history"]
 
@@ -155,7 +155,7 @@ _UPDATE_PHRASES_HINGLISH = frozenset({"apna update karo", "update karo"})
 def match_settings_intent(text: str) -> SettingsTab | None:
     """"open settings" / "settings kholo" -> "general"; "show history" /
     "what did i ask you" / "history dikhao" -> "history". Whole-utterance
-    candidates only, so "open safari settings" is None."""
+    candidates only, so "open edge settings" is None."""
     for candidate in _candidates_for(normalize(text)):
         if candidate in _SETTINGS_PHRASES:
             return _SETTINGS_PHRASES[candidate]
