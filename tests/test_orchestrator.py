@@ -5621,3 +5621,22 @@ def test_ptt_long_hold_still_finishes_on_release():
     o._ptt_capturing = True
     o.ptt_end()
     assert o.recorder.finish_calls == 1
+
+
+# -- "open X" without the brain -----------------------------------------------------------
+
+async def test_open_this_pc_is_handled_locally(monkeypatch):
+    opened = []
+    monkeypatch.setattr(system_tools_mod, "open_locally", lambda name: opened.append(name) or "this pc")
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["Open this PC."])
+    await o.one_turn()
+    assert opened == ["this pc"]
+    assert o.brain.asked == []                     # no brain round trip
+    assert o.tts.said == ["Opening it."]
+
+
+async def test_open_something_unknown_goes_to_the_brain(monkeypatch):
+    monkeypatch.setattr(system_tools_mod, "open_locally", lambda name: None)
+    o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["open my tax spreadsheet"])
+    await o.one_turn()
+    assert o.brain.asked == ["open my tax spreadsheet"]

@@ -235,6 +235,25 @@ def test_parse_errors_and_limits(tmp_path):
     assert b.parse(json.dumps({"type": "something.new"})) == []
 
 
+def test_config_warnings_are_not_turn_errors(tmp_path, caplog):
+    """Seen on Windows: a stray entry in the user's ~/.codex/config.toml made
+    Codex emit this as an `error` event on every turn, and every turn
+    failed. It's a warning; the turn goes on."""
+    b, _ = make(tmp_path)
+    msg = ("Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n"
+           "  user (C:\\Users\\lenovo\\.codex\\config.toml): `mcp_servers.code-review-graph.type` is ignored.")
+    with caplog.at_level("WARNING", logger="veronica.brain"):
+        assert b.parse(json.dumps({"type": "error", "message": msg})) == []
+        assert b.parse(json.dumps({"type": "item.completed",
+                                   "item": {"id": "i", "type": "error", "message": msg}})) == []
+    assert "unrecognized configuration setting" in caplog.text
+    # the hook-trust bypass notice stays silent
+    bypass = "`--dangerously-bypass-hook-trust` is enabled"
+    caplog.clear()
+    assert b.parse(json.dumps({"type": "error", "message": bypass})) == []
+    assert caplog.text == ""
+
+
 def test_hook_side_maps_codex_bash_payload(tmp_path):
     """The verified PreToolUse payload: tool_name "Bash" with a string command."""
     assert hook.canonical_tool("codex", "Bash", {"command": "echo canary-ok"}) == ("Bash", {"command": "echo canary-ok"})
