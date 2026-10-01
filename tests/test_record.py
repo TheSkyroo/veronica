@@ -888,3 +888,13 @@ def test_release_to_vad_is_ignored_outside_hold_captures(monkeypatch):
     r.arm(hold=False)
     r.release_to_vad(wait_s=5)
     assert r._to_vad_wait_s is None
+
+
+async def test_min_speech_override_accepts_a_short_answer(monkeypatch):
+    """A crisp "yes" (here 2 frames = 60 ms of speech) is below the usual
+    floor but must count when confirm() asks for a short answer."""
+    r = make("..ss..........", monkeypatch, min_speech_ms=300)
+    assert await r.capture(max_s=1) is None                    # the usual floor drops it
+    r = make("..ss..........", monkeypatch, min_speech_ms=300)
+    pcm = await r.capture(max_s=1, min_speech_ms=60)
+    assert pcm is not None
