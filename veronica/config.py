@@ -17,6 +17,7 @@ log = logging.getLogger("veronica.config")
 # The brains Veronica can run on, in the user's default order. The registry
 # in veronica.brain.backends is the source of truth for everything else.
 BRAIN_BACKENDS: tuple[str, ...] = ("codex", "antigravity", "claude", "copilot", "local")
+LISTEN_MODES: tuple[str, ...] = ("always", "ptt")
 
 # The offline brain's defaults: a llama.cpp server and weights kept under
 # Veronica's own folder. Both are plain paths, editable in Settings (point
@@ -154,9 +155,20 @@ class Settings(BaseSettings):
     # first; the block is still byte-capped on top of this (brain/prompts.py).
     memory_facts_max: int = 40
 
-    # push-to-talk
+    # listening: "always" = the wake word is listened for whenever she's idle
+    # (push-to-talk works too); "ptt" = the mic stays closed until the
+    # push-to-talk hotkey is held (no wake word, no follow-up window).
+    listen_mode: str = "always"
+    # Talking to her while she's busy with something (wake word or
+    # push-to-talk): True = the new request waits its turn and runs after
+    # the current one (stop / hold on / "…instead" still interrupt);
+    # False = it interrupts and replaces the current one.
+    queue_requests: bool = True
+
+    # push-to-talk: a held hotkey — modifiers + key ("win+space", "ctrl+alt+p")
+    # or a single key ("right_ctrl"); see veronica.audio.hotkey.parse_hotkey.
     ptt_enabled: bool = True
-    ptt_keycode: int = 0xA3   # Right Ctrl (Windows virtual-key code)
+    ptt_hotkey: str = "win+space"
     ptt_max_s: int = 30     # hard cap on one held capture (onset wait + recording)
 
     # dictation
@@ -173,6 +185,13 @@ class Settings(BaseSettings):
     hud_mini_height: int = 72
     hud_particles: int = 4000   # orb particle count (live-editable)
     hud_intensity: float = 1.0  # orb glow/brightness multiplier (live-editable)
+
+    @field_validator("listen_mode")
+    @classmethod
+    def _known_listen_mode(cls, v: str) -> str:
+        if v not in LISTEN_MODES:
+            raise ValueError(f"listen_mode must be one of {', '.join(LISTEN_MODES)}; got {v!r}")
+        return v
 
     @field_validator("brain_backend")
     @classmethod
@@ -306,7 +325,20 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "Raise the microphone level back to this when a call app or device switch lowers it. 0 = off.",
         min=0, max=100, restart=False,
     ),
-    "ptt_enabled": EditableField("bool", "Push-to-talk (hold Right Ctrl)"),
+    "listen_mode": EditableField(
+        "choice", "Listening mode",
+        "always: she listens for the wake word whenever she's idle (push-to-talk works too). "
+        "ptt: the microphone stays off until you hold the push-to-talk keys.",
+        choices=LISTEN_MODES, restart=False),
+    "queue_requests": EditableField(
+        "bool", "Queue requests made while she's busy",
+        "On: a new request waits and runs after the current one (say stop, hold on, or "
+        "'…instead' to interrupt). Off: a new request replaces the current one.",
+        restart=False),
+    "ptt_enabled": EditableField("bool", "Push-to-talk (hold the push-to-talk keys)"),
+    "ptt_hotkey": EditableField(
+        "str", "Push-to-talk keys",
+        "Hold to talk: modifiers + key like win+space or ctrl+alt+p, or one key like right_ctrl."),
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),

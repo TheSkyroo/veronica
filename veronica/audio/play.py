@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+import time
 from collections import deque
 
 import numpy as np
@@ -49,6 +50,7 @@ class Player:
         self.sample_rate = sample_rate
         self.blocksize = blocksize
         self._stopped = False
+        self._paused = False     # pause(): the callback plays silence, the queue waits
         self._stream = None
         # Streams we've stopped/closed (or that died on their own) are kept
         # alive here for a while instead of being dropped immediately: their
@@ -79,6 +81,22 @@ class Player:
     def reset(self) -> None:
         """Clear a previous stop() so new playback is accepted."""
         self._stopped = False
+        self._paused = False
+
+    def pause(self) -> None:
+        """Hold playback where it is: the stream plays silence and whatever
+        is queued stays queued (play() keeps waiting, without timing out)
+        until resume(). Used while she listens to a request made mid-task."""
+        with self._lock:
+            self._paused = True
+
+    def resume(self) -> None:
+        with self._lock:
+            self._paused = False
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     # -- stream lifecycle -------------------------------------------------
     def _open_stream(self):
@@ -170,6 +188,9 @@ class Player:
     def _cb(self, outdata, frames, time_info, status) -> None:
         out = outdata[:, 0] if outdata.ndim > 1 else outdata
         with self._lock:
+            if self._paused:
+                out[:] = 0.0
+                return
             n = 0
             while n < frames and self._queue:
                 chunk = self._queue[0]
@@ -206,7 +227,7 @@ class Player:
             self._drained.clear()
             self._queue.append(faded)
         timeout = len(faded) / self.sample_rate + self._timeout_margin_s
-        drained = await asyncio.to_thread(self._drained.wait, timeout)
+        drained = await asyncio.to_thread(self._wait_drained, timeout)
         active = getattr(stream, "active", True)
         if not drained or not active:
             with self._lock:
@@ -230,8 +251,21 @@ class Player:
                 self._close_stream_obj(stream)
             return
 
+    def _wait_drained(self, timeout: float) -> bool:
+        """_drained.wait(timeout), except time spent paused doesn't count:
+        a long pause must not look like a dead device."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._drained.wait(min(0.1, max(0.0, deadline - time.monotonic()))):
+                return True
+            if self._paused:
+                deadline = time.monotonic() + timeout
+            elif time.monotonic() >= deadline:
+                return False
+
     def stop(self) -> None:
         self._stopped = True
+        self._paused = False
         with self._lock:
             self._queue.clear()
         self._drained.set()

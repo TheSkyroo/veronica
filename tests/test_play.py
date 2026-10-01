@@ -453,3 +453,48 @@ async def test_dead_and_closed_streams_are_kept_alive_briefly(monkeypatch):
     with contextlib.suppress(BaseException):
         await task
     assert second in p._dead and p._dead.maxlen == 8
+
+
+def test_pause_plays_silence_and_keeps_the_queue():
+    from veronica.audio.play import Player
+
+    p = Player(sample_rate=1000)
+    p._queue.append(np.ones(8, np.float32))
+    p._drained.clear()
+    p.pause()
+    out = np.full((4, 1), 9.0, np.float32)
+    p._cb(out, 4, None, None)
+    assert (out == 0).all() and len(p._queue[0]) == 8   # nothing consumed while paused
+    assert not p._drained.is_set()
+    p.resume()
+    p._cb(out, 4, None, None)
+    assert (out == 1).all() and len(p._queue[0]) == 4
+
+
+def test_wait_drained_does_not_time_out_while_paused():
+    import threading
+    import time
+
+    from veronica.audio.play import Player
+
+    p = Player()
+    p._drained.clear()
+    p.pause()
+    threading.Timer(0.35, lambda: (p.resume(), p._drained.set())).start()
+    t0 = time.monotonic()
+    assert p._wait_drained(0.1) is True                 # 0.1 s budget, but paused for 0.35 s
+    assert time.monotonic() - t0 >= 0.3
+    p._drained.clear()
+    assert p._wait_drained(0.1) is False                # not paused: times out as before
+
+
+def test_stop_and_reset_clear_a_pause():
+    from veronica.audio.play import Player
+
+    p = Player()
+    p.pause()
+    p.stop()
+    assert not p.paused
+    p.pause()
+    p.reset()
+    assert not p.paused
