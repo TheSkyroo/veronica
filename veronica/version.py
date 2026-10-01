@@ -1,12 +1,17 @@
 """App version and build provenance.
 
 `APP_VERSION` is the package version from pyproject (via installed metadata).
-`build_info()` answers "which commit is actually running?": when launched from
-the built .app, the launcher exports `VERONICA_BUNDLE_BUILD` pointing at the
-bundle's `Contents/Resources/build.json` (written by scripts/build_app.py at
-build time), so we report what was built even if the repo has since moved on.
-Outside the bundle (dev runs) it's computed live from git. `run` and `env` are
+`build_info()` answers "which commit is actually running?": the built
+Veronica.exe carries a `build.json` (written by scripts/build_app.py at build
+time) and its entry script exports `VERONICA_BUNDLE_BUILD` pointing at it, so
+we report what was built even if the repo has since moved on. Outside the
+built app (dev runs) it's computed live from git. `run` and `env` are
 injectable so tests never touch real git.
+
+`REPO` is the source checkout: this file's grandparent in a dev run; inside
+the frozen exe (where this file lives in the bundle, not the checkout) the
+entry script exports `VERONICA_REPO` from build.json, so the updater still
+knows which checkout to pull and rebuild.
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(os.environ.get("VERONICA_REPO") or Path(__file__).resolve().parents[1])
 APP_NAME = "Veronica"
 
 

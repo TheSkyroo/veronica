@@ -1,6 +1,7 @@
 """GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
 
-How it runs (verified on this Mac, 2026-09-19):
+How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19; the
+Windows specifics are noted where they differ):
 - One `copilot -p <prompt> --output-format json --silent --no-ask-user`
   child per turn (`per_turn`), stdin closed. The stream is JSONL with
   many `ephemeral` events: `assistant.message_delta{data.deltaContent}`
@@ -13,10 +14,12 @@ How it runs (verified on this Mac, 2026-09-19):
   read in `-p` mode (the "secret word" probe answered it; the prompt is
   not prefixed onto the user text).
 - Native tools ON: `--allow-all-tools --allow-all-paths`, with our hook
-  as the gate. Only the USER-level `~/.copilot/hooks/veronica.json` fires
-  in `-p` mode (repository `.github/hooks` needs folder trust), so it is
-  written before every turn as `{"version":1,"hooks":{"preToolUse":[{
-  "type":"command","bash":<cmd>,"timeoutSec":600}]}}` and scoped with
+  as the gate. Only the USER-level `%USERPROFILE%\.copilot\hooks\veronica.json`
+  fires in `-p` mode (repository `.github/hooks` needs folder trust), so it
+  is written before every turn as `{"version":1,"hooks":{"preToolUse":[{
+  "type":"command","powershell":<cmd>,"timeoutSec":60}]}}` — on Windows
+  Copilot runs a hook's `powershell` command, so <cmd> is PowerShell with
+  every token single-quoted (winproc.ps_command) — and scoped with
   `--scope-cwd <workspace>` (the payload's `cwd` is the realpath). The
   timeout matters: a hook that times out FAILS OPEN, so it is set to
   `HOOK_TIMEOUT_S` and `ask_gate` answers well inside it. The payload is
@@ -29,7 +32,8 @@ How it runs (verified on this Mac, 2026-09-19):
   real off switch) and each of our servers is allowed by name
   (`--allow-tool veronica-<name>`; the `kind(arg)` rule syntax has no
   glob).
-- Copilot's shell tool is `bash` (`toolArgs.command`); its edit tool is
+- Copilot's shell tool is `powershell` on Windows (`bash` elsewhere;
+  `toolArgs.command` either way); its edit tool is
   `apply_patch`, whose `toolArgs`/`arguments` is the PATCH TEXT itself
   (a string, not a dict) on both the hook and stream sides — it is
   wrapped as `{"command": <patch>}` so the hook confirms it as an Edit
@@ -49,6 +53,7 @@ import uuid
 from pathlib import Path
 
 from veronica.brain import hook
+from veronica.brain.backends import winproc
 from veronica.brain.backends.cli import (
     CliBrain,
     Done,
@@ -64,8 +69,9 @@ from veronica.brain.gateclient import HOOK_TIMEOUT_S
 # Copilot's own tools that act (run, edit, spawn); hidden with
 # --excluded-tools when native tools are off. What remains (view, rg,
 # glob, web_fetch, ...) is read-only.
-NATIVE_ACTION_TOOLS = ("bash", "read_bash", "stop_bash", "list_bash", "apply_patch", "task",
-                       "write_agent", "sql", "session_store_sql", "skill")
+NATIVE_ACTION_TOOLS = ("powershell", "read_powershell", "write_powershell", "stop_powershell",
+                       "list_powershell", "bash", "read_bash", "stop_bash", "list_bash", "apply_patch",
+                       "task", "write_agent", "sql", "session_store_sql", "skill")
 
 
 class CopilotBrain(CliBrain):
@@ -80,7 +86,7 @@ class CopilotBrain(CliBrain):
 
     # -- spawn ------------------------------------------------------------------
     def mcp_config(self) -> dict:
-        env = {"VERONICA_GATE_SOCK": str(self.s.gate_socket), "VERONICA_BRAIN": "copilot",
+        env = {"VERONICA_GATE": str(self.s.gate_endpoint), "VERONICA_BRAIN": "copilot",
                "VERONICA_HOOK_LOG": str(self.hook_log)}
         return {"mcpServers": {
             f"veronica-{server}": {"type": "local", "command": sys.executable,
@@ -110,8 +116,11 @@ class CopilotBrain(CliBrain):
 
     # -- workspace ----------------------------------------------------------------
     def hook_command(self) -> str:
-        return (f"{sys.executable} -m veronica.brain.hook copilot --sock {self.s.gate_socket} "
-                f"--log {self.hook_log} --scope-cwd {self.workspace}")
+        """The hook as a PowerShell command line (Copilot runs the
+        `powershell` entry on Windows)."""
+        return winproc.ps_command([sys.executable, "-m", "veronica.brain.hook", "copilot",
+                                   "--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log),
+                                   "--scope-cwd", str(self.workspace)])
 
     def prepare_workspace(self, prompt_text: str, native: bool) -> None:
         if not native:
@@ -119,11 +128,11 @@ class CopilotBrain(CliBrain):
                             "use Veronica's tools only.")
         d = self.workspace / ".github"
         d.mkdir(exist_ok=True)
-        (d / "copilot-instructions.md").write_text(prompt_text)
+        (d / "copilot-instructions.md").write_text(prompt_text, encoding="utf-8")
         hooks = {"version": 1, "hooks": {"preToolUse": [
-            {"type": "command", "bash": self.hook_command(), "timeoutSec": HOOK_TIMEOUT_S}]}}
+            {"type": "command", "powershell": self.hook_command(), "timeoutSec": HOOK_TIMEOUT_S}]}}
         self.hooks_file.parent.mkdir(parents=True, exist_ok=True)
-        self.hooks_file.write_text(json.dumps(hooks, indent=2) + "\n")
+        self.hooks_file.write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
 
     async def close(self) -> None:
         await super().close()

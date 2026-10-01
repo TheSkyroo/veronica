@@ -9,21 +9,28 @@ from veronica.brain.base import Decision
 @pytest.mark.parametrize("backend,tool,inp,expected", [
     ("antigravity", "run_command", {"command": "ls -la"}, ("Bash", {"command": "ls -la"})),
     ("qwen", "run_shell_command", {"command": "echo hi"}, ("Bash", {"command": "echo hi"})),
-    ("codex", "shell", {"command": ["bash", "-lc", "ls"]}, ("Bash", {"command": "bash -lc ls"})),
-    ("codex", "shell", {"command": ["bash", "-lc", "echo hi there"]}, ("Bash", {"command": "bash -lc 'echo hi there'"})),
+    ("codex", "shell", {"command": ["bash", "-lc", "ls"]}, ("Bash", {"command": "ls"})),
+    ("codex", "shell", {"command": ["bash", "-lc", "echo hi there"]}, ("Bash", {"command": "echo hi there"})),
+    ("codex", "shell", {"command": ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                    "-NoProfile", "-Command", "Get-ChildItem 'C:\\Users\\Mani Kumar'"]},
+     ("Bash", {"command": "Get-ChildItem 'C:\\Users\\Mani Kumar'"})),
+    ("codex", "shell", {"command": ["cmd.exe", "/c", "dir"]}, ("Bash", {"command": "dir"})),
+    ("codex", "shell", {"command": ["git", "commit", "-m", "a b"]}, ("Bash", {"command": 'git commit -m "a b"'})),
+    ("codex", "shell", {"command": ["pwsh", "-File", "x.ps1", "-c", "y"]},
+     ("Bash", {"command": "pwsh -File x.ps1 -c y"})),
     ("copilot", "bash", {"command": "pwd"}, ("Bash", {"command": "pwd"})),
     ("antigravity", "write_file", {"file_path": "/tmp/x", "content": "y"}, ("Write", {"file_path": "/tmp/x", "content": "y"})),
     ("codex", "apply_patch", {"patch": "*** Begin Patch"}, ("Edit", {"patch": "*** Begin Patch"})),
     ("antigravity", "read_file", {"file_path": "/tmp/x"}, None),
     ("copilot", "grep", {"pattern": "x"}, None),
     ("qwen", "google_web_search", {"query": "x"}, None),
-    ("codex", "mcp__veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
+    ("codex", "mcp__veronica-system__clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),
     # verified live: codex sanitises the server name in the hook payload
-    ("codex", "mcp__veronica_mac__volume_get", {}, ("mcp__mac__volume_get", {})),
-    ("copilot", "veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
-    ("copilot", "veronica-mac-clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),  # verified
+    ("codex", "mcp__veronica_system__volume_get", {}, ("mcp__system__volume_get", {})),
+    ("copilot", "veronica-system__clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),
+    ("copilot", "veronica-system-clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),  # verified
     ("copilot", "veronica-pim-mail_send", {"to": "x"}, ("mcp__pim__mail_send", {"to": "x"})),
-    ("copilot", "veronica-mac-", {}, ("veronica-mac-", {})),
+    ("copilot", "veronica-system-", {}, ("veronica-system-", {})),
     ("copilot", "github-mcp-server-search_code", {"q": "x"}, ("github-mcp-server-search_code", {"q": "x"})),
     ("copilot", "rg", {"pattern": "x"}, None),
     ("copilot", "read_bash", {"id": "0"}, None),
@@ -76,7 +83,7 @@ def test_run_mcp_and_readonly_skip_gate(tmp_path):
     def boom(*a, **k):
         raise AssertionError("gate must not be asked")
 
-    out, _ = hook.run("codex", json.dumps({"tool_name": "mcp__veronica-mac__clipboard_write", "tool_input": {"text": "x"}}),
+    out, _ = hook.run("codex", json.dumps({"tool_name": "mcp__veronica-system__clipboard_write", "tool_input": {"text": "x"}}),
                       ask=boom, log_path=tmp_path / "l")
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
     out, _ = hook.run("qwen", json.dumps({"tool_name": "read_file", "tool_input": {}}), ask=boom, log_path=tmp_path / "l")
@@ -110,13 +117,13 @@ def test_run_allows_every_form_of_our_own_mcp_tools(tmp_path):
     def boom(*a, **k):
         raise AssertionError("gate must not be asked")
 
-    for name in ("mcp__veronica-mac__clipboard_write", "veronica-mac__clipboard_write",
-                 "veronica-mac-clipboard_write", "mcp__veronica_mac__clipboard_write"):
+    for name in ("mcp__veronica-system__clipboard_write", "veronica-system__clipboard_write",
+                 "veronica-system-clipboard_write", "mcp__veronica_system__clipboard_write"):
         out, _ = hook.run("copilot", json.dumps({"toolName": name, "toolArgs": {"text": "x"}}),
                           ask=boom, log_path=tmp_path / "l")
         assert json.loads(out)["permissionDecision"] == "allow"
     out, _ = hook.run("antigravity", json.dumps({"toolCall": {"name": "call_mcp_tool",
-                                                              "args": {"ServerName": "veronica-mac", "ToolName": "clipboard_write"}}}),
+                                                              "args": {"ServerName": "veronica-system", "ToolName": "clipboard_write"}}}),
                       ask=boom, log_path=tmp_path / "l")
     assert json.loads(out)["decision"] == "allow"
 
@@ -145,7 +152,7 @@ def test_agy_shapes_map_to_canonical():
     for t in ("view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content"):
         assert hook.canonical_tool("antigravity", t, {"AbsolutePath": "/x"}) is None
     # agy wraps MCP calls: ours are unwrapped (allowed here, gated in tools.serve), others confirmed by name
-    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "veronica-mac", "ToolName": "read_battery", "Arguments": {}}) == ("mcp__mac__read_battery", {})
+    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "veronica-system", "ToolName": "read_battery", "Arguments": {}}) == ("mcp__system__read_battery", {})
     assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue", "Arguments": {}})[0] == "call_mcp_tool"
 
 
@@ -213,21 +220,21 @@ def test_scope_cwd_limits_hook_to_our_workspace(tmp_path):
 
 
 def test_main_flags_override_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("VERONICA_GATE_SOCK", "/env/sock")
+    monkeypatch.setenv("VERONICA_GATE", "/env/gate.json")
     monkeypatch.setenv("VERONICA_HOOK_LOG", str(tmp_path / "env.log"))
     seen = {}
 
     def ask(tool, input, **kw):
-        seen["sock"] = hook.os.environ.get("VERONICA_GATE_SOCK")
+        seen["gate"] = hook.os.environ.get("VERONICA_GATE")
         return Decision(True, "approved")
 
     scope = tmp_path / "scope"
     scope.write_text("c9")
     stdin = json.dumps({"conversationId": "c9", "toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}})
-    out, code = hook.main(["antigravity", "--sock", "/flag/sock", "--log", str(tmp_path / "flag.log"),
+    out, code = hook.main(["antigravity", "--gate", "/flag/gate.json", "--log", str(tmp_path / "flag.log"),
                            "--scope-file", str(scope)], stdin, ask=ask)
     assert code == 0 and json.loads(out)["decision"] == "allow"
-    assert seen["sock"] == "/flag/sock"
+    assert seen["gate"] == "/flag/gate.json"
     assert (tmp_path / "flag.log").exists() and not (tmp_path / "env.log").exists()
     # env alone still works
     out, _ = hook.main(["antigravity"], stdin, ask=ask)

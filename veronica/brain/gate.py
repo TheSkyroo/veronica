@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import os
-import shlex
+import re
+import secrets
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -17,12 +19,12 @@ from veronica.brain.agent import (
     summarize_tool,
 )
 from veronica.brain.base import Decision
-from veronica.brain.gateclient import GATE_ANSWER_BUDGET_S, GATE_CALL_BUDGET_S
+from veronica.brain.gateclient import GATE_ANSWER_BUDGET_S, GATE_CALL_BUDGET_S, LOOPBACK
 from veronica.brain.policy import (
     AUTO_ALLOWABLE,
-    TRUST_EXCLUDED_BUNDLES,
     always_confirm,
     classify,
+    is_terminal,
 )
 from veronica.config import Settings
 from veronica.tools.computer_events import Front, frontmost, is_system_dialog
@@ -38,7 +40,7 @@ ALWAYS_HINT = " Say always and I'll stop asking."
 # What she says when "always" lands on something that can never be
 # auto-allowed. The call itself still goes ahead.
 ALWAYS_ASK = "That one I'll always ask about."
-MESSAGE_SEND = "mcp__pim__message_send"
+MAIL_SEND = "mcp__pim__mail_send"
 # How long a brain may sit on one tool call (or wait on the gate) before the
 # turn is given up on anyway. Only a wedged tool gets near it: the gate's
 # own call budget is well under it.
@@ -48,6 +50,13 @@ BUSY_CEILING_S = 600.0
 # timeout the brain reads as "Veronica didn't answer".
 GATE_REPLY_MARGIN_S = 3.0
 TOO_SLOW = "You took a while to answer, so I skipped that step."
+# A connection has this long to present the token before it is dropped:
+# anything on the machine can reach a loopback port, and a stray client
+# must not hold a handler open.
+AUTH_TIMEOUT_S = 5.0
+# One request line. A Write call carries the whole file, so asyncio's
+# 64 KiB default would refuse an ordinary edit as a "bad request".
+REQUEST_LINE_LIMIT = 4 * 1024 * 1024
 
 
 class ToolStall(TimeoutError):
@@ -67,7 +76,7 @@ def _confirm_outcome(result) -> tuple[str, str, bool]:
 class ToolGate:
     """The one place a tool call is allowed or refused, for every backend.
     In-process for Claude (ClaudeBrain._can_use_tool wraps decide()), over
-    the gate socket for external CLIs (GateServer)."""
+    the gate's loopback port for external CLIs (GateServer)."""
 
     def __init__(
         self,
@@ -80,7 +89,7 @@ class ToolGate:
         resolve_recipient: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self.s = settings
-        # message_send's `to` as a person (tools.pim.resolve_recipient_async
+        # mail_send's `to` as a person (tools.pim.resolve_recipient_async
         # unless a test injects one): the confirm names who it's going to.
         self._resolve_recipient = resolve_recipient
         self._confirm = confirm
@@ -178,31 +187,31 @@ class ToolGate:
             self._on_tool(summary, decision)
 
     # -- permission gate ------------------------------------------------------
-    # Shell commands that only "work" under a different TCC identity than the
-    # app (screencapture run by the Claude CLI child process needs its own
-    # Screen Recording grant) — redirect the brain to the in-process tool.
-    _REDIRECT_BASH = {
-        "screencapture": "Use the screenshot tool instead of screencapture — it runs inside Veronica, which has the Screen Recording permission.",
-    }
+    # Screen captures attempted from a brain's shell: they run as the CLI's
+    # child, outside the screenshot tool's display handling (which monitor,
+    # size cap, the image handed back to the model), and leave a file
+    # nobody asked for. Point the brain at the in-process tool instead.
+    _SCREENSHOT_SHELL = re.compile(
+        r"copyfromscreen|snippingtool|screensketch|ms-screenclip|nircmd(?:c)?(?:\.exe)?\s+savescreenshot"
+        r"|\[system\.windows\.forms\.sendkeys\]::sendwait\(\s*['\"]\{prtsc\}",
+        re.IGNORECASE,
+    )
+    SCREENSHOT_REDIRECT = ("Use the screenshot tool instead of capturing the screen from the shell — "
+                           "it runs inside Veronica and hands you the image directly.")
 
     def _bash_redirect(self, tool_name: str, input: dict) -> str | None:
         if tool_name != "Bash":
             return None
-        try:
-            argv = shlex.split(str(input.get("command", "")))
-        except ValueError:
-            return None
-        for tok in argv:
-            base = os.path.basename(tok)
-            if base in self._REDIRECT_BASH:
-                return self._REDIRECT_BASH[base]
+        if self._SCREENSHOT_SHELL.search(str(input.get("command", ""))):
+            return self.SCREENSHOT_REDIRECT
         return None
 
     async def _recipient(self, input: dict) -> tuple[dict, str | None]:
-        """For message_send: the input as the confirm should show it
-        ("Priya Shah (+91…)"), or a reason to hand back to the brain when
-        the name is ambiguous, unknown or Contacts is off limits. Never
-        guesses; the tool itself still sends to the same handle."""
+        """For mail_send: the input as the confirm should show it
+        ("Priya Shah (priya@example.com)"), or a reason to hand back to the
+        brain when the name is ambiguous, unknown or Outlook can't be
+        asked. Never guesses; the tool itself still sends to the same
+        address."""
         to = str(input.get("to", "")).strip()
         if not to:
             return input, None
@@ -234,10 +243,10 @@ class ToolGate:
 
     async def decide(self, tool_name: str, input: dict) -> Decision:
         shown = input
-        if tool_name == MESSAGE_SEND:
+        if tool_name == MAIL_SEND:
             shown, problem = await self._recipient(input)
             if problem is not None:
-                log.info("message recipient unresolved: %s", problem)
+                log.info("mail recipient unresolved: %s", problem)
                 return Decision(False, "redirect", problem)
         summary = summarize_tool(tool_name, shown)
         d = await self._decide(tool_name, input, shown, summary)
@@ -250,7 +259,7 @@ class ToolGate:
         if redirect is not None:
             log.info("tool redirected: %s -> %s", summary, redirect)
             return Decision(False, "redirect", redirect)
-        if classify(tool_name, input, self.s.shortcut_allowlist, self.s.auto_allow_tools) == "allow":
+        if classify(tool_name, input, self.s.auto_allow_tools) == "allow":
             log.info("auto-allow: %s", summary)
             self._card(summary, "auto")
             return Decision(True, "auto")
@@ -347,8 +356,9 @@ class ToolGate:
     @staticmethod
     def _trustable(front: Front) -> bool:
         """Can a trust window belong to `front` at all? Never for a system
-        dialog or a terminal, and never without a bundle id."""
-        return bool(front.bundle_id) and not is_system_dialog(front) and front.bundle_id not in TRUST_EXCLUDED_BUNDLES
+        dialog or a terminal, and never without an executable name
+        (`bundle_id` on Windows)."""
+        return bool(front.bundle_id) and not is_system_dialog(front) and not is_terminal(front)
 
     def _trusted(self, front: Front, now: float) -> bool:
         return (
@@ -362,8 +372,8 @@ class ToolGate:
     async def _gate_computer(self, tool_name: str, input: dict, summary: str, front: Front) -> Decision:
         """Confirm gate for confirm-class `mcp__computer__*` tools. `front`
         is the frontmost app as looked up at gate time; a system permission
-        dialog (`is_system_dialog`, keyed on bundle id — those windows have
-        empty titles) or a terminal never gets the trust exemption, and
+        dialog (`is_system_dialog`: UAC, credential prompts, SmartScreen,
+        Settings) or a terminal never gets the trust exemption, and
         neither does anything that presses Enter (`always_confirm`). After
         a "yes" the frontmost app and clock are read again: the user may
         have switched apps while being asked, and the window belongs to
@@ -390,8 +400,13 @@ class ToolGate:
 
 
 class GateServer:
-    """Unix-socket front for ToolGate.decide, for the out-of-process
-    callers (tools.serve, brain.hook). One JSON line per request:
+    """Loopback front for ToolGate.decide, for the out-of-process callers
+    (tools.serve, brain.hook). It listens on 127.0.0.1 on a port the OS
+    picks and publishes {"v", "port", "token", "pid"} in the endpoint file
+    (Settings.gate_endpoint, private to the user's profile); a caller
+    reads that file, connects, and sends the token as its first line —
+    compared in constant time, and a wrong or missing one is refused
+    before anything else is read. Then one JSON line per request:
     {"v": 1, "op", "tool", "input", "origin": "mcp"|"hook", "backend"} in,
     {"allow", "kind", "reason"} out.
 
@@ -399,8 +414,9 @@ class GateServer:
     the permission question and leaves the caller to act on it. "call"
     also RUNS the tool here, in the app process, and returns its MCP
     content blocks — that is how an external brain's tools.serve child
-    gets a screenshot without macOS attributing the capture to the CLI
-    that spawned it. It needs `run_tool`; without one it fails closed.
+    gets a screenshot or a click done by the app that owns the screen,
+    clipboard and Outlook session, and how a timer set from it announces.
+    It needs `run_tool`; without one it fails closed.
 
     Confirms are serialized because the orchestrator can only ask one
     question at a time. Running a tool is not: a capture that waits a
@@ -411,27 +427,52 @@ class GateServer:
         self._run_tool = run_tool
         self._server: asyncio.AbstractServer | None = None
         self._lock = asyncio.Lock()
+        self._token = ""
+        self.port = 0
         self.reply_margin_s = GATE_REPLY_MARGIN_S
+        self.auth_timeout_s = AUTH_TIMEOUT_S
 
     async def start(self) -> None:
+        self._token = secrets.token_urlsafe(32)
+        self._server = await asyncio.start_server(self._handle, host=LOOPBACK, port=0,
+                                                  limit=REQUEST_LINE_LIMIT)
+        self.port = self._server.sockets[0].getsockname()[1]
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
-        if self.path.exists():
-            self.path.unlink()
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path))
-        self.path.chmod(0o600)
+        # Written beside and moved into place, so a caller never reads half
+        # a file; a stale one from a crashed run is simply replaced.
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps({"v": 1, "port": self.port, "token": self._token, "pid": os.getpid()}), encoding="utf-8")
+        os.replace(tmp, self.path)
+        log.info("gate listening on %s:%d", LOOPBACK, self.port)
 
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        if self.path.exists():
+        with contextlib.suppress(OSError):
             self.path.unlink()
+        self._token = ""
+
+    async def _authenticated(self, reader: asyncio.StreamReader) -> bool:
+        """The first line must be the token. No line in time, a wrong one,
+        or a server that isn't running (empty token) -> refused."""
+        try:
+            async with asyncio.timeout(self.auth_timeout_s):
+                line = await reader.readline()
+        except (TimeoutError, ValueError, ConnectionError):
+            return False
+        presented = line.strip()
+        return bool(self._token) and hmac.compare_digest(presented, self._token.encode())
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         too_slow = False
         try:
+            if not await self._authenticated(reader):
+                log.warning("gate: refused a connection without the right token")
+                writer.write((json.dumps({"allow": False, "kind": "denied", "reason": "bad token"}) + "\n").encode())
+                await writer.drain()
+                return
             line = await reader.readline()
             try:
                 req = json.loads(line)

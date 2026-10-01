@@ -4,7 +4,7 @@ Two kinds of "update available":
 
 - `remote`: `origin/<branch>` has moved past HEAD (needs `git pull`).
 - `local`: HEAD has moved past the commit the running process was built from
-  (the bundle's build.json sha) — i.e. someone pulled/committed while the app
+  (the exe's build.json sha) — i.e. someone pulled/committed while the app
   was running; a rebuild + restart is all it takes.
 
 `check()` never raises: a git failure reading HEAD (not a repo, no git)
@@ -16,12 +16,20 @@ either. "remote" means `origin/<branch>` has commits HEAD lacks (`rev-list
 of) origin is not an update. `update()` does raise
 (`UpdateError`) so the caller can report the failure. `run`, `which` and
 `build` are injectable so tests never run real git/uv/build_app.
+
+On Windows git and uv are found on PATH as git.exe/uv.exe like any other
+command; from the windowless Veronica.exe they're started with
+CREATE_NO_WINDOW so no console flashes up. The rebuild is scripts/build_app.py
+(PyInstaller, run with the checkout's own venv), which swaps the new
+dist/Veronica in — or stages it as dist/Veronica.new for the relaunch helper
+when the running exe holds the old one open (veronica.ui.relaunch).
 """
 from __future__ import annotations
 
 import importlib.util
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +38,10 @@ from typing import Literal
 from veronica import version
 
 FETCH_TIMEOUT_S = 10
+
+# CREATE_NO_WINDOW: console tools started from the windowless exe would
+# otherwise each flash a console window.
+_NO_WINDOW: dict = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
 class UpdateError(RuntimeError):
@@ -56,7 +68,7 @@ class _GitFailed(Exception):
 
 
 def _git(run, repo: Path, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
-    kwargs: dict = {"cwd": repo, "capture_output": True, "text": True, "check": False}
+    kwargs: dict = {"cwd": repo, "capture_output": True, "text": True, "check": False, **_NO_WINDOW}
     if timeout is not None:
         kwargs["timeout"] = timeout
     try:
@@ -126,7 +138,7 @@ def _default_build() -> Callable[[], Path]:
 
 def _run_step(run, repo: Path, argv: list[str], log: list[str]) -> None:
     try:
-        proc = run(argv, cwd=repo, capture_output=True, text=True, check=False)
+        proc = run(argv, cwd=repo, capture_output=True, text=True, check=False, **_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         raise UpdateError(f"{' '.join(argv)}: {e}") from None
     if proc.returncode != 0:
@@ -142,8 +154,8 @@ def update(
     which: Callable[[str], str | None] = shutil.which,
 ) -> str:
     """Pull (remote only), `uv sync` (if uv is present; not `--frozen` —
-    uv.lock is gitignored, so the lock must be re-resolved after a pull), rebuild the
-    .app. Returns a short log; raises UpdateError on the first failure. The
+    uv.lock is gitignored, so the lock must be re-resolved after a pull), rebuild
+    dist/Veronica (Veronica.exe). Returns a short log; raises UpdateError on the first failure. The
     caller relaunches afterwards."""
     log: list[str] = []
     if status.kind == "remote":

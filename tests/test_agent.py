@@ -197,7 +197,7 @@ async def test_options_wired(brain):
     assert "You are Veronica" in o.system_prompt
     assert o.can_use_tool is not None
     assert o.setting_sources == []
-    assert "mac" in o.mcp_servers
+    assert "system" in o.mcp_servers
     assert "pim" in o.mcp_servers
     assert "memory" in o.mcp_servers
     assert "screen" in o.mcp_servers
@@ -560,12 +560,12 @@ def test_summarize_screen_and_music_tools():
 
 
 def test_summarize_mac_tools():
-    assert summarize_tool("mcp__mac__open_app", {"name": "Safari"}) == "Open Safari"
-    assert summarize_tool("mcp__mac__open_url", {"url": "https://x.y"}) == "Open https://x.y"
-    assert summarize_tool("mcp__mac__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
-    assert summarize_tool("mcp__mac__applescript", {"script": "tell app \"Music\" to play"}) == 'AppleScript: tell app "Music" to play'
-    assert summarize_tool("mcp__mac__run_shortcut", {"name": "Morning"}) == "Run the shortcut 'Morning'"
-    assert summarize_tool("mcp__mac__volume_get", {}) == "volume_get"
+    assert summarize_tool("mcp__system__open_app", {"name": "Safari"}) == "Open Safari"
+    assert summarize_tool("mcp__system__open_url", {"url": "https://x.y"}) == "Open https://x.y"
+    assert summarize_tool("mcp__system__clipboard_write", {"text": "a" * 80}) == "Copy to clipboard: " + "a" * 60
+    assert summarize_tool("mcp__system__applescript", {"script": "tell app \"Music\" to play"}) == 'AppleScript: tell app "Music" to play'
+    assert summarize_tool("mcp__system__run_shortcut", {"name": "Morning"}) == "Run the shortcut 'Morning'"
+    assert summarize_tool("mcp__system__volume_get", {}) == "volume_get"
 
 
 async def test_gate_auto_allows_safe_tools_without_confirm(brain):
@@ -1225,7 +1225,7 @@ def _preapproved(tmp_home, *, turn=1, on=True, answers=(False,)):
 async def test_preapproved_first_confirm_call_is_allowed_without_asking(tmp_home, caplog):
     t = _preapproved(tmp_home)
     with caplog.at_level("INFO", logger="veronica.brain"):
-        res = await t.brain._can_use_tool("mcp__mac__clipboard_write", {"text": "hi"}, None)
+        res = await t.brain._can_use_tool("mcp__system__clipboard_write", {"text": "hi"}, None)
     assert res.behavior == "allow"
     assert t.asked == []
     assert t.tools == [("Copy to clipboard: hi", "preapproved")]
@@ -1234,7 +1234,7 @@ async def test_preapproved_first_confirm_call_is_allowed_without_asking(tmp_home
 
 async def test_preapproval_is_one_shot(tmp_home):
     t = _preapproved(tmp_home, answers=(True,))
-    await t.brain._can_use_tool("mcp__mac__clipboard_write", {"text": "hi"}, None)
+    await t.brain._can_use_tool("mcp__system__clipboard_write", {"text": "hi"}, None)
     res = await t.brain._can_use_tool("Write", {"file_path": "/a"}, None)
     assert res.behavior == "allow" and t.asked == ["Write file /a"]
     assert t.tools == [("Copy to clipboard: hi", "preapproved")]
@@ -1300,7 +1300,7 @@ async def test_preapproval_not_applied_to_auto_tools_or_redirects(tmp_home):
     ("mcp__computer__computer_key", {"combo": "enter"}, _FINDER),
     ("mcp__computer__computer_type", {"text": "ls"}, _TERMINAL),
     ("mcp__computer__computer_click", {"x": 1, "y": 1}, _SECAGENT),
-    ("mcp__mac__applescript", {"script": 'tell application "Finder" to empty trash'}, _FINDER),
+    ("mcp__system__applescript", {"script": 'tell application "Finder" to empty trash'}, _FINDER),
 ])
 async def test_preapproval_never_covers_always_confirm_tools(tmp_home, tool, inp, front):
     t = _preapproved(tmp_home)
@@ -1414,7 +1414,7 @@ async def test_a_tool_result_error_is_reported_to_the_gate(brain, monkeypatch):
     seen = []
     monkeypatch.setattr(brain.gate, "tool_result", lambda name, inp, err: seen.append((name, inp, err)))
     use = _Assistant()
-    use.content = [ToolUseBlock(id="t1", name="mcp__mac__volume_get", input={"a": 1}),
+    use.content = [ToolUseBlock(id="t1", name="mcp__system__volume_get", input={"a": 1}),
                    ToolUseBlock(id="t2", name="Read", input={"file_path": "/x"})]
 
     async def script(self):
@@ -1426,7 +1426,7 @@ async def test_a_tool_result_error_is_reported_to_the_gate(brain, monkeypatch):
 
     monkeypatch.setattr(FakeClient, "receive_response", script)
     assert [s async for s in brain.ask("x")] == ["Done."]
-    assert seen == [("mcp__mac__volume_get", {"a": 1}, True), ("Read", {"file_path": "/x"}, False)]
+    assert seen == [("mcp__system__volume_get", {"a": 1}, True), ("Read", {"file_path": "/x"}, False)]
 
 
 async def test_a_confirm_in_progress_pauses_the_silence_clock(brain, monkeypatch):

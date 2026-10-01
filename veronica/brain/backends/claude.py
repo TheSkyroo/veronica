@@ -26,7 +26,7 @@ from veronica.config import Settings
 from veronica.tools.browser import browser_server
 from veronica.tools.computer import computer_server
 from veronica.tools.computer_events import Front, frontmost
-from veronica.tools.mac import mac_server
+from veronica.tools.system import system_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
 from veronica.tools.pim import pim_server
@@ -105,7 +105,7 @@ class ClaudeBrain:
         f = self.s.session_file
         if not f.exists():
             return None
-        parts = f.read_text().split("\n")
+        parts = f.read_text(encoding="utf-8").split("\n")
         sid = parts[0].strip()
         if not sid:
             return None
@@ -129,13 +129,13 @@ class ClaudeBrain:
         self.s.session_file.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
         if self.s.session_file.exists():
-            old = self.s.session_file.read_text().split("\n")
+            old = self.s.session_file.read_text(encoding="utf-8").split("\n")
             if old and old[0].strip() == sid and len(old) > 1 and old[1].strip():
                 try:
                     started = float(old[1])   # same session: keep its start
                 except ValueError:
                     pass
-        self.s.session_file.write_text(f"{sid}\n{started:.0f}")
+        self.s.session_file.write_text(f"{sid}\n{started:.0f}", encoding="utf-8")
 
     def _clear_session(self) -> None:
         if self.s.session_file.exists():
@@ -164,7 +164,7 @@ class ClaudeBrain:
             can_use_tool=self._can_use_tool,
             resume=resume,
             mcp_servers={
-                "mac": mac_server, "pim": pim_server, "memory": memory_server,
+                "system": system_server, "pim": pim_server, "memory": memory_server,
                 "screen": screen_server, "music": music_server,
                 "browser": browser_server, "computer": computer_server,
             },

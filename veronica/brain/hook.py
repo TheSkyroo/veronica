@@ -2,13 +2,13 @@
 installs in each external CLI's workspace. Reads the hook payload on
 stdin, maps the CLI's tool to our canonical name, logs it to
 $VERONICA_HOOK_LOG (the canary in backends/cli.py checks this log), asks
-the gate socket, and prints the CLI's decision shape. Anything
+the gate (gateclient), and prints the CLI's decision shape. Anything
 unexpected -> deny. Our own MCP tools are gated inside tools.serve, so
 the hook just lets them through; read-only native tools skip the gate
 entirely.
 
 Flags (Antigravity's hook is user-level, so it gets no env from us):
-`--sock <path>` / `--log <path>` override $VERONICA_GATE_SOCK /
+`--gate <endpoint file>` / `--log <path>` override $VERONICA_GATE /
 $VERONICA_HOOK_LOG; `--scope-file <path>` makes the hook a no-op unless
 the payload's `conversationId` equals that file's content, so only the
 conversation Veronica is driving is gated and the user's own `agy` is
@@ -18,25 +18,27 @@ working directory, which is our workspace only for Veronica's turns)."""
 import argparse
 import json
 import os
-import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from veronica.brain.gateclient import ask_gate
 
-SHELL_TOOLS = {"run_command", "run_shell_command", "Bash", "shell", "local_shell", "bash"}
+SHELL_TOOLS = {"run_command", "run_shell_command", "Bash", "shell", "local_shell", "bash",
+               "powershell"}                                     # copilot on Windows
 WRITE_TOOLS = {"write_file", "write_to_file", "Write"}
 EDIT_TOOLS = {"replace", "edit", "edit_file", "apply_patch", "str_replace_editor", "Edit",
               "replace_file_content", "multi_replace_file_content", "sed_file"}     # agy
 READONLY_TOOLS = {"read_file", "view", "glob", "grep", "list_directory", "find", "web_fetch",
                   "web_search", "google_web_search", "fetch", "Read", "Glob", "Grep", "ls",
                   "view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content",  # agy
-                  "rg", "read_bash", "list_bash", "fetch_copilot_cli_documentation", "list_agents", "read_agent"}  # copilot
+                  "rg", "read_bash", "list_bash", "fetch_copilot_cli_documentation", "list_agents", "read_agent",  # copilot
+                  "read_powershell", "list_powershell"}
 # Where each CLI puts the one string that identifies a native call: the
 # command line, else the file. Same order on both sides of the canary.
 _KEY_FIELDS = ("command", "CommandLine", "file_path", "TargetFile", "AbsolutePath", "path")
-OUR_SERVERS = ("mac", "pim", "memory", "screen", "music", "browser", "computer")
+OUR_SERVERS = ("system", "pim", "memory", "screen", "music", "browser", "computer")
 
 # Vendor tool name -> what the gate (policy.classify) knows how to judge.
 CANONICAL: dict[str, str] = (
@@ -48,12 +50,12 @@ CANONICAL: dict[str, str] = (
 
 
 def _ours(tool_name: str) -> str | None:
-    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' /
-    'veronica-mac-open_app' (Copilot joins server and tool with '-') ->
-    'mcp__mac__open_app'. The `veronica-` prefix is required: every backend
+    """'mcp__veronica-system__open_app' / 'veronica-system__open_app' /
+    'veronica-system-open_app' (Copilot joins server and tool with '-') ->
+    'mcp__system__open_app'. The `veronica-` prefix is required: every backend
     registers our servers under it, so a bare `memory__…` / `browser__…` can
     only be the user's own MCP server and has to go through the gate. Codex
-    sanitises the server name in its hook payload, so `veronica_mac__…`
+    sanitises the server name in its hook payload, so `veronica_system__…`
     counts too (verified live against codex 0.155)."""
     t = tool_name.removeprefix("mcp__")
     if t.startswith("veronica_"):
@@ -82,6 +84,24 @@ def _agy_mcp(tool_input: dict) -> tuple[str, dict] | None:
     return (ours, dict(args) if isinstance(args, dict) else {}) if ours else None
 
 
+_WRAPPER_SHELLS = ("powershell", "pwsh", "cmd", "bash", "sh")
+_COMMAND_SWITCHES = ("-command", "-c", "-lc", "/c")
+
+
+def _shell_argv_command(argv: list[str]) -> str:
+    """The one command string an argv stands for. Codex runs a command as
+    `[<shell>, <switches...>, -Command|-c|-lc|/c, <command>]`; the gate
+    judges <command>, which is what that shell will run (and what the
+    stream's canary key unwraps to). Anything else is joined the way
+    Windows quotes a command line."""
+    if len(argv) >= 3:
+        shell = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+        if (shell in _WRAPPER_SHELLS and argv[-2].lower() in _COMMAND_SWITCHES
+                and all(a.startswith("-") for a in argv[1:-2])):
+            return argv[-1]
+    return subprocess.list2cmdline(argv)
+
+
 def canonical_tool(backend: str, tool_name: str, tool_input: dict) -> tuple[str, dict] | None:
     """None = read-only native tool, allow without the gate. Unknown tools
     pass through by name so the gate confirms them."""
@@ -98,7 +118,7 @@ def canonical_tool(backend: str, tool_name: str, tool_input: dict) -> tuple[str,
     if kind == "Bash":
         cmd = tool_input.get("command") or tool_input.get("CommandLine") or ""   # CommandLine: agy
         if isinstance(cmd, list):    # codex: argv
-            cmd = " ".join(shlex.quote(str(c)) if " " in str(c) else str(c) for c in cmd)
+            cmd = _shell_argv_command([str(c) for c in cmd])
         return "Bash", {"command": str(cmd)}
     if kind in ("Write", "Edit"):
         inp = dict(tool_input)
@@ -147,20 +167,21 @@ def in_scope(payload: dict, scope_file: Path | None, scope_cwd: Path | None = No
     """Without a scope every call is ours. With a scope file, only the
     conversation whose id it holds (unreadable/empty file -> nothing is);
     with a scope cwd, only calls whose `cwd` is that directory (compared
-    as realpaths: Copilot reports /private/tmp/... for /tmp/...)."""
+    as normalized realpaths: Copilot reports the resolved path, and on
+    Windows the drive letter's and the folders' case may differ)."""
     if scope_cwd is not None:
         cwd = payload.get("cwd")
         if not isinstance(cwd, str) or not cwd:
             return False
         try:
-            if os.path.realpath(cwd) != os.path.realpath(scope_cwd):
+            if os.path.normcase(os.path.realpath(cwd)) != os.path.normcase(os.path.realpath(scope_cwd)):
                 return False
         except OSError:
             return False
     if scope_file is None:
         return True
     try:
-        wanted = scope_file.read_text().strip()
+        wanted = scope_file.read_text(encoding="utf-8").strip()
     except OSError:
         return False
     return bool(wanted) and str(payload.get("conversationId") or payload.get("session_id") or "") == wanted
@@ -187,7 +208,7 @@ def run(backend: str, stdin_text: str, *, ask=ask_gate, log_path: Path | None = 
         if _ours(str(tool)) or (str(tool) == "call_mcp_tool" and _agy_mcp(dict(inp))):
             return emit(backend, True), 0     # one of ours: gated inside tools.serve already
         if log_path is not None:
-            with open(log_path, "a") as f:
+            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"ts": time.time(), "call": tool, "key": canary_key(str(tool), cinp), "decision": "pending"}) + "\n")
         d = ask(name, cinp, origin="hook", backend=backend)
         return emit(backend, d.allow, d.message), 0
@@ -198,13 +219,13 @@ def run(backend: str, stdin_text: str, *, ask=ask_gate, log_path: Path | None = 
 def main(argv: list[str], stdin_text: str, *, ask=ask_gate) -> tuple[str, int]:
     ap = argparse.ArgumentParser(prog="veronica.brain.hook", add_help=False)
     ap.add_argument("backend")
-    ap.add_argument("--sock", default=None)
+    ap.add_argument("--gate", default=None)
     ap.add_argument("--log", default=None)
     ap.add_argument("--scope-file", default=None)
     ap.add_argument("--scope-cwd", default=None)
     a = ap.parse_args(argv)
-    if a.sock:
-        os.environ["VERONICA_GATE_SOCK"] = a.sock   # gateclient reads it; flags win over env
+    if a.gate:
+        os.environ["VERONICA_GATE"] = a.gate   # gateclient reads it; flags win over env
     log_path = a.log or os.environ.get("VERONICA_HOOK_LOG", "")
     return run(a.backend, stdin_text, ask=ask, log_path=Path(log_path) if log_path else None,
                scope_file=Path(a.scope_file) if a.scope_file else None,
@@ -212,6 +233,9 @@ def main(argv: list[str], stdin_text: str, *, ask=ask_gate) -> tuple[str, int]:
 
 
 if __name__ == "__main__":
-    out, code = main(sys.argv[1:], sys.stdin.read())
-    sys.stdout.write(out)
+    # Bytes, not text: a piped stdin/stdout on Windows defaults to the ANSI
+    # code page, and the CLIs speak UTF-8 JSON.
+    out, code = main(sys.argv[1:], sys.stdin.buffer.read().decode("utf-8", errors="replace"))
+    sys.stdout.buffer.write(out.encode("utf-8"))
+    sys.stdout.flush()
     sys.exit(code)

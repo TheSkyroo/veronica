@@ -1,26 +1,51 @@
-"""Personal data via macOS apps (Calendar, Mail, Reminders) and in-process
-timers, exposed to Claude as in-process MCP tools. No OAuth: everything goes
-through `osascript` (Apple Events), same argv-only pattern as `tools/mac.py`.
-Contact names for Messages are looked up in the Contacts framework.
+"""Personal data via Outlook (calendar, mail, tasks, notes) and in-process
+timers, exposed to Claude as in-process MCP tools.
+
+No OAuth: everything goes through the classic Outlook desktop app's COM
+interface (`Outlook.Application` / the MAPI namespace), so whatever accounts
+Outlook is set up with are the ones used. The new Outlook (and Outlook on
+the web) has no COM interface; without classic Outlook every tool here
+answers with OUTLOOK_MISSING instead.
+
+COM objects belong to the thread (apartment) that made them, so each call
+runs on a worker thread via asyncio.to_thread inside its own
+CoInitialize/CoUninitialize (`_outlook_session`) and never lets an Outlook
+object escape it. pywin32 is imported there, lazily: tests replace
+`_outlook_session` with a fake object model.
 """
 import asyncio
+import contextlib
 import datetime as dt
-import html
 import logging
 import math
 import re
-import subprocess
-import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-TIMEOUT_S = 30
 CALENDAR_DAYS_MAX = 30
 REMINDERS_DAYS_MAX = 60
 MAIL_LIMIT_MAX = 20
+SCAN_MAX = 2000               # items walked per call, whatever a filter returns
+PREVIEW_CHARS = 200
+
+# Outlook constants (OlDefaultFolders / OlItemType).
+FOLDER_CALENDAR = 9
+FOLDER_CONTACTS = 10
+FOLDER_INBOX = 6
+FOLDER_NOTES = 12
+FOLDER_TASKS = 13
+ITEM_MAIL = 0
+ITEM_APPOINTMENT = 1
+ITEM_TASK = 3
+ITEM_NOTE = 5
+CLASS_MAIL = 43               # OlObjectClass.olMail
+NO_DATE_YEAR = 4000           # Outlook's "None" date is 4501-01-01
+
+OUTLOOK_MISSING = ("I can't reach Outlook. Mail, calendar, tasks and notes need the classic "
+                   "Outlook desktop app installed and signed in.")
 
 log = logging.getLogger(__name__)
 
@@ -33,43 +58,72 @@ def _err(text: str) -> dict:
     return {"content": [{"type": "text", "text": f"error: {text}"}], "is_error": True}
 
 
-def run(argv: list[str], stdin: str | None = None, ok_text: str | None = None) -> dict:
-    """Run argv (never a shell string) and map the result to MCP content."""
-    try:
-        done = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return _err(f"timed out after {TIMEOUT_S}s")
-    except Exception as exc:  # e.g. FileNotFoundError
-        return _err(str(exc))
-    if done.returncode != 0:
-        return _err(done.stderr.strip() or f"exit {done.returncode}")
-    if ok_text is not None:
-        return _ok(ok_text)
-    out = done.stdout.strip()
-    return _ok(out or "ok")
+class OutlookUnavailable(RuntimeError):
+    """Classic Outlook isn't installed, or its COM server wouldn't start."""
+
+    def __init__(self, detail: str = ""):
+        super().__init__(OUTLOOK_MISSING)
+        self.detail = detail
 
 
-def _q(s: str) -> str:
-    """Quote for an AppleScript string literal."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+def _com_message(exc: Exception) -> str:
+    """A pywintypes.com_error's human part (the Outlook exception text when
+    there is one), else str(exc)."""
+    args = getattr(exc, "args", ())
+    if len(args) >= 3 and isinstance(args[2], tuple) and len(args[2]) >= 3 and args[2][2]:
+        return str(args[2][2]).strip()
+    if len(args) >= 2 and isinstance(args[1], str) and args[1]:
+        return args[1]
+    return str(exc)
 
 
 def _guard(fn):
-    """Wrap a handler so malformed args (missing keys, bad types) return
-    `_err(...)` instead of raising."""
+    """Wrap a handler so malformed args (missing keys, bad types) and Outlook
+    failures return `_err(...)` instead of raising."""
     async def wrapper(args: dict) -> dict:
         try:
             return await fn(args)
+        except OutlookUnavailable as exc:
+            log.info("Outlook unavailable: %s", exc.detail)
+            return _err(OUTLOOK_MISSING)
         except Exception as exc:
-            return _err(str(exc))
+            return _err(_com_message(exc))
     return wrapper
 
 
-async def _osascript(script: str, ok_text: str | None = None) -> dict:
-    return await asyncio.to_thread(run, ["osascript", "-e", script], None, ok_text)
+@contextlib.contextmanager
+def _outlook_session():
+    """(application, MAPI namespace) for this thread, inside a COM apartment
+    that is torn down on exit. Raises OutlookUnavailable when pywin32 or
+    Outlook's COM server is missing."""
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise OutlookUnavailable(str(exc)) from None
+    pythoncom.CoInitialize()
+    try:
+        try:
+            app = win32com.client.Dispatch("Outlook.Application")
+            ns = app.GetNamespace("MAPI")
+        except Exception as exc:
+            raise OutlookUnavailable(_com_message(exc)) from None
+        yield app, ns
+    finally:
+        pythoncom.CoUninitialize()
 
 
-# -- date helpers --------------------------------------------------------------
+def _in_outlook(fn: Callable):
+    """Run fn(app, ns) inside an Outlook session. Synchronous."""
+    with _outlook_session() as (app, ns):
+        return fn(app, ns)
+
+
+async def _outlook(fn: Callable):
+    return await asyncio.to_thread(_in_outlook, fn)
+
+
+# -- helpers -------------------------------------------------------------------------
 def _parse_day(day: str) -> dt.date:
     if day == "today":
         return dt.date.today()
@@ -79,46 +133,10 @@ def _parse_day(day: str) -> dt.date:
 
 
 def _parse_start(s: str) -> dt.datetime:
-    return dt.datetime.strptime(s, "%Y-%m-%d %H:%M")
-
-
-def _set_date_script(var: str, d: dt.date, hh: int = 0, mm: int = 0) -> str:
-    """AppleScript to set `var` (an already-declared `current date`-typed
-    variable name) to the given date/time, avoiding locale-fragile `date
-    "..."` parsing. Sets day to 1 before year/month to dodge day-overflow
-    (e.g. Jan 31 -> Feb) when moving between months."""
-    return (
-        f"set {var} to current date\n"
-        f"set day of {var} to 1\n"
-        f"set year of {var} to {d.year}\n"
-        f"set month of {var} to {d.month}\n"
-        f"set day of {var} to {d.day}\n"
-        f"set time of {var} to {hh * 3600 + mm * 60}\n"
-    )
-
-
-# AppleScript handler that collapses tabs/newlines in free text (mail
-# subjects/preview, reminder/event titles) so they can't corrupt our
-# one-record-per-line, tab-separated wire format.
-_SANITIZE_HANDLER = (
-    "on sanitize(s)\n"
-    "set s to s as string\n"
-    "set AppleScript's text item delimiters to tab\n"
-    "set s to (text items of s) as string\n"
-    'set AppleScript\'s text item delimiters to " "\n'
-    "set s to (text items of s) as string\n"
-    "set AppleScript's text item delimiters to linefeed\n"
-    "set s to (text items of s) as string\n"
-    'set AppleScript\'s text item delimiters to " "\n'
-    "set s to (text items of s) as string\n"
-    "set AppleScript's text item delimiters to return\n"
-    "set s to (text items of s) as string\n"
-    'set AppleScript\'s text item delimiters to " "\n'
-    "set s to (text items of s) as string\n"
-    "set AppleScript's text item delimiters to \"\"\n"
-    "return s\n"
-    "end sanitize\n"
-)
+    when = dt.datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
+    if not 1900 <= when.year <= 2999:
+        raise ValueError(s)
+    return when
 
 
 def _clamp(value, lo, hi, default):
@@ -129,100 +147,131 @@ def _clamp(value, lo, hi, default):
     return max(lo, min(hi, n))
 
 
+def _clean(s) -> str:
+    """Free text (a subject, a title, a mail body) as one line: tabs and
+    newlines collapsed, so it can't break the one-record-per-line output."""
+    return " ".join(str(s or "").split())
+
+
+def _naive(d) -> dt.datetime | None:
+    """An Outlook date as a naive local datetime. pywin32 hands Outlook's
+    local times back tagged with a UTC tzinfo; the wall-clock value is the
+    one that's right, so the tag is dropped, not converted."""
+    if d is None:
+        return None
+    try:
+        return dt.datetime(d.year, d.month, d.day, d.hour, d.minute, d.second)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _filter_date(d: dt.datetime) -> str:
+    """A date for an Items.Restrict filter. Outlook parses these with the
+    user's locale, but an ISO date-time is unambiguous everywhere it's been
+    tried; callers still re-check dates in Python."""
+    return d.strftime("%Y-%m-%d %H:%M")
+
+
+def _walk(items, limit: int = SCAN_MAX):
+    """Iterate an Items collection with GetFirst/GetNext (the only way that
+    works on a recurrence-expanded collection, whose Count is meaningless),
+    capped so a filter that matched too much can't run forever."""
+    item = items.GetFirst()
+    n = 0
+    while item is not None and n < limit:
+        yield item
+        n += 1
+        item = items.GetNext()
+
+
+def _get(obj, name: str, default=""):
+    try:
+        v = getattr(obj, name)
+    except Exception:
+        return default
+    return default if v is None else v
+
+
 # -- calendar -------------------------------------------------------------------
-def _format_events(raw: str) -> str:
-    lines = [ln for ln in raw.split("\n") if ln.strip()]
-    if not lines:
-        return "No events."
+def _format_events(rows: list[tuple]) -> str:
+    """rows: (title, start, end, calendar, location). One line each:
+    "HH:MM–HH:MM  title (calendar)" [" @ location"] — proactive.py parses it."""
     out = []
-    for ln in lines:
-        parts = ln.split("\t")
-        if len(parts) < 6:
-            continue
-        title, sh, sm, eh, em, cal, *rest = parts
-        loc = rest[0] if rest else ""
-        try:
-            rng = f"{int(sh):02d}:{int(sm):02d}–{int(eh):02d}:{int(em):02d}"
-        except ValueError:
-            continue
-        entry = f"{rng}  {title} ({cal})"
-        if loc.strip():
-            entry += f" @ {loc.strip()}"
+    for title, start, end, cal, loc in rows:
+        entry = f"{start:%H:%M}–{end:%H:%M}  {title} ({cal})"
+        if loc:
+            entry += f" @ {loc}"
         out.append(entry)
     return "\n".join(out) if out else "No events."
 
 
+def _events_sync(start: dt.datetime, end: dt.datetime):
+    def go(app, ns):
+        folder = ns.GetDefaultFolder(FOLDER_CALENDAR)
+        cal = _clean(_get(folder, "Name", "Calendar")) or "Calendar"
+        items = folder.Items
+        # Order matters: Sort, then IncludeRecurrences, then Restrict —
+        # otherwise recurring series come back as their master only.
+        items.Sort("[Start]")
+        items.IncludeRecurrences = True
+        hits = items.Restrict(f"[Start] < '{_filter_date(end)}' AND [End] > '{_filter_date(start)}'")
+        rows = []
+        for it in _walk(hits):
+            s, e = _naive(_get(it, "Start", None)), _naive(_get(it, "End", None))
+            if s is None or e is None:
+                continue
+            # Re-checked here, whatever the filter matched: a multi-day event
+            # that began before the range isn't listed, as before.
+            if not start <= s < end:
+                continue
+            rows.append((_clean(_get(it, "Subject")) or "(no title)", s, e, cal,
+                         _clean(_get(it, "Location"))))
+        return sorted(rows, key=lambda r: r[1])
+    return go
+
+
 @tool(
     "calendar_events",
-    "List Calendar.app events in a date range: title, start/end time, calendar, location. "
-    "Recurring-event instances are not expanded; a recurring series shows only its master event.",
+    "List Outlook calendar events in a date range (recurring events included): title, "
+    "start/end time, calendar, location",
     {"day": str, "days": int},
 )
 @_guard
 async def calendar_events(args: dict) -> dict:
-    day = str(args.get("day", "today") or "today")
+    day = str(args.get("day", "today") or "today").strip()
     try:
-        start = _parse_day(day)
+        first = _parse_day(day)
     except ValueError:
         return _err(f"invalid day: {day!r}")
     days = _clamp(args.get("days", 1), 1, CALENDAR_DAYS_MAX, 1)
+    start = dt.datetime.combine(first, dt.time())
+    rows = await _outlook(_events_sync(start, start + dt.timedelta(days=days)))
+    return _ok(_format_events(rows))
 
-    # Server-side date filtering (`whose start date ≥ … and < …`) is the
-    # actual fix for the timeout: the old code fetched every event's start
-    # date one at a time via `repeat ... in (events of cal)` and filtered in
-    # AppleScript, which is O(every event ever, including recurring
-    # instances, in every calendar) rather than O(events in range).
-    #
-    # NOTE: fetching properties as a batched list (`summary of evs`,
-    # `start date of evs`, …) was tried and found to be unreliable against
-    # real Calendar.app data — live-tested here, it raised
-    # "Can't get summary of {event id ...}" (-1728) for a genuine,
-    # just-created event even though `summary of (item 1 of evs)` for the
-    # very same event works fine. So each matched event's properties are
-    # fetched individually (`item i of evs`), which is one round trip per
-    # event rather than one per event per property, but avoids that failure
-    # mode entirely.
-    script = (
-        _SANITIZE_HANDLER
-        + 'tell application "Calendar"\n'
-        + "set output to \"\"\n"
-        + _set_date_script("startDate", start)
-        + f"set endDate to startDate + ({days} * days)\n"
-        + "repeat with cal in calendars\n"
-        + "set evs to (every event of cal whose start date ≥ startDate and start date < endDate)\n"
-        + "set evCount to count of evs\n"
-        + "set calName to name of cal\n"
-        + "repeat with i from 1 to evCount\n"
-        + "set evt to item i of evs\n"
-        + "set sd to start date of evt\n"
-        + "set ed to end date of evt\n"
-        + "set loc to \"\"\n"
-        + "try\n"
-        + "set loc to location of evt\n"
-        + "end try\n"
-        + "if loc is missing value then set loc to \"\"\n"
-        + "set output to output & my sanitize(summary of evt) & tab & (hours of sd) & tab & "
-          "(minutes of sd) & tab & (hours of ed) & tab & (minutes of ed) & tab & "
-          "my sanitize(calName) & tab & my sanitize(loc) & linefeed\n"
-        + "end repeat\n"
-        + "end repeat\n"
-        + "end tell\n"
-        + "return output"
-    )
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return res
-    return _ok(_format_events(res["content"][0]["text"]))
+
+def _find_calendar(ns, name: str):
+    """The calendar folder called `name` (casefolded): the default calendar,
+    one of its subfolders, or another account's calendar."""
+    want = name.casefold()
+    default = ns.GetDefaultFolder(FOLDER_CALENDAR)
+    candidates = [default, *list(_get(default, "Folders", []) or [])]
+    for store in list(_get(ns, "Stores", []) or []):
+        with contextlib.suppress(Exception):
+            candidates.append(store.GetDefaultFolder(FOLDER_CALENDAR))
+    for f in candidates:
+        if _clean(_get(f, "Name")).casefold() == want:
+            return f
+    return None
 
 
 @tool(
     "calendar_create",
-    "Create a Calendar.app event",
+    "Create an Outlook calendar event (default calendar unless one is named)",
     {"title": str, "start": str, "minutes": int, "calendar": str},
 )
 @_guard
 async def calendar_create(args: dict) -> dict:
-    title = str(args.get("title", "")).strip()
+    title = _clean(args.get("title", ""))
     if not title:
         return _err("title is required")
     start_s = str(args.get("start", ""))
@@ -231,174 +280,156 @@ async def calendar_create(args: dict) -> dict:
     except ValueError:
         return _err(f"invalid start: {start_s!r}, expected 'YYYY-MM-DD HH:MM'")
     minutes = _clamp(args.get("minutes", 60), 1, 24 * 60, 60)
-    calendar = str(args.get("calendar", "") or "").strip()
+    calendar = _clean(args.get("calendar", ""))
 
-    # Calendar.app's scripting dictionary has no "default calendar" property;
-    # when none is named, use the first writable calendar (a subscribed/
-    # read-only calendar can't accept new events), falling back to the first
-    # calendar in the list if that lookup itself fails for any reason.
-    script = (
-        'tell application "Calendar"\n'
-        + _set_date_script("startDate", start.date(), start.hour, start.minute)
-        + f"set endDate to startDate + ({minutes} * minutes)\n"
-    )
-    if calendar:
-        script += f'tell calendar "{_q(calendar)}"\n'
-    else:
-        script += (
-            "try\n"
-            "set targetCal to first calendar whose writable is true\n"
-            "on error\n"
-            "set targetCal to calendar 1\n"
-            "end try\n"
-            "tell targetCal\n"
-        )
-    script += (
-        f'make new event with properties {{summary:"{_q(title)}", start date:startDate, end date:endDate}}\n'
-        + "end tell\n"
-        + "end tell\n"
-    )
-    return await _osascript(script, ok_text=f"Created '{title}'")
+    def go(app, ns):
+        if calendar:
+            folder = _find_calendar(ns, calendar)
+            if folder is None:
+                return _err(f"there's no calendar called {calendar!r}")
+            appt = folder.Items.Add(ITEM_APPOINTMENT)
+        else:
+            appt = app.CreateItem(ITEM_APPOINTMENT)
+        appt.Subject = title
+        appt.Start = start
+        appt.Duration = minutes
+        appt.Save()
+        return _ok(f"Created '{title}'")
+    return await _outlook(go)
 
 
 # -- mail -------------------------------------------------------------------
-def _format_mail(raw: str) -> str:
-    lines = [ln for ln in raw.split("\n") if ln.strip()]
-    if not lines:
-        return "No messages."
-    out = []
-    for ln in lines:
-        parts = ln.split("\t")
-        if len(parts) < 4:
-            continue
-        sender, subject, when, preview = parts[0], parts[1], parts[2], parts[3]
-        out.append(f"{when}  {sender} — {subject}\n  {preview.strip()}")
+def _format_mail(rows: list[tuple]) -> str:
+    """rows: (sender, subject, received, preview). A header line per message
+    and the preview indented by two spaces — proactive.count_mail relies on it."""
+    out = [f"{when:%Y-%m-%d %H:%M}  {sender} — {subject}\n  {preview}" for sender, subject, when, preview in rows]
     return "\n".join(out) if out else "No messages."
 
 
-_PAD_HANDLER = (
-    "on pad(n)\n"
-    "if n < 10 then\n"
-    "return \"0\" & n\n"
-    "else\n"
-    "return \"\" & n\n"
-    "end if\n"
-    "end pad\n"
-)
+def _sender(m) -> str:
+    """"Name <address>" when Outlook has an SMTP address, else the name.
+    Exchange senders carry an X.500 path instead; their SMTP address is
+    looked up through the address book."""
+    name = _clean(_get(m, "SenderName"))
+    addr = _clean(_get(m, "SenderEmailAddress"))
+    if addr and "@" not in addr:
+        addr = ""
+        with contextlib.suppress(Exception):
+            addr = _clean(m.Sender.GetExchangeUser().PrimarySmtpAddress)
+    if addr and name and addr.casefold() != name.casefold():
+        return f"{name} <{addr}>"
+    return name or addr or "(unknown sender)"
 
 
-def _mail_script(filter_expr: str, limit: int) -> str:
-    """Server-side filter (`messages of inbox whose ...`) does the actual
-    perf work (only matching messages come back at all, instead of the old
-    code testing every inbox message one at a time), followed by `items 1
-    thru n` to cap it at `limit` before touching any properties.
-    Properties are fetched per matched message (`item i of msgs`), not as a
-    batched property list — batched list fetches (`sender of msgs`, etc.)
-    were live-tested against Calendar.app and found to fail for otherwise
-    normal data (see calendar_events), so the same batched-list shape is
-    avoided here defensively even though it wasn't reproduced against Mail
-    directly (no unread mail was available on the test Mac to try it on)."""
-    return (
-        _SANITIZE_HANDLER
-        + _PAD_HANDLER
-        + 'tell application "Mail"\n'
-        + "set output to \"\"\n"
-        + f"set msgs to (messages of inbox whose {filter_expr})\n"
-        + "set n to count of msgs\n"
-        + f"if n > {limit} then set n to {limit}\n"
-        + "repeat with i from 1 to n\n"
-        + "set m to item i of msgs\n"
-        + "set dt to date received of m\n"
-        + "set prev to \"\"\n"
-        + "try\n"
-        + "set c to my sanitize(content of m as string)\n"
-        + "if (length of c) > 200 then\n"
-        + "set prev to text 1 thru 200 of c\n"
-        + "else\n"
-        + "set prev to c\n"
-        + "end if\n"
-        + "end try\n"
-        + "set output to output & my sanitize(sender of m) & tab & my sanitize(subject of m) & tab & "
-          "((year of dt) as string) & \"-\" & (my pad(month of dt as integer)) & \"-\" & (my pad(day of dt)) & "
-          '" " & (my pad(hours of dt)) & ":" & (my pad(minutes of dt)) & tab & prev & linefeed\n'
-        + "end repeat\n"
-        + "end tell\n"
-        + "return output"
-    )
+def _mail_rows(items, limit: int) -> list[tuple]:
+    rows = []
+    for m in _walk(items):
+        if len(rows) >= limit:
+            break
+        if _get(m, "Class", CLASS_MAIL) != CLASS_MAIL:
+            continue                    # meeting requests, receipts, ...
+        when = _naive(_get(m, "ReceivedTime", None))
+        if when is None:
+            continue
+        preview = _clean(_get(m, "Body"))[:PREVIEW_CHARS]
+        rows.append((_sender(m), _clean(_get(m, "Subject")) or "(no subject)", when, preview))
+    return rows
 
 
-@tool("mail_unread", "List unread Mail.app inbox messages: sender, subject, date, preview", {"limit": int})
+def _inbox_items(ns):
+    items = ns.GetDefaultFolder(FOLDER_INBOX).Items
+    items.Sort("[ReceivedTime]", True)       # newest first
+    return items
+
+
+@tool("mail_unread", "List unread Outlook inbox messages: sender, subject, date, preview", {"limit": int})
 @_guard
 async def mail_unread(args: dict) -> dict:
     limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
-    script = _mail_script("read status is false", limit)
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return res
-    return _ok(_format_mail(res["content"][0]["text"]))
+
+    def go(app, ns):
+        return _mail_rows(_inbox_items(ns).Restrict("[UnRead] = True"), limit)
+    return _ok(_format_mail(await _outlook(go)))
 
 
 async def mail_unread_count() -> int:
-    """Mail's inbox unread count, straight from the mailbox property — a
-    plain helper (not an MCP tool) for the proactive briefing, which
-    wants the real number rather than the capped `mail_unread` listing.
-    Raises RuntimeError when Mail errors or returns something that isn't
-    an integer."""
-    res = await _osascript('tell application "Mail" to get unread count of inbox')
-    text = res["content"][0]["text"]
-    if res.get("is_error"):
-        raise RuntimeError(text)
+    """The inbox's unread count, straight from the folder property — a plain
+    helper (not an MCP tool) for the proactive briefing, which wants the
+    real number rather than the capped `mail_unread` listing. Raises
+    RuntimeError when Outlook fails or reports something that isn't an
+    integer."""
+    def go(app, ns):
+        return ns.GetDefaultFolder(FOLDER_INBOX).UnReadItemCount
     try:
-        return int(text.strip())
-    except ValueError:
-        raise RuntimeError(f"unexpected unread count: {text!r}") from None
+        n = await _outlook(go)
+    except OutlookUnavailable:
+        raise
+    except Exception as exc:
+        raise RuntimeError(_com_message(exc)) from None
+    try:
+        return int(n)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"unexpected unread count: {n!r}") from None
 
 
-@tool("mail_search", "Search Mail.app inbox by subject/sender substring", {"query": str, "limit": int})
+def _dasl_like(text: str) -> str:
+    """`text` as the inside of a DASL LIKE '%...%' literal: quotes doubled,
+    and the filter's own wildcard/escape characters dropped."""
+    return re.sub(r"[%_\[\]\x00-\x1f]", " ", text).replace("'", "''")
+
+
+def mail_search_filter(query: str) -> str:
+    q = _dasl_like(query)
+    fields = ("urn:schemas:httpmail:subject", "urn:schemas:httpmail:fromname",
+              "urn:schemas:httpmail:fromemail")
+    return "@SQL=" + " OR ".join(f"\"{f}\" LIKE '%{q}%'" for f in fields)
+
+
+@tool("mail_search", "Search the Outlook inbox by subject/sender substring", {"query": str, "limit": int})
 @_guard
 async def mail_search(args: dict) -> dict:
-    query = str(args.get("query", "")).strip()
+    query = _clean(args.get("query", ""))[:200]
     if not query:
         return _err("query is required")
     limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
-    q = f'"{_q(query)}"'
-    script = _mail_script(f"(subject contains {q}) or (sender contains {q})", limit)
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return res
-    return _ok(_format_mail(res["content"][0]["text"]))
+
+    def go(app, ns):
+        return _mail_rows(_inbox_items(ns).Restrict(mail_search_filter(query)), limit)
+    return _ok(_format_mail(await _outlook(go)))
 
 
-@tool("mail_send", "Compose and send a Mail.app message", {"to": str, "subject": str, "body": str})
+@tool("mail_send",
+      "Compose and send an email from Outlook. `to` is an email address or a contact's name "
+      "(looked up in Outlook contacts and the address book)",
+      {"to": str, "subject": str, "body": str})
 @_guard
 async def mail_send(args: dict) -> dict:
-    to = str(args.get("to", "")).strip()
-    subject = str(args.get("subject", ""))
-    body = str(args.get("body", ""))
+    to = _clean(args.get("to", ""))
+    subject = _clean(args.get("subject", ""))
+    body = str(args.get("body", "") or "")
     if not to:
         return _err("to is required")
-    script = (
-        'tell application "Mail"\n'
-        + f'set newMsg to make new outgoing message with properties {{subject:"{_q(subject)}", '
-          f'content:"{_q(body)}", visible:false}}\n'
-        + "tell newMsg\n"
-        + f'make new to recipient at end of to recipients with properties {{address:"{_q(to)}"}}\n'
-        + "end tell\n"
-        + "send newMsg\n"
-        + "end tell\n"
-    )
-    return await _osascript(script, ok_text=f"Sent to {to}")
+    # A name is resolved to one address first (the same lookup the gate's
+    # confirm showed); an ambiguous or unknown one comes back as an error
+    # the brain can ask about.
+    try:
+        rec = await resolve_recipient_async(to)
+    except ValueError as exc:
+        return _err(str(exc))
+
+    def go(app, ns):
+        msg = app.CreateItem(ITEM_MAIL)
+        msg.To = rec.handle
+        msg.Subject = subject
+        msg.Body = body
+        msg.Send()
+        return _ok(f"Sent to {rec.name}")
+    return await _outlook(go)
 
 
-# -- contacts -------------------------------------------------------------------
-CONTACTS_PROMPT_S = 30        # how long the first-use permission prompt may take
-RESOLVED_TTL_S = 300          # a confirmed name -> handle holds this long
-CONTACTS_DENIED = ("I can't read your contacts. Allow Veronica in System Settings > "
-                   "Privacy & Security > Contacts, or give me the number.")
-
-
-class ContactsDenied(Exception):
-    """Veronica isn't allowed to read Contacts (TCC)."""
+# -- recipients (Outlook contacts / address book) -----------------------------
+RESOLVED_TTL_S = 300          # a confirmed name -> address holds this long
+_EMAIL_RE = re.compile(r"[^@\s<>\"']+@[^@\s<>\"']+\.[^@\s<>\"']+")
 
 
 @dataclass(frozen=True)
@@ -408,49 +439,61 @@ class Recipient:
 
 
 def is_handle(to: str) -> bool:
-    """A phone number or an email / Apple ID, as opposed to a person's name."""
-    if "@" in to:
-        return True
-    return bool(re.fullmatch(r"\+?[\d\s().-]+", to)) and sum(c.isdigit() for c in to) >= 3
-
-
-def _contacts_search(name: str) -> list[tuple[str, list[str]]]:
-    """Contacts matching `name`, as (display name, [phones..., emails...]).
-    The real Contacts framework; tests replace this. Asks for access the
-    first time (the system prompt) and raises ContactsDenied without it."""
-    import Contacts as CN
-
-    store = CN.CNContactStore.alloc().init()
-    status = CN.CNContactStore.authorizationStatusForEntityType_(CN.CNEntityTypeContacts)
-    if status == CN.CNAuthorizationStatusNotDetermined:
-        done, granted = threading.Event(), []
-
-        def answered(ok, _err):
-            granted.append(bool(ok))
-            done.set()
-
-        store.requestAccessForEntityType_completionHandler_(CN.CNEntityTypeContacts, answered)
-        done.wait(CONTACTS_PROMPT_S)
-        if not (granted and granted[0]):
-            raise ContactsDenied()
-    elif status not in (CN.CNAuthorizationStatusAuthorized, getattr(CN, "CNAuthorizationStatusLimited", 4)):
-        raise ContactsDenied()
-    keys = [CN.CNContactGivenNameKey, CN.CNContactFamilyNameKey, CN.CNContactNicknameKey,
-            CN.CNContactOrganizationNameKey, CN.CNContactPhoneNumbersKey, CN.CNContactEmailAddressesKey]
-    found, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
-        CN.CNContact.predicateForContactsMatchingName_(name), keys, None)
-    if found is None:
-        raise RuntimeError(str(err) if err else "Contacts lookup failed")
-    return [_contact_row(c) for c in found]
+    """An email address, as opposed to a person's name."""
+    return bool(_EMAIL_RE.fullmatch(to.strip()))
 
 
 def _contact_row(c) -> tuple[str, list[str]]:
-    """A CNContact as (display name, [phones..., emails...])."""
-    display = " ".join(p for p in (str(c.givenName()), str(c.familyName())) if p) \
-        or str(c.nickname()) or str(c.organizationName())
-    handles = [str(p.value().stringValue()) for p in c.phoneNumbers()]
-    handles += [str(e.value()) for e in c.emailAddresses()]
-    return display, [h for h in handles if h]
+    """An Outlook ContactItem as (display name, [SMTP addresses...])."""
+    display = (_clean(_get(c, "FullName")) or _clean(_get(c, "NickName"))
+               or _clean(_get(c, "CompanyName")))
+    emails = []
+    for i in (1, 2, 3):
+        addr = _clean(_get(c, f"Email{i}Address"))
+        if "@" in addr:                       # an Exchange (EX) entry is X.500, not SMTP
+            emails.append(addr)
+    return display, emails
+
+
+def _name_matches(query: str, display: str, extra: list[str]) -> bool:
+    q = query.casefold()
+    names = [display, *extra]
+    return any(n and (n.casefold().startswith(q)
+                      or any(part.startswith(q) for part in n.casefold().split()))
+               for n in names)
+
+
+def _search_outlook(ns, name: str) -> list[tuple[str, list[str]]]:
+    found = []
+    folder = ns.GetDefaultFolder(FOLDER_CONTACTS)
+    for c in _walk(folder.Items):
+        if _get(c, "Class", 40) != 40:        # olContact (skips distribution lists)
+            continue
+        display, emails = _contact_row(c)
+        extra = [_clean(_get(c, "FirstName")), _clean(_get(c, "LastName")), _clean(_get(c, "NickName"))]
+        if display and _name_matches(name, display, extra):
+            found.append((display, emails))
+    if found:
+        return found
+    # Not in personal contacts: let Outlook resolve it against the address
+    # book (an Exchange GAL, say). Resolve() fails on an ambiguous name.
+    rcp = ns.CreateRecipient(name)
+    if rcp.Resolve():
+        entry = rcp.AddressEntry
+        addr = _clean(_get(entry, "Address"))
+        if "@" not in addr:
+            addr = ""
+            with contextlib.suppress(Exception):
+                addr = _clean(entry.GetExchangeUser().PrimarySmtpAddress)
+        return [(_clean(_get(rcp, "Name")) or name, [addr] if addr else [])]
+    return []
+
+
+def _contacts_search(name: str) -> list[tuple[str, list[str]]]:
+    """People matching `name`, as (display name, [email addresses...]), from
+    Outlook's contacts and then its address book. Tests replace this.
+    Synchronous; raises OutlookUnavailable without Outlook."""
+    return _in_outlook(lambda app, ns: _search_outlook(ns, name))
 
 
 def _or_list(items: list[str]) -> str:
@@ -458,7 +501,7 @@ def _or_list(items: list[str]) -> str:
 
 
 def _pick(name: str, found: list[tuple[str, list[str]]]) -> Recipient:
-    """One person with one handle, or a ValueError saying what to ask."""
+    """One person with one address, or a ValueError saying what to ask."""
     if not found:
         raise ValueError(f"No contact named {name}.")
     exact = [f for f in found if f[0].casefold() == name.casefold()]
@@ -468,9 +511,9 @@ def _pick(name: str, found: list[tuple[str, list[str]]]) -> Recipient:
         names = list(dict.fromkeys(f[0] for f in found))[:4]
         raise ValueError(f"Which {name} — {_or_list(names)}?")
     who, handles = found[0]
-    handles = list(dict.fromkeys(handles))
+    handles = list(dict.fromkeys(h for h in handles if is_handle(h)))
     if not handles:
-        raise ValueError(f"{who} has no phone number or email in Contacts.")
+        raise ValueError(f"{who} has no email address in Outlook.")
     if len(handles) > 1:
         raise ValueError(f"{who} has several: {_or_list(handles[:4])}. Which one?")
     return Recipient(who, handles[0])
@@ -480,27 +523,27 @@ _resolved: dict[str, tuple[float, Recipient]] = {}
 
 
 def resolve_recipient(to: str) -> Recipient:
-    """A Messages recipient from what the brain said: a handle as-is, a name
-    looked up in Contacts. Raises ValueError with a short, speakable reason
-    (ambiguous, unknown, no access) instead of guessing. A name resolved
+    """A mail recipient from what the brain said: an address as-is, a name
+    looked up in Outlook. Raises ValueError with a short, speakable reason
+    (ambiguous, unknown, no Outlook) instead of guessing. A name resolved
     here is remembered for a few minutes, so the send goes to the very
-    handle the confirm showed."""
+    address the confirm showed."""
     to = to.strip()
     if is_handle(to):
         return Recipient(to, to)
+    if "@" in to or re.fullmatch(r"\+?[\d\s().-]+", to):
+        raise ValueError(f"{to} isn't an email address.")
     key = to.casefold()
     hit = _resolved.get(key)
     if hit is not None and time.monotonic() - hit[0] < RESOLVED_TTL_S:
         return hit[1]
     try:
         found = _contacts_search(to)
-    except ContactsDenied:
-        raise ValueError(CONTACTS_DENIED) from None
-    except ImportError:
-        raise ValueError("Contacts support isn't installed; give me the number.") from None
+    except OutlookUnavailable:
+        raise ValueError(OUTLOOK_MISSING + " Or give me the email address.") from None
     rec = _pick(to, found)
     _resolved[key] = (time.monotonic(), rec)
-    log.info("message recipient %r -> %s", to, rec.name)
+    log.info("mail recipient %r -> %s", to, rec.name)
     return rec
 
 
@@ -508,147 +551,98 @@ async def resolve_recipient_async(to: str) -> Recipient:
     return await asyncio.to_thread(resolve_recipient, to)
 
 
-# -- messages -------------------------------------------------------------------
-@tool("message_send",
-      "Send an iMessage/SMS through Messages.app. `to` is a phone number, an email/Apple ID, "
-      "or a contact's name (looked up in Contacts)",
-      {"to": str, "body": str})
-@_guard
-async def message_send(args: dict) -> dict:
-    to = str(args.get("to", "")).strip()
-    body = str(args.get("body", ""))
-    if not to:
-        return _err("to is required")
-    if not body:
-        return _err("body is required")
-    # `buddy "..."` wants a phone number or Apple ID, not a display name, so
-    # a name is looked up in Contacts first; an ambiguous or unknown one
-    # comes back as an error the brain can ask about.
-    try:
-        rec = await resolve_recipient_async(to)
-    except ValueError as exc:
-        return _err(str(exc))
-    script = (
-        'tell application "Messages"\n'
-        "set targetService to 1st service whose service type = iMessage\n"
-        + f'set targetBuddy to buddy "{_q(rec.handle)}" of targetService\n'
-        + f'send "{_q(body)}" to targetBuddy\n'
-        + "end tell\n"
-    )
-    return await _osascript(script, ok_text=f"Sent to {rec.name}")
-
-
-# -- reminders ----------------------------------------------------------------
-def _format_reminders(raw: str) -> str:
-    lines = [ln for ln in raw.split("\n") if ln.strip()]
-    if not lines:
-        return "No reminders due."
+# -- reminders (Outlook tasks) ---------------------------------------------
+def _format_reminders(rows: list[tuple]) -> str:
+    """rows: (title, due, list). "YYYY-MM-DD HH:MM  name" [" (list)"] —
+    proactive.py parses it."""
     out = []
-    for ln in lines:
-        parts = ln.split("\t")
-        if len(parts) < 6:
-            continue
-        name, y, m, d, hh, mm, *rest = parts
-        lst = rest[0] if rest else ""
-        try:
-            when = f"{int(y):04d}-{int(m):02d}-{int(d):02d} {int(hh):02d}:{int(mm):02d}"
-        except ValueError:
-            continue
-        entry = f"{when}  {name}"
-        if lst.strip():
-            entry += f" ({lst.strip()})"
+    for name, when, lst in rows:
+        entry = f"{when:%Y-%m-%d %H:%M}  {name}"
+        if lst:
+            entry += f" ({lst})"
         out.append(entry)
     return "\n".join(out) if out else "No reminders due."
 
 
+def _task_due(t) -> dt.datetime | None:
+    """When a task is due: its reminder time when it has one (that carries
+    the hour), else its due date; None for an undated task."""
+    for attr, enabled in (("ReminderTime", bool(_get(t, "ReminderSet", False))), ("DueDate", True)):
+        if not enabled:
+            continue
+        d = _naive(_get(t, attr, None))
+        if d is not None and d.year < NO_DATE_YEAR:
+            return d
+    return None
+
+
 @tool(
     "reminders_due",
-    "List incomplete Reminders.app reminders due within N days (including overdue)",
+    "List incomplete Outlook tasks due within N days (including overdue)",
     {"days": int},
 )
 @_guard
 async def reminders_due(args: dict) -> dict:
     days = _clamp(args.get("days", 1), 1, REMINDERS_DAYS_MAX, 1)
-    script = (
-        _SANITIZE_HANDLER
-        + 'tell application "Reminders"\n'
-        + "set output to \"\"\n"
-        + f"set endDate to (current date) + ({days} * days)\n"
-        + "repeat with lst in lists\n"
-        + "repeat with r in (reminders of lst whose completed is false)\n"
-        + "set dd to due date of r\n"
-        + "if dd is not missing value then\n"
-        + "if dd < endDate then\n"
-        + "set output to output & my sanitize(name of r) & tab & (year of dd) & tab & "
-          "(month of dd as integer) & tab & (day of dd) & tab & (hours of dd) & tab & "
-          "(minutes of dd) & tab & my sanitize(name of lst) & linefeed\n"
-        + "end if\n"
-        + "end if\n"
-        + "end repeat\n"
-        + "end repeat\n"
-        + "end tell\n"
-        + "return output"
-    )
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return res
-    return _ok(_format_reminders(res["content"][0]["text"]))
+    end = dt.datetime.now() + dt.timedelta(days=days)
+
+    def go(app, ns):
+        folder = ns.GetDefaultFolder(FOLDER_TASKS)
+        lst = _clean(_get(folder, "Name", "Tasks"))
+        rows = []
+        for t in _walk(folder.Items.Restrict("[Complete] = False")):
+            due = _task_due(t)
+            if due is not None and due < end:
+                rows.append((_clean(_get(t, "Subject")) or "(no title)", due, lst))
+        return sorted(rows, key=lambda r: r[1])
+    return _ok(_format_reminders(await _outlook(go)))
 
 
-@tool("reminder_create", "Create a Reminders.app reminder in the default list", {"title": str, "when": str})
+@tool("reminder_create", "Create an Outlook task, optionally with a due time and reminder",
+      {"title": str, "when": str})
 @_guard
 async def reminder_create(args: dict) -> dict:
-    title = str(args.get("title", "")).strip()
+    title = _clean(args.get("title", ""))
     if not title:
         return _err("title is required")
     when_s = str(args.get("when", "") or "").strip()
-    due_script = ""
+    when = None
     if when_s:
         try:
             when = _parse_start(when_s)
         except ValueError:
             return _err(f"invalid when: {when_s!r}, expected 'YYYY-MM-DD HH:MM'")
-        due_script = (
-            _set_date_script("dueDate", when.date(), when.hour, when.minute)
-            + "set due date of newRem to dueDate\n"
-        )
-    script = (
-        'tell application "Reminders"\n'
-        + "tell default list\n"
-        + f'set newRem to make new reminder with properties {{name:"{_q(title)}"}}\n'
-        + "end tell\n"
-        + due_script
-        + "end tell\n"
-    )
-    return await _osascript(script, ok_text=f"Created reminder '{title}'")
+
+    def go(app, ns):
+        task = app.CreateItem(ITEM_TASK)
+        task.Subject = title
+        if when is not None:
+            task.DueDate = dt.datetime.combine(when.date(), dt.time())
+            task.ReminderSet = True
+            task.ReminderTime = when
+        task.Save()
+        return _ok(f"Created reminder '{title}'")
+    return await _outlook(go)
 
 
 # -- notes -----------------------------------------------------------------
-@tool("notes_create", "Create a note in Notes.app", {"title": str, "body": str})
+@tool("notes_create", "Create an Outlook note", {"title": str, "body": str})
 @_guard
 async def notes_create(args: dict) -> dict:
-    title = str(args.get("title", "")).strip()
+    title = _clean(args.get("title", ""))
     if not title:
         return _err("title is required")
-    body = str(args.get("body", "") or "")
-    # Notes.app note bodies are HTML: escape the user's text so "<b>" /
-    # "&" render literally, and turn newlines into <br> so line breaks
-    # survive. The title is escaped too — Notes derives the note's name
-    # from the body's first line when a name isn't given, and treats the
-    # name as HTML-ish text as well.
-    # quote=False: a literal " is fine in HTML text content, and _q()
-    # already escapes it for the AppleScript string literal.
-    html_body = html.escape(body, quote=False).replace("\n", "<br>")
-    html_title = html.escape(title, quote=False)
-    # No `at folder "Notes"`: the default account's folder may be named
-    # differently (localized, or iCloud "Notes" vs "On My Mac"); creating
-    # in the default folder works everywhere.
-    script = (
-        'tell application "Notes"\n'
-        f'make new note with properties {{name:"{_q(html_title)}", body:"{_q(html_body)}"}}\n'
-        "end tell\n"
-    )
-    return await _osascript(script, ok_text=f"Created note '{title}'")
+    body = str(args.get("body", "") or "").replace("\r\n", "\n")
+    # A note has no separate title: Outlook shows the body's first line as
+    # its subject. Plain text, so nothing needs escaping.
+    text = f"{title}\n{body}" if body else title
+
+    def go(app, ns):
+        note = app.CreateItem(ITEM_NOTE)
+        note.Body = text.replace("\n", "\r\n")
+        note.Save()
+        return _ok(f"Created note '{title}'")
+    return await _outlook(go)
 
 
 # -- timers -----------------------------------------------------------------
@@ -708,7 +702,6 @@ async def timer_cancel(args: dict) -> dict:
 TOOLS = [
     calendar_events, calendar_create,
     mail_unread, mail_search, mail_send,
-    message_send,
     reminder_create, reminders_due,
     notes_create,
     timer_set, timer_list, timer_cancel,

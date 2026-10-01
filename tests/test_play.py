@@ -423,8 +423,8 @@ async def test_refreshed_flag_cleared_by_successful_open(fake_sd, caplog):
 
 async def test_dead_and_closed_streams_are_kept_alive_briefly(monkeypatch):
     """A stream that ended (finished_callback) or was closed must not be
-    dropped from Python while CoreAudio may still deliver a late start/stop
-    notification into its cffi closure — keep a bounded graveyard."""
+    dropped from Python while the host API may still deliver a late callback /
+    finished notification into its cffi closure — keep a bounded graveyard."""
     class SD:
         PortAudioError = play_mod._PortAudioError
 

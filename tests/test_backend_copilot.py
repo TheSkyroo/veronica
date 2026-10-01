@@ -73,11 +73,11 @@ def test_is_per_turn_and_argv_first_turn(tmp_path):
     [cfg] = flag(a, "--additional-mcp-config")
     servers = json.loads(cfg)["mcpServers"]
     assert set(servers) == {f"veronica-{s}" for s in hook.OUR_SERVERS}
-    mac = servers["veronica-mac"]
-    assert mac["type"] == "local" and mac["command"] == sys.executable and mac["tools"] == ["*"]
-    assert mac["args"] == ["-m", "veronica.tools.serve", "mac"]
-    assert mac["env"] == {"VERONICA_GATE_SOCK": str(b.s.gate_socket), "VERONICA_BRAIN": "copilot",
-                          "VERONICA_HOOK_LOG": str(b.hook_log)}
+    system = servers["veronica-system"]
+    assert system["type"] == "local" and system["command"] == sys.executable and system["tools"] == ["*"]
+    assert system["args"] == ["-m", "veronica.tools.serve", "system"]
+    assert system["env"] == {"VERONICA_GATE": str(b.s.gate_endpoint), "VERONICA_BRAIN": "copilot",
+                             "VERONICA_HOOK_LOG": str(b.hook_log)}
     # a fresh id per first-turn spawn (a failed first turn never reuses one)
     assert flag(b.argv("hi", None, [], native=True), "--session-id") != [sid]
 
@@ -94,7 +94,7 @@ def test_argv_resumed_native_off_images(tmp_path):
     assert "--allow-all-tools" not in a and "--allow-all-paths" not in a
     assert flag(a, "--allow-tool") == [f"veronica-{s}" for s in hook.OUR_SERVERS]
     assert flag(a, "--excluded-tools") == list(NATIVE_ACTION_TOOLS)
-    assert {"bash", "apply_patch", "task"} <= set(NATIVE_ACTION_TOOLS)
+    assert {"powershell", "write_powershell", "bash", "apply_patch", "task"} <= set(NATIVE_ACTION_TOOLS)
     assert a[-2] == "--additional-mcp-config"      # variadic flags never swallow the config
 
 
@@ -108,13 +108,24 @@ def test_workspace_instructions_and_user_level_hook(tmp_path):
     # a timeout fails OPEN, so the gate answer budget stays well under it
     assert entry["type"] == "command" and entry["timeoutSec"] == gateclient.HOOK_TIMEOUT_S
     assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
-    assert entry["bash"] == b.hook_command()
-    assert entry["bash"] == (f"{sys.executable} -m veronica.brain.hook copilot --sock {b.s.gate_socket} "
-                             f"--log {b.hook_log} --scope-cwd {b.workspace}")
+    # Copilot runs the `powershell` entry on Windows: call operator, every token literal
+    assert "bash" not in entry
+    assert entry["powershell"] == b.hook_command()
+    assert entry["powershell"] == (f"& '{sys.executable}' '-m' 'veronica.brain.hook' 'copilot' "
+                                   f"'--gate' '{b.s.gate_endpoint}' '--log' '{b.hook_log}' "
+                                   f"'--scope-cwd' '{b.workspace}'")
     b.prepare_workspace("SYS2", native=False)     # rewritten every turn, still one entry
     assert len(json.loads(b.hooks_file.read_text())["hooks"]["preToolUse"]) == 1
     text = (b.workspace / ".github" / "copilot-instructions.md").read_text()
     assert text.startswith("SYS2\n\nDo not run shell commands")
+
+
+def test_hook_command_is_literal_powershell_for_any_path(tmp_path):
+    b, _ = make(tmp_path / "Mani's Kumar $HOME`")
+    cmd = b.hook_command()
+    assert cmd.startswith("& '")
+    # single quotes are doubled; $ and ` stay literal inside '...'
+    assert f"'--scope-cwd' '{str(b.workspace).replace(chr(39), chr(39) * 2)}'" in cmd
 
 
 async def test_close_removes_hook_file(tmp_path):
@@ -156,7 +167,7 @@ def test_parse_mcp_fixture(tmp_path):
     b, _ = make(tmp_path)
     events = [e for line in lines("copilot-mcp.jsonl") for e in b.parse(line)]
     starts = [e for e in events if isinstance(e, cli.ToolStart)]
-    [vol] = [s for s in starts if s.tool == "mcp__mac__volume_get"]
+    [vol] = [s for s in starts if s.tool == "mcp__system__volume_get"]
     assert vol.native is False and vol.input == {}
     assert any(isinstance(e, cli.ToolEnd) and e.call_id == vol.call_id for e in events)
     assert isinstance(events[-1], cli.Done) and not any(isinstance(e, cli.Error) for e in events)
@@ -178,9 +189,9 @@ def test_parse_tool_events(tmp_path):
     assert hook.canary_key("apply_patch", {"command": patch}) == patch
     assert b.canary_matches(patch, patch) and not b.canary_matches(patch, patch + "x")
     [m] = b.parse(json.dumps({"type": "tool.execution_start", "data": {
-        "toolCallId": "c3", "toolName": "veronica-mac-volume_get", "arguments": {},
-        "mcpServerName": "veronica-mac", "mcpToolName": "volume_get"}}))
-    assert m == cli.ToolStart("c3", "mcp__mac__volume_get", {}, native=False)
+        "toolCallId": "c3", "toolName": "veronica-system-volume_get", "arguments": {},
+        "mcpServerName": "veronica-system", "mcpToolName": "volume_get"}}))
+    assert m == cli.ToolStart("c3", "mcp__system__volume_get", {}, native=False)
     [other] = b.parse(json.dumps({"type": "tool.execution_start", "data": {
         "toolCallId": "c4", "toolName": "github-mcp-server-search_code", "arguments": {"q": "x"},
         "mcpServerName": "github-mcp-server", "mcpToolName": "search_code"}}))
@@ -239,7 +250,7 @@ def test_hook_side_maps_copilot_payloads(tmp_path):
     assert [e["key"] for e in entries] == ["echo canary-ok", patch]
     # ours pass the hook untouched (tools.serve gates them) and are not logged
     out, _ = hook.main(["copilot", "--log", str(log), "--scope-cwd", str(ws)],
-                       json.dumps({**base, "toolName": "veronica-mac-volume_get", "toolArgs": {}}), ask=ask)
+                       json.dumps({**base, "toolName": "veronica-system-volume_get", "toolArgs": {}}), ask=ask)
     assert json.loads(out)["permissionDecision"] == "allow" and len(seen) == 2
     assert len(log.read_text().splitlines()) == 2
     # another cwd (the user's own copilot session): silent no-op

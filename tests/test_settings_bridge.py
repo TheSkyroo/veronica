@@ -1024,12 +1024,12 @@ def test_auto_allow_tools_is_editable_and_round_trips_through_prefs(h):
 def test_clearing_the_field_revokes_everything(h):
     assert h.bridge.set("brain", "auto_allow_tools", "")["ok"]
     assert h.orch.s.auto_allow_tools == []
-    assert classify("mcp__mac__clipboard_write", {"text": "hi"}, (), h.orch.s.auto_allow_tools) == "confirm"
+    assert classify("mcp__system__clipboard_write", {"text": "hi"}, (), h.orch.s.auto_allow_tools) == "confirm"
 
 
 def test_the_default_ships_with_clipboard_write_ticked(h):
     st = h.bridge.get_state()["brain"]
-    assert st["auto_allow_tools"] == ["mcp__mac__clipboard_write"]
+    assert st["auto_allow_tools"] == ["mcp__system__clipboard_write"]
     assert [t["tool"] for t in st["auto_allowable"]] == list(AUTO_ALLOW_LABELS)
 
 

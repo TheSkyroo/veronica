@@ -1,5 +1,5 @@
 """`computer` MCP tools with every framework seam faked: nothing here
-posts a CGEvent, calls Vision/AX, or reads the real screen."""
+sends real input, runs OCR or UI Automation, or reads the real screen."""
 import pytest
 
 from veronica.tools import computer as c
@@ -9,14 +9,16 @@ from veronica.tools.computer_events import DangerousCombo, Front
 from veronica.tools.ocr import Word
 from veronica.tools.screen import Geometry
 
-FRONT = Front(app="Finder", bundle_id="com.apple.finder", window_title="Downloads", pid=42)
-DIALOG = Front(app="SecurityAgent", bundle_id="com.apple.SecurityAgent", window_title="", pid=7)
+FRONT = Front(app="File Explorer", bundle_id="explorer.exe", window_title="Downloads", pid=42,
+              window_class="CabinetWClass")
+DIALOG = Front(app="Credential Manager UI Host", bundle_id="credentialuibroker.exe",
+               window_title="Windows Security", pid=7, window_class="Credential Dialog Xaml Host")
 
 
 def _geometry(age: float = 5.0, scale: float = 2.0, ox: float = 100.0, oy: float = 50.0) -> Geometry:
     return Geometry(
         region="screen", image_w=1568, image_h=1019, origin_x=ox, origin_y=oy,
-        width_pt=784.0, height_pt=509.5, scale=scale, captured_at=1000.0 - age, window=None,
+        screen_w=784.0, screen_h=509.5, scale=scale, captured_at=1000.0 - age, window=None,
     )
 
 
@@ -26,10 +28,11 @@ def text(res: dict) -> str:
 
 @pytest.fixture
 def fakes(monkeypatch):
-    """Recording fakes for every primitive; fresh geometry; trusted; Finder in front."""
+    """Recording fakes for every primitive; fresh geometry; input not
+    blocked; File Explorer in front."""
     calls: list[tuple] = []
     state = {
-        "trusted": True, "prompted": [], "front": FRONT, "secure": False,
+        "blocked": False, "front": FRONT, "secure": False,
         "geometry": _geometry(), "words": [], "slept": [],
     }
 
@@ -38,27 +41,22 @@ def fakes(monkeypatch):
             calls.append((name, *a, *([kw] if kw else [])))
         return f
 
-    def trusted(prompt=False):
-        state["prompted"].append(prompt)
-        return state["trusted"]
-
     async def sleep(s):
         state["slept"].append(s)
 
     monkeypatch.setattr(screen, "_now", lambda: 1000.0)
     for name in ("move", "click", "drag", "scroll", "type_text", "key"):
         monkeypatch.setattr(ev, name, rec(name))
-    monkeypatch.setattr(ev, "accessibility_trusted", trusted)
+    monkeypatch.setattr(ev, "input_blocked", lambda: state["blocked"])
     monkeypatch.setattr(ev, "frontmost", lambda: state["front"])
     monkeypatch.setattr(ev, "focused_is_secure", lambda: state["secure"])
     monkeypatch.setattr(screen, "load_geometry", lambda path=None: state["geometry"])
     monkeypatch.setattr(ocr, "recognize_text", lambda p, **kw: state["words"])
     monkeypatch.setattr(c, "_sleep", sleep)
-    c.reset_prompt()
     return calls, state
 
 
-# --- permission / geometry gates --------------------------------------------
+# --- elevation / geometry gates ----------------------------------------------
 
 ACTION_TOOLS = [
     (c.computer_move, {"x": 10, "y": 10}),
@@ -68,30 +66,32 @@ ACTION_TOOLS = [
     (c.computer_drag, {"x1": 1, "y1": 1, "x2": 2, "y2": 2}),
     (c.computer_find, {"text": "Save"}),
 ]
-ALL_TOOLS = ACTION_TOOLS + [(c.computer_type, {"text": "hi"}), (c.computer_key, {"combo": "enter"})]
+INPUT_TOOLS = [t for t in ACTION_TOOLS if t[0] is not c.computer_find] + [
+    (c.computer_type, {"text": "hi"}), (c.computer_key, {"combo": "enter"}),
+]
 
 
-@pytest.mark.parametrize("tool,args", ALL_TOOLS)
-async def test_permission_hint_when_not_trusted(fakes, tool, args):
+@pytest.mark.parametrize("tool,args", INPUT_TOOLS)
+async def test_elevated_window_is_refused_with_the_hint(fakes, tool, args):
+    """Windows would drop the input silently: say so instead."""
     calls, state = fakes
-    state["trusted"] = False
+    state["blocked"] = True
+    state["words"] = [Word("Save", 0, 0, 10, 10, 1.0)]
     res = await tool.handler(args)
     assert res.get("is_error") and text(res) == ev.PERMISSION_HINT
-    assert state["prompted"] == [True]     # macOS prompt requested once
     assert calls == []
-
-
-async def test_permission_prompt_only_once_per_process(fakes):
-    _, state = fakes
-    state["trusted"] = False
-    for _ in range(3):
-        res = await c.computer_key.handler({"combo": "enter"})
-        assert text(res) == ev.PERMISSION_HINT
-    assert state["prompted"] == [True, False, False]
-    state["trusted"] = True                  # granted later: no prompt needed, works
-    res = await c.computer_key.handler({"combo": "enter"})
+    state["blocked"] = False
+    res = await tool.handler(args)
     assert not res.get("is_error")
-    assert state["prompted"][-1] is False
+
+
+async def test_find_works_over_an_elevated_window(fakes):
+    """OCR reads the screenshot; it sends no input, so elevation is moot."""
+    _, state = fakes
+    state["blocked"] = True
+    state["words"] = [Word("Save", 0, 0, 10, 10, 1.0)]
+    res = await c.computer_find.handler({"text": "Save"})
+    assert not res.get("is_error") and text(res).startswith("1. 'Save'")
 
 
 @pytest.mark.parametrize("tool,args", ACTION_TOOLS)
@@ -169,7 +169,7 @@ async def test_move_converts_image_to_screen(fakes):
     calls, _ = fakes
     res = await c.computer_move.handler({"x": 200, "y": 100})
     assert calls == [("move", 200.0, 100.0)]
-    assert text(res) == "done — frontmost: Finder — Downloads"
+    assert text(res) == "done — frontmost: File Explorer — Downloads"
 
 
 async def test_move_screen_space(fakes):
@@ -209,7 +209,7 @@ async def test_screen_space_click_outside_window_capture(fakes):
     calls, state = fakes
     state["geometry"] = Geometry(
         region="window", image_w=800, image_h=600, origin_x=300, origin_y=200,
-        width_pt=400, height_pt=300, scale=2.0, captured_at=995.0,
+        screen_w=400, screen_h=300, scale=2.0, captured_at=995.0,
         window={"id": 1, "app": "Notes", "title": "n", "x": 300, "y": 200, "w": 400, "h": 300},
     )
     res = await c.computer_click.handler({"x": 50, "y": 50, "space": "screen"})
@@ -235,7 +235,7 @@ async def test_click_defaults_and_options(fakes):
     calls, state = fakes
     res = await c.computer_click.handler({"x": 200, "y": 100})
     assert calls == [("click", 200.0, 100.0, "left", False)]
-    assert text(res) == "done — frontmost: Finder — Downloads"
+    assert text(res) == "done — frontmost: File Explorer — Downloads"
     assert state["slept"] == [c.SETTLE_S]
     await c.computer_click.handler({"x": 0, "y": 0, "button": "right", "double": True})
     assert calls[-1] == ("click", 100.0, 50.0, "right", True)
@@ -252,13 +252,15 @@ async def test_drag_converts_both_ends(fakes):
     calls, _ = fakes
     res = await c.computer_drag.handler({"x1": 20, "y1": 40, "x2": 200, "y2": 100})
     assert calls == [("drag", 110.0, 70.0, 200.0, 100.0)]
-    assert text(res).startswith("done — frontmost: Finder")
+    assert text(res).startswith("done — frontmost: File Explorer")
 
 
-async def test_scroll_negates_content_direction(fakes):
+async def test_scroll_converts_content_direction_to_the_wheels(fakes):
+    """Content direction in, wheel direction out: scrolling down is the
+    wheel turning backwards (negative); scrolling right is a right tilt."""
     calls, _ = fakes
     await c.computer_scroll.handler({"x": 200, "y": 100, "dx": 3, "dy": 5})
-    assert calls == [("scroll", 200.0, 100.0, -3.0, -5.0)]
+    assert calls == [("scroll", 200.0, 100.0, 3.0, -5.0)]
     await c.computer_scroll.handler({"x": 0, "y": 0, "dy": -10})
     assert calls[-1] == ("scroll", 100.0, 50.0, 0.0, 10.0)
 
@@ -272,9 +274,9 @@ async def test_scroll_needs_a_direction(fakes):
 
 async def test_done_without_window_title(fakes):
     _, state = fakes
-    state["front"] = Front(app="Finder", bundle_id="com.apple.finder", window_title="", pid=1)
+    state["front"] = Front(app="File Explorer", bundle_id="explorer.exe", window_title="", pid=1)
     res = await c.computer_move.handler({"x": 0, "y": 0})
-    assert text(res) == "done — frontmost: Finder"
+    assert text(res) == "done — frontmost: File Explorer"
 
 
 # --- find / click_text -------------------------------------------------------
@@ -298,11 +300,11 @@ async def test_find_lists_matches_with_integer_centers(fakes, monkeypatch):
     monkeypatch.setattr(ocr, "recognize_text", recognize)
     res = await c.computer_find.handler({"text": "save"})
     assert text(res) == (
-        "1. 'Save' at (812, 431) size 60×22 (conf 0.98)\n"
-        "2. 'Save As' at (827, 471) size 90×22 (conf 0.91)"
+        "1. 'Save' at (812, 431) size 60×22\n"
+        "2. 'Save As' at (827, 471) size 90×22"
     )
     assert seen["path"] == screen.latest_screenshot_path()
-    assert seen["image_size"] == (1568, 1019)   # no sips spawn to size the PNG
+    assert seen["image_size"] == (1568, 1019)   # boxes in the sidecar's pixels
 
 
 async def test_find_not_found_and_cap(fakes):
@@ -325,7 +327,7 @@ async def test_click_text_clicks_match_center(fakes):
     res = await c.computer_click_text.handler({"text": "Save"})
     # center (812, 431) image px → (100 + 406, 50 + 215.5)
     assert calls == [("click", 506.0, 265.5, "left", False)]
-    assert text(res) == "done — frontmost: Finder — Downloads"
+    assert text(res) == "done — frontmost: File Explorer — Downloads"
 
 
 async def test_click_text_index_and_double(fakes):
@@ -345,7 +347,8 @@ async def test_click_text_no_match_and_bad_index(fakes):
     assert calls == []
 
 
-@pytest.mark.parametrize("target", ["Allow", "always allow", "OK", "Open System Settings", "continue", "Install", "TRUST"])
+@pytest.mark.parametrize("target", ["Allow", "always allow", "OK", "Yes", "Run anyway", "Open Settings",
+                                    "continue", "Install", "TRUST", "Allow access"])
 async def test_click_text_refuses_system_dialog_buttons(fakes, target):
     calls, state = fakes
     state["front"] = DIALOG
@@ -386,8 +389,9 @@ async def test_click_text_index_into_allow_is_refused(fakes):
 
 
 def test_dialog_target_labels():
-    assert c._dialog_target("Allow") and c._dialog_target("  always   ALLOW ") and c._dialog_target("Always Allow on this Mac")
-    assert c._dialog_target("OK") and c._dialog_target("Open System Settings")
+    assert c._dialog_target("Allow") and c._dialog_target("  always   ALLOW ") and c._dialog_target("Always Allow on this PC")
+    assert c._dialog_target("OK") and c._dialog_target("Yes") and c._dialog_target("run ANYWAY")
+    assert not c._dialog_target("Don't run")
     assert not c._dialog_target("Don't Allow") and not c._dialog_target("Cancel") and not c._dialog_target("Allow once?")
 
 
@@ -397,8 +401,8 @@ async def test_click_refused_on_system_dialog(fakes):
     res = await c.computer_click.handler({"x": 10, "y": 10})
     assert res.get("is_error") and text(res) == c.DIALOG_HINT
     assert calls == []
-    state["front"] = Front(app="System Settings", bundle_id="com.apple.systempreferences",
-                           window_title="Privacy & Security", pid=3)
+    state["front"] = Front(app="Settings", bundle_id="systemsettings.exe",
+                           window_title="Settings", pid=3, window_class="Windows.UI.Core.CoreWindow")
     res = await c.computer_click.handler({"x": 10, "y": 10})
     assert res.get("is_error") and text(res) == c.DIALOG_HINT
     assert calls == []
@@ -428,7 +432,7 @@ async def test_drag_refused_on_system_dialog(fakes):
 
 
 @pytest.mark.parametrize("label", ["Don't Allow", "Dont Allow", "DENY", "Cancel", "Not Now", "Quit",
-                                   "Close", "Later", "No", "Don’t Allow", "Cancei"])
+                                   "Close", "Later", "No", "Don’t Allow", "Cancei", "Don't run", "Block"])
 async def test_click_text_dialog_allowlist_clicks_safe_labels(fakes, label):
     calls, state = fakes
     state["front"] = DIALOG
@@ -438,8 +442,9 @@ async def test_click_text_dialog_allowlist_clicks_safe_labels(fakes, label):
     assert calls == [("click", 102.5, 52.5, "left", False)]
 
 
-@pytest.mark.parametrize("label", ["AIlow", "0K", "Allow", "Always Allow", "Open System Settings",
+@pytest.mark.parametrize("label", ["AIlow", "0K", "Allow", "Always Allow", "Open Settings",
                                    "Continue", "Install", "Trust", "Save", "Next", "Yes", "Unlock",
+                                   "Run", "Run anyway", "More info", "Yse",
                                    "Don't Allow Allow", "Can", ""])
 async def test_click_text_dialog_refuses_everything_off_the_allowlist(fakes, label):
     """On a system dialog only the allowlist is clickable: an OCR misread of
@@ -469,6 +474,7 @@ def test_dialog_safe_label():
     assert not c._dialog_safe("") and not c._dialog_safe("Save")
     assert c.DIALOG_SAFE_LABELS == frozenset({
         "don't allow", "dont allow", "deny", "cancel", "not now", "quit", "close", "later", "no",
+        "don't run", "dont run", "block",
     })
 
 
@@ -478,7 +484,7 @@ async def test_type_text_and_submit(fakes):
     calls, _ = fakes
     res = await c.computer_type.handler({"text": "hello"})
     assert calls == [("type_text", "hello")]
-    assert text(res) == "done — frontmost: Finder — Downloads"
+    assert text(res) == "done — frontmost: File Explorer — Downloads"
     await c.computer_type.handler({"text": "world", "submit": True})
     assert calls[1:] == [("type_text", "world"), ("key", "enter")]
 
@@ -500,7 +506,7 @@ async def test_key_refuses_accept_keys_on_system_dialog(fakes, combo):
     assert calls == []
 
 
-@pytest.mark.parametrize("combo", ["esc", "tab", "cmd+enter", "shift+space"])
+@pytest.mark.parametrize("combo", ["esc", "tab", "ctrl+enter", "shift+space", "alt+n"])
 async def test_key_other_keys_still_allowed_on_system_dialog(fakes, combo):
     calls, state = fakes
     state["front"] = DIALOG
@@ -538,21 +544,21 @@ async def test_type_requires_text(fakes):
 
 async def test_key_presses_combo(fakes):
     calls, _ = fakes
-    res = await c.computer_key.handler({"combo": "cmd+shift+s"})
-    assert calls == [("key", "cmd+shift+s")]
-    assert text(res) == "done — frontmost: Finder — Downloads"
+    res = await c.computer_key.handler({"combo": "ctrl+shift+s"})
+    assert calls == [("key", "ctrl+shift+s")]
+    assert text(res) == "done — frontmost: File Explorer — Downloads"
 
 
 async def test_key_dangerous_and_unknown(fakes, monkeypatch):
     calls, _ = fakes
 
     def key(combo):
-        if combo == "cmd+q":
+        if combo == "alt+f4":
             raise DangerousCombo("refusing")
         raise ValueError("unknown key 'zz'")
 
     monkeypatch.setattr(ev, "key", key)
-    res = await c.computer_key.handler({"combo": "cmd+q"})
+    res = await c.computer_key.handler({"combo": "alt+f4"})
     assert res.get("is_error") and text(res) == c.DANGEROUS_HINT
     res = await c.computer_key.handler({"combo": "zz"})
     assert res.get("is_error") and text(res).startswith("Unknown key: ")
@@ -568,11 +574,11 @@ async def test_key_requires_combo(fakes):
 
 async def test_primitive_failure_becomes_error(fakes, monkeypatch):
     def boom(*a, **kw):
-        raise RuntimeError("event tap failed")
+        raise OSError("SendInput inserted 0 of 1 events")
 
     monkeypatch.setattr(ev, "click", boom)
     res = await c.computer_click.handler({"x": 0, "y": 0})
-    assert res.get("is_error") and "event tap failed" in text(res)
+    assert res.get("is_error") and "SendInput inserted 0" in text(res)
 
 
 def test_server_and_tool_names():
@@ -594,36 +600,47 @@ def test_dialog_safe_short_labels_are_exact_only():
 
 # ---- second display -------------------------------------------------------
 
-def _second_display_geometry() -> Geometry:
-    """A capture of the external 2560×1440 monitor at (1470, 0), downscaled
-    to 1568 px wide — its origin is global, not (0, 0)."""
+def _second_display_geometry(ox: float = 1920.0) -> Geometry:
+    """A capture of a secondary 2560×1440 monitor at (ox, 0) in the virtual
+    screen, downscaled to 1568 px wide — its origin is not (0, 0), and
+    left of the primary it is negative."""
     return Geometry(
-        region="screen", image_w=1568, image_h=882, origin_x=1470.0, origin_y=0.0,
-        width_pt=2560.0, height_pt=1440.0, scale=1568 / 2560, captured_at=1000.0,
+        region="screen", image_w=1568, image_h=882, origin_x=ox, origin_y=0.0,
+        screen_w=2560.0, screen_h=1440.0, scale=1568 / 2560, captured_at=1000.0,
         window=None, display={"id": 3, "index": 2, "main": False},
     )
 
 
 async def test_click_on_the_second_display_is_not_out_of_bounds(fakes):
-    """The bounds check is against the captured display, not the main one:
-    a click in the middle of the external monitor's screenshot must land
-    past the main display's width, not be refused."""
+    """The bounds check is against the captured display, not the primary:
+    a click in the middle of the secondary monitor's screenshot must land
+    past the primary's width, not be refused."""
     calls, state = fakes
     state["geometry"] = _second_display_geometry()
     res = await c.computer_click.handler({"x": 784, "y": 441})
     assert not res.get("is_error"), text(res)
     name, x, y, button, double = calls[0]
     assert name == "click" and button == "left" and double is False
-    assert x == pytest.approx(1470.0 + 1280.0, abs=1)
+    assert x == pytest.approx(1920.0 + 1280.0, abs=1)
     assert y == pytest.approx(720.0, abs=1)
+
+
+async def test_click_on_a_display_left_of_the_primary_goes_negative(fakes):
+    calls, state = fakes
+    state["geometry"] = _second_display_geometry(ox=-2560.0)
+    res = await c.computer_click.handler({"x": 784, "y": 441})
+    assert not res.get("is_error"), text(res)
+    assert calls[0][1] == pytest.approx(-1280.0, abs=1)
+    res = await c.computer_move.handler({"x": -100, "y": 10, "space": "screen"})
+    assert not res.get("is_error") and calls[-1] == ("move", -100.0, 10.0)
 
 
 async def test_screen_space_point_on_the_second_display_is_accepted(fakes):
     calls, state = fakes
     state["geometry"] = _second_display_geometry()
-    res = await c.computer_move.handler({"x": 3900, "y": 1400, "space": "screen"})
+    res = await c.computer_move.handler({"x": 4300, "y": 1400, "space": "screen"})
     assert not res.get("is_error"), text(res)
-    assert calls[0] == ("move", 3900.0, 1400.0)
-    # still bounded by that display: the main display's own points are off it
+    assert calls[0] == ("move", 4300.0, 1400.0)
+    # still bounded by that display: the primary's own pixels are off it
     res = await c.computer_move.handler({"x": 700, "y": 400, "space": "screen"})
     assert res["is_error"] and "outside the last screenshot" in text(res)

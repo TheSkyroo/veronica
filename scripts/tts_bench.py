@@ -15,13 +15,12 @@ chunk-streaming first-packet time. This script measures, for one candidate:
   rtf          synth seconds / audio seconds over all sample lines (<1 = faster
                than real time)
   cpu_cores    process CPU seconds / wall seconds while synthesising (GPU work
-               under MLX / MPS is not in this number)
-  footprint_mb peak physical footprint (what Activity Monitor shows; includes
-               Metal buffers on Apple Silicon unlike ru_maxrss)
+               is not in this number)
+  footprint_mb peak working set (what Task Manager shows)
 
 and writes one WAV per sample line plus metrics.json to <out>/<candidate>/.
 It never plays audio. Each candidate may need its own venv (the heavy ones pull
-torch or MLX); the engine is imported only when that candidate runs. Models
+torch); the engine is imported only when that candidate runs. Models
 are fetched into .spike/ (gitignored) or the HF cache that HF_HOME points to.
 Numbers from the run behind the recommendation are in
 docs/superpowers/specs/2026-10-01-veronica-voice-model-options.md."""
@@ -69,21 +68,27 @@ def sentences(text: str) -> list[str]:
 
 # --- process metrics ------------------------------------------------------
 
-class _RUsage(ctypes.Structure):  # rusage_info_v4 (sys/resource.h)
-    _fields_ = [("uuid", ctypes.c_uint8 * 16), ("f", ctypes.c_uint64 * 40)]
-
-
-_libc = ctypes.CDLL("libc.dylib") if sys.platform == "darwin" else None
+class _MemCounters(ctypes.Structure):  # PROCESS_MEMORY_COUNTERS (psapi.h)
+    _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
 
 
 def footprint_mb() -> tuple[float, float]:
-    """(current, lifetime peak) physical footprint in MB, macOS only."""
-    if _libc is None:
+    """(current, lifetime peak) working set in MB, as Task Manager shows it."""
+    try:
+        k32 = ctypes.WinDLL("kernel32")
+        psapi = ctypes.WinDLL("psapi")
+    except (AttributeError, OSError):
         return float("nan"), float("nan")
-    ru = _RUsage()
-    if _libc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(ru)) != 0:
+    k32.GetCurrentProcess.restype = ctypes.c_void_p
+    mc = _MemCounters()
+    mc.cb = ctypes.sizeof(mc)
+    if not psapi.GetProcessMemoryInfo(ctypes.c_void_p(k32.GetCurrentProcess()), ctypes.byref(mc), mc.cb):
         return float("nan"), float("nan")
-    return ru.f[7] / 2**20, ru.f[28] / 2**20
+    return mc.WorkingSetSize / 2**20, mc.PeakWorkingSetSize / 2**20
 
 
 def cpu_s() -> float:
@@ -173,27 +178,6 @@ class Supertonic(Engine):
         return np.asarray(wav, np.float32).reshape(-1)
 
 
-class Mlx(Engine):
-    """Any mlx-audio TTS model. `gen` holds per-language generate() kwargs;
-    a language missing from it is not spoken by this candidate."""
-
-    def __init__(self, repo: str, gen: dict, licence: str = "?"):
-        from huggingface_hub import snapshot_download
-        from mlx_audio.tts.utils import load_model
-        self.path = Path(snapshot_download(repo))
-        self.m = load_model(repo)  # model type is inferred from the repo name
-        self.files = [p for p in self.path.rglob("*") if p.is_file()]
-        self.gen, self.licence = gen, licence
-        self.hindi = "hi" in gen
-        self.sr = self.m.sample_rate
-
-    def synth(self, text, lang):
-        import mlx.core as mx
-        out = [np.asarray(r.audio, np.float32).reshape(-1) for r in self.m.generate(text=text, **self.gen[lang])]
-        mx.clear_cache()
-        return np.concatenate(out)
-
-
 class Mms(Engine):
     """Meta MMS-TTS (VITS, one small model per language) via transformers, CPU."""
     licence = "CC-BY-NC-4.0"
@@ -234,38 +218,12 @@ CANDIDATES: dict[str, tuple] = {
     "kokoro-onnx_hm_omega": (lambda: KokoroOnnx("af_bella", "hm_omega"), "Hindi male"),
     "kokoro-onnx_hm_psi": (lambda: KokoroOnnx("af_bella", "hm_psi"), "Hindi male"),
     "kokoro-onnx_hf_blend_beta-alpha": (lambda: KokoroOnnx("af_bella", "hf_beta*0.6+hf_alpha*0.4"), "Hindi blend"),
-    # Official Kokoro pipeline on MLX (misaki G2P for English, GPU).
-    "kokoro-mlx_af_heart": (lambda: Mlx("mlx-community/Kokoro-82M-bf16", {
-        "en": dict(voice="af_heart", lang_code="a"), "hi": dict(voice="hf_beta", lang_code="h")},
-        "Apache-2.0"), "official misaki G2P, MLX bf16"),
-    "kokoro-mlx_af_bella": (lambda: Mlx("mlx-community/Kokoro-82M-bf16", {
-        "en": dict(voice="af_bella", lang_code="a"), "hi": dict(voice="hf_alpha", lang_code="h")},
-        "Apache-2.0"), "official misaki G2P, MLX bf16"),
     "mms-tts": (lambda: Mms(), "Meta MMS-TTS VITS eng + hin"),
     "piper_lessac-high": (lambda: Piper("en_US-lessac-high", "hi_IN-priyamvada-medium"), "Piper high + Hindi F"),
     "piper_hi-pratham": (lambda: Piper("en_US-lessac-medium", "hi_IN-pratham-medium"), "Piper medium + Hindi M"),
     "supertonic3_F1": (lambda: Supertonic("F1", "F1"), "flow-matching ONNX, 8 steps"),
     "supertonic3_F2": (lambda: Supertonic("F2", "F2"), "flow-matching ONNX, 8 steps"),
     "supertonic3_M1": (lambda: Supertonic("M1", "M1"), "flow-matching ONNX, 8 steps"),
-    "kitten-mini-mlx": (lambda: Mlx("mlx-community/kitten-tts-mini-0.8", {"en": dict(voice="expr-voice-2-f")},
-                                     "Apache-2.0"), "KittenTTS mini 0.8 (80M)"),
-    "soprano-mlx": (lambda: Mlx("mlx-community/Soprano-1.1-80M-bf16", {"en": dict()}, "Apache-2.0"), "80M English"),
-    "pocket-tts-mlx": (lambda: Mlx("mlx-community/pocket-tts", {"en": dict(voice="alba")}, "CC-BY-4.0"),
-                       "Kyutai Pocket TTS 100M"),
-    "qwen3-tts-0.6b-mlx": (lambda: Mlx("mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit", {
-        "en": dict(voice="serena", lang_code="english")}, "Apache-2.0"), "Qwen3-TTS 0.6B CustomVoice 8-bit"),
-    "chatterbox-mlx": (lambda: Mlx("mlx-community/chatterbox-fp16", {
-        "en": dict(), "hi": dict(lang_code="hi")}, "MIT"), "Resemble Chatterbox multilingual"),
-    "orpheus-3b-4bit-mlx": (lambda: Mlx("mlx-community/orpheus-3b-0.1-ft-4bit", {"en": dict(voice="tara")},
-                                        "Apache-2.0 (Llama-3.2 base: Llama licence)"), "Orpheus 3B 4-bit"),
-    "omnivoice-mlx": (lambda: Mlx("mlx-community/OmniVoice-bf16", {
-        "en": dict(instruct="female, young adult, moderate pitch, american accent", lang_code="en"),
-        "hi": dict(instruct="female, middle-aged, moderate pitch", lang_code="hi")},
-        "CC-BY-NC (weights), Apache-2.0 (code)"), "OmniVoice 0.6B bf16, voice design (no reference audio)"),
-    "chatterbox-4bit-mlx": (lambda: Mlx("mlx-community/chatterbox-4bit", {
-        "en": dict(), "hi": dict(lang_code="hi")}, "MIT"), "Chatterbox multilingual, 4-bit"),
-    "vibevoice-rt-mlx": (lambda: Mlx("mlx-community/VibeVoice-Realtime-0.5B-fp16", {"en": dict(voice="en-Emma_woman")},
-                                      "MIT"), "VibeVoice Realtime 0.5B"),
 }
 
 
@@ -331,11 +289,6 @@ def run(name: str, out: Path, runs: int) -> dict:
         "disk_mb": round(sum(p.stat().st_size for p in set(eng.files)) / 1e6, 1),
         "lines": per_line,
     }
-    try:
-        import mlx.core as mx
-        res["mlx_peak_mb"] = round(mx.get_peak_memory() / 2**20)
-    except Exception:
-        pass
     (dest / "metrics.json").write_text(json.dumps(res, indent=2, ensure_ascii=False))
     return res
 

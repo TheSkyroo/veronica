@@ -137,7 +137,7 @@ def make_brain(tmp_path, *, rounds=(), health=(True,), confirm=None, **kw):
     return brain, client, spawned
 
 
-def fake_catalog(monkeypatch, server, names=("mcp__mac__volume_get",)):
+def fake_catalog(monkeypatch, server, names=("mcp__system__volume_get",)):
     schemas = [{"type": "function", "function": {"name": n, "description": "", "parameters": {}}}
                for n in names]
     monkeypatch.setattr(local_mod, "_tools", (schemas, set(names)))
@@ -328,7 +328,7 @@ async def test_a_tool_call_goes_through_the_gate_and_runs(tmp_path, monkeypatch)
     server = FakeToolServer("Volume is 40.")
     fake_catalog(monkeypatch, server)
     brain, client, _ = make_brain(tmp_path, rounds=[
-        [tool_delta(0, "mcp__mac__volume_get", "{}", "c1")],
+        [tool_delta(0, "mcp__system__volume_get", "{}", "c1")],
         [sse(content="It's at forty.")],
     ])
     assert await drain(brain, "how loud is it") == ["It's at forty."]
@@ -336,13 +336,13 @@ async def test_a_tool_call_goes_through_the_gate_and_runs(tmp_path, monkeypatch)
     # The tool result went back as a `tool` message keyed to the call.
     tool_msg = next(m for m in brain._history if m["role"] == "tool")
     assert tool_msg["tool_call_id"] == "c1" and tool_msg["content"] == "Volume is 40."
-    assert client.posts[0]["tools"][0]["function"]["name"] == "mcp__mac__volume_get"
+    assert client.posts[0]["tools"][0]["function"]["name"] == "mcp__system__volume_get"
     await brain.close()
 
 
 async def test_the_gate_can_refuse_and_the_model_is_told(tmp_path, monkeypatch):
     server = FakeToolServer()
-    fake_catalog(monkeypatch, server, names=("mcp__mac__clipboard_write",))
+    fake_catalog(monkeypatch, server, names=("mcp__system__clipboard_write",))
     asked = []
 
     async def confirm(summary, detail, *, question=None):
@@ -350,7 +350,7 @@ async def test_the_gate_can_refuse_and_the_model_is_told(tmp_path, monkeypatch):
         return False
 
     brain, *_ = make_brain(tmp_path, confirm=confirm, rounds=[
-        [tool_delta(0, "mcp__mac__clipboard_write", '{"text": "hi"}', "c1")],
+        [tool_delta(0, "mcp__system__clipboard_write", '{"text": "hi"}', "c1")],
         [sse(content="Alright.")],
     ])
     assert await drain(brain, "copy hi") == ["Alright."]
@@ -361,9 +361,9 @@ async def test_the_gate_can_refuse_and_the_model_is_told(tmp_path, monkeypatch):
 
 async def test_arguments_arrive_in_pieces(tmp_path, monkeypatch):
     server = FakeToolServer()
-    fake_catalog(monkeypatch, server, names=("mcp__mac__open_app",))
+    fake_catalog(monkeypatch, server, names=("mcp__system__open_app",))
     brain, *_ = make_brain(tmp_path, rounds=[
-        [tool_delta(0, "mcp__mac__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Safari"}')],
+        [tool_delta(0, "mcp__system__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Safari"}')],
         [sse(content="Opened.")],
     ])
     await drain(brain, "open safari")
@@ -381,7 +381,7 @@ async def test_a_model_that_ignores_the_tools_just_answers(tmp_path, monkeypatch
 async def test_an_unknown_tool_name_is_reported_not_raised(tmp_path, monkeypatch):
     fake_catalog(monkeypatch, FakeToolServer())
     brain, *_ = make_brain(tmp_path, rounds=[
-        [tool_delta(0, "mcp__mac__teleport", "{}", "c1")],
+        [tool_delta(0, "mcp__system__teleport", "{}", "c1")],
         [sse(content="I can't do that.")],
     ])
     assert await drain(brain) == ["I can't do that."]
@@ -392,7 +392,7 @@ async def test_an_unknown_tool_name_is_reported_not_raised(tmp_path, monkeypatch
 async def test_a_tool_loop_stops_after_a_few_rounds(tmp_path, monkeypatch):
     server = FakeToolServer()
     fake_catalog(monkeypatch, server)
-    rounds = [[tool_delta(0, "mcp__mac__volume_get", "{}", f"c{i}")] for i in range(10)]
+    rounds = [[tool_delta(0, "mcp__system__volume_get", "{}", f"c{i}")] for i in range(10)]
     brain, *_ = make_brain(tmp_path, rounds=rounds)
     assert await drain(brain) == []
     assert len(server.calls) == local_mod.MAX_TOOL_ROUNDS + 1
@@ -403,7 +403,7 @@ async def test_the_real_catalog_covers_our_mcp_servers():
     local_mod._tools = None
     schemas, index = await local_mod.tool_catalog()
     names = {s["function"]["name"] for s in schemas}
-    assert {"mcp__mac__volume_get", "mcp__pim__mail_send", "mcp__browser__browser_read"} <= names
+    assert {"mcp__system__volume_get", "mcp__pim__mail_send", "mcp__browser__browser_read"} <= names
     assert all(n.startswith("mcp__") for n in index)
     assert schemas[0]["function"]["parameters"]["type"] == "object"
 
@@ -545,7 +545,7 @@ async def test_live_plain_turn(capsys):
 
 @pytest.mark.live
 async def test_live_tool_turn(capsys):
-    """A turn that should reach an `mcp__mac__*` tool. Every call still goes
+    """A turn that should reach an `mcp__system__*` tool. Every call still goes
     through the gate; the confirm here just answers yes."""
     s = Settings()
     decided = []
@@ -578,9 +578,9 @@ async def test_catch_all_tools_are_not_offered_to_the_local_model():
     finally:
         local_mod._tools = None
     names = {s["function"]["name"] for s in schemas}
-    assert "mcp__mac__applescript" not in names and "mcp__mac__applescript" not in index
+    assert "mcp__system__applescript" not in names and "mcp__system__applescript" not in index
     assert not any(n.startswith("mcp__computer__") for n in names)
-    assert "mcp__mac__volume_get" in names        # ordinary tools still offered
+    assert "mcp__system__volume_get" in names        # ordinary tools still offered
 
 
 async def test_a_tool_error_is_reported_to_the_gate(tmp_path, monkeypatch):
@@ -592,7 +592,7 @@ async def test_a_tool_error_is_reported_to_the_gate(tmp_path, monkeypatch):
 
     fake_catalog(monkeypatch, ErrServer())
     cards = []
-    brain, *_ = make_brain(tmp_path, rounds=[[tool_delta(0, "mcp__mac__volume_get", "{}", "c1")],
+    brain, *_ = make_brain(tmp_path, rounds=[[tool_delta(0, "mcp__system__volume_get", "{}", "c1")],
                                               [sse(content="Sorry.")]])
     brain.gate._on_tool = lambda su, d: cards.append((su, d))
     await drain(brain)

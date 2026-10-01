@@ -25,8 +25,8 @@ async def test_set_fires_on_fire_and_notify(monkeypatch):
         notified.append(args)
         return {"content": [{"type": "text", "text": "ok"}]}
 
-    from veronica.tools import mac
-    monkeypatch.setattr(mac.notify, "handler", fake_notify_handler)
+    from veronica.tools import system
+    monkeypatch.setattr(system.notify, "handler", fake_notify_handler)
 
     svc = TimerService(on_fire=on_fire)
     svc.set(0.05 / 60, label="tea")  # 0.05s
@@ -41,11 +41,11 @@ async def test_set_no_label_message(monkeypatch):
     async def on_fire(text):
         fired.append(text)
 
-    from veronica.tools import mac
+    from veronica.tools import system
 
     async def fake_notify_handler(args):
         return {"content": [{"type": "text", "text": "ok"}]}
-    monkeypatch.setattr(mac.notify, "handler", fake_notify_handler)
+    monkeypatch.setattr(system.notify, "handler", fake_notify_handler)
 
     svc = TimerService(on_fire=on_fire)
     svc.set(0.05 / 60)
@@ -93,11 +93,11 @@ async def test_multiple_timers_independent(monkeypatch):
     async def on_fire(text):
         fired.append(text)
 
-    from veronica.tools import mac
+    from veronica.tools import system
 
     async def fake_notify_handler(args):
         return {"content": [{"type": "text", "text": "ok"}]}
-    monkeypatch.setattr(mac.notify, "handler", fake_notify_handler)
+    monkeypatch.setattr(system.notify, "handler", fake_notify_handler)
 
     svc = TimerService(on_fire=on_fire)
     svc.set(0.05 / 60, label="a")
@@ -107,11 +107,11 @@ async def test_multiple_timers_independent(monkeypatch):
 
 
 async def test_on_fire_exception_does_not_crash(monkeypatch):
-    from veronica.tools import mac
+    from veronica.tools import system
 
     async def fake_notify_handler(args):
         return {"content": [{"type": "text", "text": "ok"}]}
-    monkeypatch.setattr(mac.notify, "handler", fake_notify_handler)
+    monkeypatch.setattr(system.notify, "handler", fake_notify_handler)
 
     async def bad_on_fire(text):
         raise RuntimeError("boom")

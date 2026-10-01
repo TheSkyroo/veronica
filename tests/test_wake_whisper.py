@@ -248,7 +248,7 @@ def test_mic_frames_buffers_while_consumer_stalls(monkeypatch):
             return frame, False
 
     monkeypatch.setattr(mic.sd, "RawInputStream", FakeStream)
-    monkeypatch.setattr(devices, "default_input_id", lambda: None)   # never touch CoreAudio
+    monkeypatch.setattr(devices, "default_input_id", lambda: None)   # never touch Core Audio
     w = ww.WhisperWake.__new__(ww.WhisperWake)
     w.s = ww.Settings()
     frames = w._mic_frames()
