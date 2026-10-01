@@ -51,7 +51,7 @@ def _from_bundle(env) -> dict | None:
     if not path:
         return None
     try:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):

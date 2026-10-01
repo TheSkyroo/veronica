@@ -376,7 +376,7 @@ def _geometry_path() -> Path:
 
 def write_geometry(geometry: Geometry, path: Path | None = None) -> None:
     path = path or _geometry_path()
-    path.write_text(json.dumps(asdict(geometry)))
+    path.write_text(json.dumps(asdict(geometry)), encoding="utf-8")
     with contextlib.suppress(OSError):
         os.chmod(path, 0o600)
 
@@ -385,7 +385,7 @@ def load_geometry(path: Path | None = None) -> Geometry | None:
     """The sidecar for the latest capture, or None if missing/corrupt."""
     path = path or _geometry_path()
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
         return Geometry(
             region=str(raw["region"]), image_w=int(raw["image_w"]), image_h=int(raw["image_h"]),
             origin_x=float(raw["origin_x"]), origin_y=float(raw["origin_y"]),

@@ -5,6 +5,10 @@ import os
 import sys
 import threading
 
+# Hugging Face's downloader warns on every launch that Windows (without
+# Developer Mode) can't make symlinks; caching still works, so keep it quiet.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 from veronica import prefs, proactive
 from veronica.audio import denoise
 from veronica.audio.input_level import InputLevelGuard
