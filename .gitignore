@@ -11,3 +11,7 @@ token.json
 uv.lock
 .serena/
 .superpowers/
+
+# voice-model spike: rendered samples and candidate models/venvs (large, local only)
+samples/
+.spike/
