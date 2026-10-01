@@ -150,7 +150,7 @@ class CodexBrain(CliBrain):
             a += ["-C", str(self.workspace)]
         a += [
             "-c", 'approval_policy="never"',
-            "-c", 'sandbox_mode="workspace-write"' if native else 'sandbox_mode="read-only"',
+            "-c", f'sandbox_mode="{self._sandbox_mode(native)}"',
             "-c", f"sandbox_workspace_write.writable_roots=[{toml_str(str(self.s.brain_cwd))}]",
             "-c", "features.hooks=true", "--dangerously-bypass-hook-trust",
             "-c", f"developer_instructions={toml_str(self._prompt)}",
@@ -198,6 +198,14 @@ class CodexBrain(CliBrain):
         if logged_key.startswith("*** Begin Patch"):        # apply_patch: the path is in the patch text
             return stream_key in logged_key or Path(stream_key).name in logged_key
         return logged_key == stream_key or logged_key == unwrap_shell(stream_key) or logged_key in stream_key
+
+    def _sandbox_mode(self, native: bool) -> str:
+        """read-only with its shell off; workspace-write normally; no sandbox
+        when the user turned on codex_full_access (its Windows sandbox can
+        block starting programs). The hook gates every command either way."""
+        if not native:
+            return "read-only"
+        return "danger-full-access" if getattr(self.s, "codex_full_access", False) else "workspace-write"
 
     def _error_or_notice(self, msg: str) -> list[Event]:
         """An `error` event: a warning to log and carry on past (see

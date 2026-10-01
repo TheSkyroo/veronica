@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.
     codex_native_tools: bool = True
+    # Codex runs its shell in its own sandbox (workspace-write), which on
+    # Windows can refuse to start programs or open windows ("Windows is
+    # declining it"). True = no sandbox for its shell; every command still
+    # goes through Veronica's hook and policy (risky ones are asked).
+    codex_full_access: bool = False
     antigravity_native_tools: bool = True
     copilot_native_tools: bool = True
     # Offline brain (veronica.brain.backends.local): a llama.cpp server on
@@ -398,6 +403,13 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "codex_native_tools": EditableField(
         "bool", "Codex: allow its own shell",
         "Off = only Veronica's tools; on = its shell and file edits too, each asked through Veronica.",
+        restart=False,
+    ),
+    "codex_full_access": EditableField(
+        "bool", "Codex: no sandbox for its shell",
+        "Lets Codex's own commands start programs and open windows, which its Windows sandbox can block. "
+        "Every command is still checked by Veronica, and risky ones are asked. Opening apps and folders "
+        "works without this (Veronica opens them herself).",
         restart=False,
     ),
     "antigravity_native_tools": EditableField(

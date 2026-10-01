@@ -64,7 +64,7 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
                   "speaker_verification_wake"),
     "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "auto_allow_tools",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
-              "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
+              "codex_native_tools", "codex_full_access", "antigravity_native_tools", "copilot_native_tools",
               "brain_offline_fallback", "local_server_bin", "local_model", "local_ctx", "local_port"),
 }
 HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
