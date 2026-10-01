@@ -154,6 +154,7 @@ class Recorder:
         partial: bool = False,
         skip_ms: int = 0,
         hold: bool = False,
+        min_speech_ms: int | None = None,
     ) -> np.ndarray | None:
         """Capture one utterance, waiting for speech onset and endpointed by silence.
 
@@ -174,6 +175,10 @@ class Recorder:
                      unaffected). Used by the follow-up capture to drop the
                      tail/echo of Veronica's own just-spoken audio, which
                      would otherwise get endpointed as a false speech onset.
+            min_speech_ms: the least speech that counts as an utterance,
+                     instead of settings.min_speech_ms — lower for a yes/no
+                     answer, where a crisp "yes" can be shorter than the
+                     usual floor.
             hold: "hold to talk" mode (push-to-talk): the VAD silence
                   endpoint is ignored — recording continues until finish()
                   is called, at which point whatever's been captured so far
@@ -196,7 +201,7 @@ class Recorder:
         if not self._armed:
             self.arm(hold)
         self._armed = False
-        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold)
+        return await asyncio.to_thread(self._capture, max_s, preroll, partial, skip_ms, hold, min_speech_ms)
 
     def arm(self, hold: bool = False) -> None:
         """Synchronously mark a capture as in flight *before* its coroutine
@@ -275,10 +280,11 @@ class Recorder:
         partial: bool = False,
         skip_ms: int = 0,
         hold: bool = False,
+        min_speech_ms: int | None = None,
     ) -> np.ndarray | None:
         fm = self.s.frame_ms
         silence_frames_needed = self.s.vad_silence_ms // fm
-        min_speech_frames = self.s.min_speech_ms // fm
+        min_speech_frames = max(1, (self.s.min_speech_ms if min_speech_ms is None else min_speech_ms) // fm)
         max_frames = self.s.max_utterance_s * 1000 // fm
         wait_frames = (max_s * 1000 // fm) if max_s else None
         # Hold mode: hard cap on *total* live frames from capture start

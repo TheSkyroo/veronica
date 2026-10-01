@@ -22,7 +22,7 @@ class Rec:
         self.hold_calls = []
         self.finish_calls = 0
         self.stop_calls = 0
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False, **_kw):
         self.preroll_calls.append(preroll)
         self.hold_calls.append(hold)
         return self.pcms.pop(0) if self.pcms else None
@@ -145,6 +145,8 @@ async def test_confirm_yes_and_no():
     ("Drag (1, 1) \u2192 (2, 2)", "Drag (1, 1) \u2192 (2, 2)?"),
     ("Scroll down at (1, 1)", "Scroll down at (1, 1)?"),
     ("Bash: ls", "Run Bash: ls?"),
+    ("Bash: Start-Process explorer.exe 'shell:MyComputerFolder'", "Run this command?"),   # long: on the HUD instead
+    ("PowerShell: Get-ChildItem C:\\Users\\lenovo\\Documents -Recurse", "Run this command?"),
     ("Open Safari", "Run Open Safari?"),
     ("Clicker", "Run Clicker?"),
 ])
@@ -423,7 +425,7 @@ class RecArgs:
         self.max_s_calls = []
         self.calls = []
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False, **_kw):
         self.max_s_calls.append(max_s)
         self.calls.append({"max_s": max_s, "partial": partial, "skip_ms": skip_ms, "hold": hold})
         return self.pcms.pop(0) if self.pcms else None
@@ -824,7 +826,7 @@ async def test_barge_in_stops_speech_and_relistens():
             super().__init__(pcms)
             self.n = 0
 
-        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, **_kw):
             self.n += 1
             if self.n > 1:
                 events.append("capture")
@@ -866,7 +868,7 @@ class StoppableRec:
     def has_speech(self, pcm):
         return False
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, **_kw):
         item = self.pcms.pop(0) if self.pcms else None
         if item is self.BLOCK:
             await self._ev.wait()
@@ -915,7 +917,7 @@ class ConfirmAnswerRec:
         self.hold_calls = []
         self._stopped = asyncio.Event()
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False, **_kw):
         self.calls += 1
         self.hold_calls.append(hold)
         if self.calls == self.confirm_call:
@@ -1159,7 +1161,7 @@ async def test_barge_during_confirm_prompt_aborts_confirm():
             self.pcms = list(pcms)
             self.captures = 0
 
-        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+        async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, **_kw):
             self.captures += 1
             return self.pcms.pop(0) if self.pcms else None
 
@@ -1383,7 +1385,7 @@ class RecWithOnAudio(Rec):
         self.audio_chunks = audio_chunks
         self.on_audio = None
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, **_kw):
         if partial and self.on_audio is not None:
             for chunk in self.audio_chunks:
                 self.on_audio(chunk)
@@ -2275,7 +2277,7 @@ class SlowRec(Rec):
         self.ev = asyncio.Event()
         self.capture_kw = []
 
-    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False):
+    async def capture(self, max_s=None, preroll=None, partial=False, skip_ms=0, hold=False, **_kw):
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         self.hold_calls.append(hold)
@@ -5640,3 +5642,17 @@ async def test_open_something_unknown_goes_to_the_brain(monkeypatch):
     o, states = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["open my tax spreadsheet"])
     await o.one_turn()
     assert o.brain.asked == ["open my tax spreadsheet"]
+
+
+async def test_confirm_listens_with_a_low_speech_floor():
+    o, _ = build(rec_pcms=[np.zeros(1, np.int16)], stt_texts=["yes"])
+    seen = []
+    orig = o.recorder.capture
+
+    async def capture(**kw):
+        seen.append(kw.get("min_speech_ms"))
+        return await orig(**kw)
+
+    o.recorder.capture = capture
+    assert (await o.confirm("Bash: ls")).outcome == "approved"
+    assert seen == [Orchestrator.CONFIRM_MIN_SPEECH_MS]

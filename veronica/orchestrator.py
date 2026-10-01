@@ -336,6 +336,10 @@ class Orchestrator:
     # ANSWER_FILLERS minus the "now" words: "do it now" / "kar do abhi" is
     # an order, and gets pre-approved.
     _ANSWER_PADDING = ANSWER_FILLERS - {"now", "abhi", "अभी", "अब"}
+    # A yes/no answer may be very short ("yes", "haan"): accept less speech
+    # than a request needs (settings.min_speech_ms), or a crisp "yes" is
+    # dropped as noise and the action skipped.
+    CONFIRM_MIN_SPEECH_MS = 90
     # A push-to-talk press shorter than this is a tap (tap to talk: listen
     # until silence) rather than a hold (hold to talk: until the key is up).
     PTT_TAP_S = 0.4
@@ -2142,7 +2146,7 @@ class Orchestrator:
     async def _confirm_listen(self):
         """The answer's text, None for silence, or _NOT_THE_USER for a voice
         the speaker check rejected (never transcribed, so never classified)."""
-        pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s))
+        pcm = await self._capture(max_s=max(1, self.s.confirm_listen_s), min_speech_ms=self.CONFIRM_MIN_SPEECH_MS)
         if pcm is None or self._barged:
             return None
         if not await self._speaker_ok(pcm, "confirm"):
