@@ -19,7 +19,7 @@ def _image_media_type(data: bytes) -> str:
 Confirm = Callable[..., Awaitable[Any]]
 
 
-MAC_PREFIX = "mcp__mac__"
+SYSTEM_PREFIX = "mcp__system__"
 PIM_PREFIX = "mcp__pim__"
 MEMORY_PREFIX = "mcp__memory__"
 SCREEN_PREFIX = "mcp__screen__"
@@ -104,8 +104,8 @@ def _summarize_computer(short: str, input: dict) -> str:
 
 
 def summarize_detail(tool_name: str, input: dict) -> str:
-    if tool_name.startswith(MAC_PREFIX):
-        short = tool_name[len(MAC_PREFIX):]
+    if tool_name.startswith(SYSTEM_PREFIX):
+        short = tool_name[len(SYSTEM_PREFIX):]
         if short == "open_app":
             return f"Open {input.get('name', '')}"
         if short == "open_url":

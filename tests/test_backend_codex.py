@@ -64,12 +64,12 @@ def test_is_per_turn_and_argv_first_turn(tmp_path):
     assert c["features.hooks"] is True and c["include_permissions_instructions"] is False
     assert c["developer_instructions"] == "SYS" and c["model_reasoning_effort"] == "low"
     # our MCP servers, with the gate env, never written to ~/.codex/config.toml
-    assert c["mcp_servers.veronica-mac.command"] == sys.executable
-    assert c["mcp_servers.veronica-mac.args"] == ["-m", "veronica.tools.serve", "mac"]
-    assert c["mcp_servers.veronica-mac.env.VERONICA_GATE_SOCK"] == str(b.s.gate_socket)
-    assert c["mcp_servers.veronica-mac.env.VERONICA_BRAIN"] == "codex"
-    assert c["mcp_servers.veronica-mac.env.VERONICA_HOOK_LOG"] == str(b.hook_log)
-    assert c["mcp_servers.veronica-mac.default_tools_approval_mode"] == "approve"   # else codex refuses every MCP call
+    assert c["mcp_servers.veronica-system.command"] == sys.executable
+    assert c["mcp_servers.veronica-system.args"] == ["-m", "veronica.tools.serve", "system"]
+    assert c["mcp_servers.veronica-system.env.VERONICA_GATE_SOCK"] == str(b.s.gate_socket)
+    assert c["mcp_servers.veronica-system.env.VERONICA_BRAIN"] == "codex"
+    assert c["mcp_servers.veronica-system.env.VERONICA_HOOK_LOG"] == str(b.hook_log)
+    assert c["mcp_servers.veronica-system.default_tools_approval_mode"] == "approve"   # else codex refuses every MCP call
     assert {k.split(".")[1] for k in c if k.startswith("mcp_servers.")} == {f"veronica-{s}" for s in hook.OUR_SERVERS}
 
 
@@ -180,17 +180,17 @@ def test_parse_mcp_fixture(tmp_path):
     events = [e for line in lines("codex-mcp.jsonl") for e in b.parse(line)]
     [start] = [e for e in events if isinstance(e, cli.ToolStart)]
     [end] = [e for e in events if isinstance(e, cli.ToolEnd)]
-    assert start.tool == "mcp__mac__volume_get" and start.native is False and start.input == {}
+    assert start.tool == "mcp__system__volume_get" and start.native is False and start.input == {}
     assert start.call_id == end.call_id and isinstance(events[-1], cli.Done)
     assert not any(isinstance(e, cli.Error) for e in events)
 
 
 def test_parse_mcp_items(tmp_path):
     b, _ = make(tmp_path)
-    item = {"id": "item_2", "type": "mcp_tool_call", "server": "veronica-mac", "tool": "volume_get",
+    item = {"id": "item_2", "type": "mcp_tool_call", "server": "veronica-system", "tool": "volume_get",
             "arguments": {}, "status": "in_progress"}
     [start] = b.parse(json.dumps({"type": "item.started", "item": item}))
-    assert start == cli.ToolStart("item_2", "mcp__mac__volume_get", {}, native=False)
+    assert start == cli.ToolStart("item_2", "mcp__system__volume_get", {}, native=False)
     [end] = b.parse(json.dumps({"type": "item.completed", "item": {**item, "status": "completed", "result": {}}}))
     assert end == cli.ToolEnd("item_2")
     # another server's tool is not gated in tools.serve, so it must go through

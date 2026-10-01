@@ -13,7 +13,7 @@ from mcp.types import CallToolRequestParams
 
 from veronica.tools.browser import browser_server
 from veronica.tools.computer import computer_server
-from veronica.tools.mac import mac_server
+from veronica.tools.system import system_server
 from veronica.tools.memory_tools import memory_server
 from veronica.tools.music import music_server
 from veronica.tools.pim import pim_server
@@ -22,7 +22,7 @@ from veronica.tools.screen import MAX_PNG_BYTES, screen_server
 log = logging.getLogger(__name__)
 
 SERVERS = {
-    "mac": mac_server, "pim": pim_server, "memory": memory_server,
+    "system": system_server, "pim": pim_server, "memory": memory_server,
     "screen": screen_server, "music": music_server,
     "browser": browser_server, "computer": computer_server,
 }

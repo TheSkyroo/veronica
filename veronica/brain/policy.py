@@ -33,7 +33,7 @@ CURL_HEADER_NAME_ALLOW = frozenset({
 # Per-in-process-MCP-server risk table, keyed by server name; tool calls
 # from server `X` arrive as `mcp__X__<tool>` (MCP_PREFIX_FMT).
 MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
-    "mac": {
+    "system": {
         "open_app": "allow",
         "open_url": "allow",
         "clipboard_read": "allow",
@@ -120,8 +120,8 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
 MCP_PREFIX_FMT = "mcp__{server}__"
 
 # Back-compat aliases (kept for anything still importing the old names).
-MAC_TOOL_RISK: dict[str, Decision] = MCP_TOOL_RISK["mac"]
-MAC_PREFIX = MCP_PREFIX_FMT.format(server="mac")
+SYSTEM_TOOL_RISK: dict[str, Decision] = MCP_TOOL_RISK["system"]
+SYSTEM_PREFIX = MCP_PREFIX_FMT.format(server="system")
 
 
 def _is_safe_short_combo(tok: str) -> bool:
@@ -243,7 +243,7 @@ def _shortcut_allowed(name: str, allowlist) -> bool:
 # or messages, AppleScript, screen control, shortcuts and the shell always
 # ask.
 AUTO_ALLOWABLE = frozenset({
-    "mcp__mac__clipboard_write",
+    "mcp__system__clipboard_write",
     "mcp__pim__calendar_create",
     "mcp__pim__reminder_create",
     "mcp__memory__fact_add",
@@ -284,7 +284,7 @@ def _classify(tool_name: str, tool_input: dict, shortcut_allowlist=()) -> Decisi
     if tool_name.startswith("mcp__"):
         rest = tool_name[len("mcp__"):]
         server, _, short = rest.partition("__")
-        if server == "mac" and short == "run_shortcut":
+        if server == "system" and short == "run_shortcut":
             return "allow" if _shortcut_allowed(tool_input.get("name", ""), shortcut_allowlist) else "confirm"
         risk_table = MCP_TOOL_RISK.get(server)
         if risk_table is not None:
@@ -417,7 +417,7 @@ def always_confirm(tool_name: str, tool_input: dict, front: Front | None = None)
     server, _, short = rest.partition("__")
     if _is_send_tool(server, short):
         return True
-    if server == "mac" and short == "applescript":
+    if server == "system" and short == "applescript":
         return _mentions(str(tool_input.get("script", "")), _APPLESCRIPT_PHRASES)
     if server == "computer":
         if front is not None and is_system_dialog(front):

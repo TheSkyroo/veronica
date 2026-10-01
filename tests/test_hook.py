@@ -17,13 +17,13 @@ from veronica.brain.base import Decision
     ("antigravity", "read_file", {"file_path": "/tmp/x"}, None),
     ("copilot", "grep", {"pattern": "x"}, None),
     ("qwen", "google_web_search", {"query": "x"}, None),
-    ("codex", "mcp__veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
+    ("codex", "mcp__veronica-system__clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),
     # verified live: codex sanitises the server name in the hook payload
-    ("codex", "mcp__veronica_mac__volume_get", {}, ("mcp__mac__volume_get", {})),
-    ("copilot", "veronica-mac__clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),
-    ("copilot", "veronica-mac-clipboard_write", {"text": "x"}, ("mcp__mac__clipboard_write", {"text": "x"})),  # verified
+    ("codex", "mcp__veronica_system__volume_get", {}, ("mcp__system__volume_get", {})),
+    ("copilot", "veronica-system__clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),
+    ("copilot", "veronica-system-clipboard_write", {"text": "x"}, ("mcp__system__clipboard_write", {"text": "x"})),  # verified
     ("copilot", "veronica-pim-mail_send", {"to": "x"}, ("mcp__pim__mail_send", {"to": "x"})),
-    ("copilot", "veronica-mac-", {}, ("veronica-mac-", {})),
+    ("copilot", "veronica-system-", {}, ("veronica-system-", {})),
     ("copilot", "github-mcp-server-search_code", {"q": "x"}, ("github-mcp-server-search_code", {"q": "x"})),
     ("copilot", "rg", {"pattern": "x"}, None),
     ("copilot", "read_bash", {"id": "0"}, None),
@@ -76,7 +76,7 @@ def test_run_mcp_and_readonly_skip_gate(tmp_path):
     def boom(*a, **k):
         raise AssertionError("gate must not be asked")
 
-    out, _ = hook.run("codex", json.dumps({"tool_name": "mcp__veronica-mac__clipboard_write", "tool_input": {"text": "x"}}),
+    out, _ = hook.run("codex", json.dumps({"tool_name": "mcp__veronica-system__clipboard_write", "tool_input": {"text": "x"}}),
                       ask=boom, log_path=tmp_path / "l")
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
     out, _ = hook.run("qwen", json.dumps({"tool_name": "read_file", "tool_input": {}}), ask=boom, log_path=tmp_path / "l")
@@ -110,13 +110,13 @@ def test_run_allows_every_form_of_our_own_mcp_tools(tmp_path):
     def boom(*a, **k):
         raise AssertionError("gate must not be asked")
 
-    for name in ("mcp__veronica-mac__clipboard_write", "veronica-mac__clipboard_write",
-                 "veronica-mac-clipboard_write", "mcp__veronica_mac__clipboard_write"):
+    for name in ("mcp__veronica-system__clipboard_write", "veronica-system__clipboard_write",
+                 "veronica-system-clipboard_write", "mcp__veronica_system__clipboard_write"):
         out, _ = hook.run("copilot", json.dumps({"toolName": name, "toolArgs": {"text": "x"}}),
                           ask=boom, log_path=tmp_path / "l")
         assert json.loads(out)["permissionDecision"] == "allow"
     out, _ = hook.run("antigravity", json.dumps({"toolCall": {"name": "call_mcp_tool",
-                                                              "args": {"ServerName": "veronica-mac", "ToolName": "clipboard_write"}}}),
+                                                              "args": {"ServerName": "veronica-system", "ToolName": "clipboard_write"}}}),
                       ask=boom, log_path=tmp_path / "l")
     assert json.loads(out)["decision"] == "allow"
 
@@ -145,7 +145,7 @@ def test_agy_shapes_map_to_canonical():
     for t in ("view_file", "list_dir", "grep_search", "find_by_name", "search_web", "read_url_content"):
         assert hook.canonical_tool("antigravity", t, {"AbsolutePath": "/x"}) is None
     # agy wraps MCP calls: ours are unwrapped (allowed here, gated in tools.serve), others confirmed by name
-    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "veronica-mac", "ToolName": "read_battery", "Arguments": {}}) == ("mcp__mac__read_battery", {})
+    assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "veronica-system", "ToolName": "read_battery", "Arguments": {}}) == ("mcp__system__read_battery", {})
     assert hook.canonical_tool("antigravity", "call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue", "Arguments": {}})[0] == "call_mcp_tool"
 
 

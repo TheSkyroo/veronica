@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     # Settings or answering a confirm with "always". Only the names in
     # policy.AUTO_ALLOWABLE take effect: anything else here is ignored, so a
     # hand-typed mail_send still asks every single time.
-    auto_allow_tools: list[str] = Field(default_factory=lambda: ["mcp__mac__clipboard_write"])
+    auto_allow_tools: list[str] = Field(default_factory=lambda: ["mcp__system__clipboard_write"])
     # External brains: may the vendor CLI use its own shell/file tools
     # (each call still asked through Veronica's hook)? Off = only our
     # MCP tools. Flipped off automatically when the hook canary trips.

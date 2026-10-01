@@ -2816,7 +2816,7 @@ async def test_barge_listener_failure_still_lets_ptt_barge():
 # -- batch A: notes & dictation (A4) -------------------------------------------
 
 from veronica.tools import pim as pim_tools_mod
-from veronica.tools import mac as mac_tools_mod
+from veronica.tools import system as system_tools_mod
 
 
 async def test_note_intent_creates_note_and_says_noted(monkeypatch):
@@ -2869,7 +2869,7 @@ async def test_dictation_captures_until_stop_and_types(monkeypatch):
         typed.append(text)
         return {"content": [{"type": "text", "text": "ok"}]}
 
-    monkeypatch.setattr(mac_tools_mod, "dictate_type", fake_dictate_type)
+    monkeypatch.setattr(system_tools_mod, "dictate_type", fake_dictate_type)
     o, _, ev = build3(
         rec_pcms=[np.zeros(1, np.int16), np.zeros(1, np.int16), np.zeros(1, np.int16), None],
         stt_texts=["dictate", "hello there", "how are you", "stop dictation"],
@@ -2886,7 +2886,7 @@ async def test_dictation_captures_until_stop_and_types(monkeypatch):
 async def test_dictation_ends_on_silence_without_stop_phrase(monkeypatch):
     typed = []
     monkeypatch.setattr(
-        mac_tools_mod, "dictate_type",
+        system_tools_mod, "dictate_type",
         lambda text: (typed.append(text), {"content": [{"type": "text", "text": "ok"}]})[1],
     )
     o, _ = build(
@@ -2906,7 +2906,7 @@ async def test_dictation_nothing_said_speaks_fallback():
 
 async def test_dictation_type_error_speaks_fallback(monkeypatch):
     monkeypatch.setattr(
-        mac_tools_mod, "dictate_type",
+        system_tools_mod, "dictate_type",
         lambda text: {"content": [{"type": "text", "text": "error: no access"}], "is_error": True},
     )
     o, _ = build(
@@ -2918,7 +2918,7 @@ async def test_dictation_type_error_speaks_fallback(monkeypatch):
 
 
 async def test_dictation_skips_go_ahead_echo_on_first_capture_only(monkeypatch):
-    monkeypatch.setattr(mac_tools_mod, "dictate_type", lambda text: {"content": [{"type": "text", "text": "ok"}]})
+    monkeypatch.setattr(system_tools_mod, "dictate_type", lambda text: {"content": [{"type": "text", "text": "ok"}]})
     o, _ = build(stt_texts=["dictate", "one", "two"])
     o.recorder = RecArgs([np.zeros(1, np.int16), np.zeros(1, np.int16), np.zeros(1, np.int16), None])
     await o.one_turn()
@@ -2931,7 +2931,7 @@ async def test_dictation_skips_go_ahead_echo_on_first_capture_only(monkeypatch):
 async def test_dictation_strips_trailing_stop_phrase_from_last_utterance(monkeypatch):
     typed = []
     monkeypatch.setattr(
-        mac_tools_mod, "dictate_type",
+        system_tools_mod, "dictate_type",
         lambda text: (typed.append(text), {"content": [{"type": "text", "text": "ok"}]})[1],
     )
     o, _ = build(
@@ -2967,7 +2967,7 @@ async def test_dictation_typing_error_mid_way_keeps_earlier_text(monkeypatch):
             return {"content": [{"type": "text", "text": "error: no access"}], "is_error": True}
         return {"content": [{"type": "text", "text": "ok"}]}
 
-    monkeypatch.setattr(mac_tools_mod, "dictate_type", fake_type)
+    monkeypatch.setattr(system_tools_mod, "dictate_type", fake_type)
     o, _ = build(
         rec_pcms=[np.zeros(1, np.int16)] * 3 + [None],
         stt_texts=["dictate", "first", "second", "third"],
@@ -3360,21 +3360,21 @@ async def test_quick_time_reply_skips_brain_and_logs():
 
 
 async def test_quick_battery_reads_pmset(monkeypatch):
-    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (72, "charging"))
+    monkeypatch.setattr(system_tools_mod, "read_battery", lambda: (72, "charging"))
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery level"])
     await o.one_turn()
     assert o.tts.said == ["Battery is at 72 percent and charging."]
 
 
 async def test_quick_battery_failure_copy(monkeypatch):
-    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (None, None))
+    monkeypatch.setattr(system_tools_mod, "read_battery", lambda: (None, None))
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery kitni hai"])
     await o.one_turn()
     assert o.tts.said == ["Battery level नहीं मिल पाया।"]
 
 
 async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
-    monkeypatch.setattr(mac_tools_mod, "read_battery", lambda: (98, None))
+    monkeypatch.setattr(system_tools_mod, "read_battery", lambda: (98, None))
     o, *_ = build_lang(["battery level"], langs=["en"], mode="en")
     await o.one_turn()
     assert o.tts.said[-1] == "Battery is at 98 percent."
@@ -3386,7 +3386,7 @@ async def test_quick_battery_unknown_state_reports_percent_only(monkeypatch):
 async def test_quick_volume_uses_mac_tool(monkeypatch):
     async def fake_get(args):
         return {"content": [{"type": "text", "text": "40"}]}
-    monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
+    monkeypatch.setattr(system_tools_mod.volume_get, "handler", fake_get)
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["what's the volume"])
     await o.one_turn()
     assert o.tts.said == ["Volume is at 40 percent."]
@@ -3395,7 +3395,7 @@ async def test_quick_volume_uses_mac_tool(monkeypatch):
 async def test_quick_volume_error_copy(monkeypatch):
     async def fake_get(args):
         return {"content": [{"type": "text", "text": "error: boom"}], "is_error": True}
-    monkeypatch.setattr(mac_tools_mod.volume_get, "handler", fake_get)
+    monkeypatch.setattr(system_tools_mod.volume_get, "handler", fake_get)
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["volume kitna hai"])
     await o.one_turn()
     assert o.tts.said == ["Volume नहीं मिल पाया।"]
@@ -3431,20 +3431,20 @@ def test_read_battery_parses_pmset():
             self.stdout = out
             self.returncode = 0
     run = lambda *a, **k: R("Now drawing from 'AC Power'\n -InternalBattery-0 (id=123)\t72%; charging; 0:45 remaining present: true\n")
-    assert mac_tools_mod.read_battery(run=run) == (72, "charging")
+    assert system_tools_mod.read_battery(run=run) == (72, "charging")
     run = lambda *a, **k: R(" -InternalBattery-0\t100%; charged; 0:00 remaining\n")
-    assert mac_tools_mod.read_battery(run=run) == (100, "charged")
+    assert system_tools_mod.read_battery(run=run) == (100, "charged")
     run = lambda *a, **k: R(" -InternalBattery-0\t35%; discharging; 3:10 remaining\n")
-    assert mac_tools_mod.read_battery(run=run) == (35, "discharging")
+    assert system_tools_mod.read_battery(run=run) == (35, "discharging")
     # plugged in but not charging (battery-health hold): the state is unknown, not "charging"
     run = lambda *a, **k: R(" -InternalBattery-0\t98%; AC attached; not charging present: true\n")
-    assert mac_tools_mod.read_battery(run=run) == (98, None)
+    assert system_tools_mod.read_battery(run=run) == (98, None)
     run = lambda *a, **k: R(" -InternalBattery-0\t80%; finishing charge; 0:05 remaining present: true\n")
-    assert mac_tools_mod.read_battery(run=run) == (80, "charging")
+    assert system_tools_mod.read_battery(run=run) == (80, "charging")
     run = lambda *a, **k: R("Now drawing from 'AC Power'\n")
-    assert mac_tools_mod.read_battery(run=run) == (None, None)
+    assert system_tools_mod.read_battery(run=run) == (None, None)
     run = lambda *a, **k: (_ for _ in ()).throw(OSError("no pmset"))
-    assert mac_tools_mod.read_battery(run=run) == (None, None)
+    assert system_tools_mod.read_battery(run=run) == (None, None)
 
 
 @pytest.mark.parametrize("heard,ok", [
