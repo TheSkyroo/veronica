@@ -165,10 +165,12 @@ class Settings(BaseSettings):
     # False = it interrupts and replaces the current one.
     queue_requests: bool = True
 
-    # push-to-talk: a held hotkey — modifiers + key ("win+space", "ctrl+alt+p")
-    # or a single key ("right_ctrl"); see veronica.audio.hotkey.parse_hotkey.
+    # push-to-talk: one or more keys, comma-separated — modifiers + key
+    # ("ctrl+alt+space"), a single key ("right_ctrl", "f9"), or "copilot"
+    # (a laptop's Copilot key); see veronica.audio.hotkey.parse_hotkeys.
+    # Hold to talk, or tap to talk until you stop speaking.
     ptt_enabled: bool = True
-    ptt_hotkey: str = "win+space"
+    ptt_hotkey: str = "copilot, ctrl+alt+space"
     ptt_max_s: int = 30     # hard cap on one held capture (onset wait + recording)
 
     # dictation
@@ -338,7 +340,8 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold the push-to-talk keys)"),
     "ptt_hotkey": EditableField(
         "str", "Push-to-talk keys",
-        "Hold to talk: modifiers + key like win+space or ctrl+alt+p, or one key like right_ctrl."),
+        "Hold to talk (or tap, and talk until you stop). Comma-separated: copilot (the Copilot key), "
+        "ctrl+alt+space, right_ctrl, f9…"),
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),

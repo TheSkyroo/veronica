@@ -335,6 +335,9 @@ class Orchestrator:
     # ANSWER_FILLERS minus the "now" words: "do it now" / "kar do abhi" is
     # an order, and gets pre-approved.
     _ANSWER_PADDING = ANSWER_FILLERS - {"now", "abhi", "अभी", "अब"}
+    # A push-to-talk press shorter than this is a tap (tap to talk: listen
+    # until silence) rather than a hold (hold to talk: until the key is up).
+    PTT_TAP_S = 0.4
     PREAPPROVE_WINDOW_S = 20
 
     @staticmethod
@@ -506,6 +509,8 @@ class Orchestrator:
         self._ptt_event = asyncio.Event()
         self._ptt_held = False
         self._ptt_capturing = False
+        self._ptt_tap = False          # released quickly before its capture began
+        self._ptt_down_at = 0.0
         # Set by set_listen_mode(): ends an idle wait so the new listening
         # mode (wake word on/off) applies immediately.
         self._listen_mode_event = asyncio.Event()
@@ -1616,7 +1621,7 @@ class Orchestrator:
         if not speak:
             return
         if mode == "ptt":
-            await self.say(f"Push-to-talk only. Hold {describe_hotkey(self.s.ptt_hotkey)} to talk to me.")
+            await self.say(f"Push-to-talk only. Press {describe_hotkey(self.s.ptt_hotkey)} to talk to me.")
         else:
             await self.say("Okay, I'm listening for my name again.")
 
@@ -1649,6 +1654,8 @@ class Orchestrator:
         if self._ptt_held:
             return
         self._ptt_held = True
+        self._ptt_tap = False
+        self._ptt_down_at = time.monotonic()
         self._ptt_event.set()
 
     def ptt_end(self) -> None:
@@ -1662,8 +1669,18 @@ class Orchestrator:
         if not self._ptt_held:
             return
         self._ptt_held = False
+        # A quick press is a *tap*: tap to talk (she listens until you stop
+        # speaking), as opposed to holding the key for as long as you talk.
+        # Some keys — a laptop's Copilot key among them — only ever send a
+        # tap, however long they're held down.
+        tap = time.monotonic() - self._ptt_down_at < self.PTT_TAP_S
         if self._ptt_capturing:
-            self.recorder.finish()
+            if tap:
+                self.recorder.release_to_vad(self.s.listen_wait_s)
+            else:
+                self.recorder.finish()
+        elif tap:
+            self._ptt_tap = True
 
     async def _listen_after_ptt(self, *, chime: bool = True) -> np.ndarray | None:
         """The push-to-talk capture: consume the PTT signal, then (unless
@@ -1675,7 +1692,17 @@ class Orchestrator:
         self._ptt_event.clear()
         self._set("listening")
         if not self._ptt_held:
-            log.info("ptt: key released before capture started; ignoring tap")
+            if self._ptt_tap:
+                # Tapped and already released: listen like after the wake
+                # word, until the speaker falls silent.
+                self._ptt_tap = False
+                log.info("ptt: tap to talk")
+                if chime:
+                    await self.chime(self.s.chime_wake_hz, 120)
+                pcm = await self._capture(max_s=self.s.listen_wait_s, partial=True)
+                self._end_partial_window()
+                return pcm
+            log.info("ptt: key released before capture started; ignoring")
             return None
         chime_task = asyncio.ensure_future(
             self.chime(self.s.chime_wake_hz, 120) if chime else asyncio.sleep(0)
