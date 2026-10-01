@@ -1,51 +1,53 @@
-"""Personal data via Outlook (calendar, mail, tasks, notes) and in-process
-timers, exposed to Claude as in-process MCP tools.
+"""Personal data via the user's Google account (Google Calendar, Gmail,
+Google Tasks, Google Docs) and in-process timers, exposed to Claude as
+in-process MCP tools.
 
-No OAuth: everything goes through the classic Outlook desktop app's COM
-interface (`Outlook.Application` / the MAPI namespace), so whatever accounts
-Outlook is set up with are the ones used. The new Outlook (and Outlook on
-the web) has no COM interface; without classic Outlook every tool here
-answers with OUTLOOK_MISSING instead.
+Everything goes through Google's REST APIs with the OAuth token kept by
+veronica.google_account (no google-api-python-client: plain authorized
+requests). Until the user has put an OAuth client file in place and said
+"connect Google", every tool answers with that module's NotConfigured /
+NotConnected message; a tool never starts a sign-in itself.
 
-COM objects belong to the thread (apartment) that made them, so each call
-runs on a worker thread via asyncio.to_thread inside its own
-CoInitialize/CoUninitialize (`_outlook_session`) and never lets an Outlook
-object escape it. pywin32 is imported there, lazily: tests replace
-`_outlook_session` with a fake object model.
+The HTTP calls block, so each tool runs its whole exchange on a worker
+thread via asyncio.to_thread; every request carries
+google_account.TIMEOUT. Tests replace google_account._authorized_session
+with a fake session.
 """
 import asyncio
-import contextlib
+import base64
 import datetime as dt
+import email.utils
+import html
+import json
 import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.message import EmailMessage
+from urllib.parse import quote
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
+
+from veronica import google_account as google
 
 CALENDAR_DAYS_MAX = 30
 REMINDERS_DAYS_MAX = 60
 MAIL_LIMIT_MAX = 20
-SCAN_MAX = 2000               # items walked per call, whatever a filter returns
+PAGES_MAX = 10                # result pages followed per list call
 PREVIEW_CHARS = 200
 
-# Outlook constants (OlDefaultFolders / OlItemType).
-FOLDER_CALENDAR = 9
-FOLDER_CONTACTS = 10
-FOLDER_INBOX = 6
-FOLDER_NOTES = 12
-FOLDER_TASKS = 13
-ITEM_MAIL = 0
-ITEM_APPOINTMENT = 1
-ITEM_TASK = 3
-ITEM_NOTE = 5
-CLASS_MAIL = 43               # OlObjectClass.olMail
-NO_DATE_YEAR = 4000           # Outlook's "None" date is 4501-01-01
-
-OUTLOOK_MISSING = ("I can't reach Outlook. Mail, calendar, tasks and notes need the classic "
-                   "Outlook desktop app installed and signed in.")
+CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
+TASKS_API = "https://tasks.googleapis.com/tasks/v1"
+PEOPLE_API = "https://people.googleapis.com/v1"
+DRIVE_API = "https://www.googleapis.com/drive/v3"
+DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
+NOTES_FOLDER = "Veronica Notes"
+MIME_FOLDER = "application/vnd.google-apps.folder"
+MIME_DOC = "application/vnd.google-apps.document"
 
 log = logging.getLogger(__name__)
 
@@ -58,69 +60,37 @@ def _err(text: str) -> dict:
     return {"content": [{"type": "text", "text": f"error: {text}"}], "is_error": True}
 
 
-class OutlookUnavailable(RuntimeError):
-    """Classic Outlook isn't installed, or its COM server wouldn't start."""
-
-    def __init__(self, detail: str = ""):
-        super().__init__(OUTLOOK_MISSING)
-        self.detail = detail
-
-
-def _com_message(exc: Exception) -> str:
-    """A pywintypes.com_error's human part (the Outlook exception text when
-    there is one), else str(exc)."""
-    args = getattr(exc, "args", ())
-    if len(args) >= 3 and isinstance(args[2], tuple) and len(args[2]) >= 3 and args[2][2]:
-        return str(args[2][2]).strip()
-    if len(args) >= 2 and isinstance(args[1], str) and args[1]:
-        return args[1]
-    return str(exc)
-
-
 def _guard(fn):
-    """Wrap a handler so malformed args (missing keys, bad types) and Outlook
+    """Wrap a handler so malformed args (missing keys, bad types) and Google
     failures return `_err(...)` instead of raising."""
     async def wrapper(args: dict) -> dict:
         try:
             return await fn(args)
-        except OutlookUnavailable as exc:
-            log.info("Outlook unavailable: %s", exc.detail)
-            return _err(OUTLOOK_MISSING)
+        except google.GoogleError as exc:
+            log.info("Google call failed: %s", exc)
+            return _err(str(exc))
         except Exception as exc:
-            return _err(_com_message(exc))
+            return _err(str(exc) or type(exc).__name__)
     return wrapper
 
 
-@contextlib.contextmanager
-def _outlook_session():
-    """(application, MAPI namespace) for this thread, inside a COM apartment
-    that is torn down on exit. Raises OutlookUnavailable when pywin32 or
-    Outlook's COM server is missing."""
-    try:
-        import pythoncom
-        import win32com.client
-    except ImportError as exc:
-        raise OutlookUnavailable(str(exc)) from None
-    pythoncom.CoInitialize()
-    try:
-        try:
-            app = win32com.client.Dispatch("Outlook.Application")
-            ns = app.GetNamespace("MAPI")
-        except Exception as exc:
-            raise OutlookUnavailable(_com_message(exc)) from None
-        yield app, ns
-    finally:
-        pythoncom.CoUninitialize()
+async def _google(fn: Callable, *args):
+    """Run fn(*args) — synchronous Google calls — on a worker thread."""
+    return await asyncio.to_thread(fn, *args)
 
 
-def _in_outlook(fn: Callable):
-    """Run fn(app, ns) inside an Outlook session. Synchronous."""
-    with _outlook_session() as (app, ns):
-        return fn(app, ns)
-
-
-async def _outlook(fn: Callable):
-    return await asyncio.to_thread(_in_outlook, fn)
+def _pages(url: str, params: dict, key: str = "items") -> list[dict]:
+    """Every `key` entry of a paged list call, following nextPageToken up to
+    PAGES_MAX pages."""
+    out, params = [], dict(params)
+    for _ in range(PAGES_MAX):
+        body = google.get(url, params=params)
+        out.extend(body.get(key) or [])
+        token = body.get("nextPageToken")
+        if not token:
+            break
+        params["pageToken"] = token
+    return out
 
 
 # -- helpers -------------------------------------------------------------------------
@@ -153,49 +123,25 @@ def _clean(s) -> str:
     return " ".join(str(s or "").split())
 
 
-def _naive(d) -> dt.datetime | None:
-    """An Outlook date as a naive local datetime. pywin32 hands Outlook's
-    local times back tagged with a UTC tzinfo; the wall-clock value is the
-    one that's right, so the tag is dropped, not converted."""
-    if d is None:
-        return None
+def _rfc3339(local: dt.datetime) -> str:
+    """A naive local time as RFC 3339 with this machine's UTC offset."""
+    return local.astimezone().isoformat(timespec="seconds")
+
+
+def _local(stamp: str) -> dt.datetime | None:
+    """An RFC 3339 timestamp as a naive local datetime."""
     try:
-        return dt.datetime(d.year, d.month, d.day, d.hour, d.minute, d.second)
-    except (AttributeError, TypeError, ValueError):
+        d = dt.datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
         return None
-
-
-def _filter_date(d: dt.datetime) -> str:
-    """A date for an Items.Restrict filter. Outlook parses these with the
-    user's locale, but an ISO date-time is unambiguous everywhere it's been
-    tried; callers still re-check dates in Python."""
-    return d.strftime("%Y-%m-%d %H:%M")
-
-
-def _walk(items, limit: int = SCAN_MAX):
-    """Iterate an Items collection with GetFirst/GetNext (the only way that
-    works on a recurrence-expanded collection, whose Count is meaningless),
-    capped so a filter that matched too much can't run forever."""
-    item = items.GetFirst()
-    n = 0
-    while item is not None and n < limit:
-        yield item
-        n += 1
-        item = items.GetNext()
-
-
-def _get(obj, name: str, default=""):
-    try:
-        v = getattr(obj, name)
-    except Exception:
-        return default
-    return default if v is None else v
+    return d.astimezone().replace(tzinfo=None) if d.tzinfo else d
 
 
 # -- calendar -------------------------------------------------------------------
 def _format_events(rows: list[tuple]) -> str:
     """rows: (title, start, end, calendar, location). One line each:
-    "HH:MM–HH:MM  title (calendar)" [" @ location"] — proactive.py parses it."""
+    "HH:MM–HH:MM  title (calendar)" [" @ location"] — proactive.py parses it
+    (an all-day event is 00:00–00:00)."""
     out = []
     for title, start, end, cal, loc in rows:
         entry = f"{start:%H:%M}–{end:%H:%M}  {title} ({cal})"
@@ -205,35 +151,78 @@ def _format_events(rows: list[tuple]) -> str:
     return "\n".join(out) if out else "No events."
 
 
-def _events_sync(start: dt.datetime, end: dt.datetime):
-    def go(app, ns):
-        folder = ns.GetDefaultFolder(FOLDER_CALENDAR)
-        cal = _clean(_get(folder, "Name", "Calendar")) or "Calendar"
-        items = folder.Items
-        # Order matters: Sort, then IncludeRecurrences, then Restrict —
-        # otherwise recurring series come back as their master only.
-        items.Sort("[Start]")
-        items.IncludeRecurrences = True
-        hits = items.Restrict(f"[Start] < '{_filter_date(end)}' AND [End] > '{_filter_date(start)}'")
-        rows = []
-        for it in _walk(hits):
-            s, e = _naive(_get(it, "Start", None)), _naive(_get(it, "End", None))
-            if s is None or e is None:
+def _calendar_name(c: dict) -> str:
+    """What the user calls a calendar: their own rename, else its title.
+    The primary calendar's title is the account's address, so unrenamed
+    it's just "Calendar"."""
+    if c.get("summaryOverride"):
+        return _clean(c["summaryOverride"])
+    if c.get("primary"):
+        return "Calendar"
+    return _clean(c.get("summary")) or "Calendar"
+
+
+def _calendars() -> list[dict]:
+    return _pages(f"{CALENDAR_API}/users/me/calendarList", {"maxResults": 250})
+
+
+def _event_times(e: dict) -> tuple[dt.datetime | None, dt.datetime | None]:
+    """(start, end) as naive local datetimes; an all-day event (a `date`,
+    no time) runs midnight to midnight."""
+    out = []
+    for key in ("start", "end"):
+        t = e.get(key) or {}
+        if t.get("dateTime"):
+            out.append(_local(t["dateTime"]))
+        elif t.get("date"):
+            try:
+                out.append(dt.datetime.strptime(t["date"], "%Y-%m-%d"))
+            except ValueError:
+                out.append(None)
+        else:
+            out.append(None)
+    return out[0], out[1]
+
+
+def _declined(e: dict) -> bool:
+    return any(a.get("self") and a.get("responseStatus") == "declined"
+               for a in e.get("attendees") or [])
+
+
+def _events_sync(start: dt.datetime, end: dt.datetime) -> list[tuple]:
+    """Events starting in [start, end) on every calendar the user shows in
+    Google Calendar (selected, plus the primary), merged by start time."""
+    cals = [c for c in _calendars() if c.get("primary") or c.get("selected")]
+    labelled = len(cals) > 1
+    params = {"singleEvents": "true", "orderBy": "startTime", "maxResults": 250,
+              "timeMin": _rfc3339(start), "timeMax": _rfc3339(end)}
+    rows = []
+    for c in cals:
+        url = f"{CALENDAR_API}/calendars/{quote(c['id'], safe='')}/events"
+        try:
+            items = _pages(url, params)
+        except google.ApiError as exc:
+            if c.get("primary"):
+                raise
+            log.info("skipping calendar %r: %s", c.get("summary"), exc)
+            continue
+        name = _calendar_name(c) if labelled else "Calendar"
+        for e in items:
+            if e.get("status") == "cancelled" or _declined(e):
                 continue
-            # Re-checked here, whatever the filter matched: a multi-day event
-            # that began before the range isn't listed, as before.
-            if not start <= s < end:
+            s, f = _event_times(e)
+            # A multi-day event that began before the range isn't listed.
+            if s is None or f is None or not start <= s < end:
                 continue
-            rows.append((_clean(_get(it, "Subject")) or "(no title)", s, e, cal,
-                         _clean(_get(it, "Location"))))
-        return sorted(rows, key=lambda r: r[1])
-    return go
+            rows.append((_clean(e.get("summary")) or "(no title)", s, f, name,
+                         _clean(e.get("location"))))
+    return sorted(rows, key=lambda r: r[1])
 
 
 @tool(
     "calendar_events",
-    "List Outlook calendar events in a date range (recurring events included): title, "
-    "start/end time, calendar, location",
+    "List Google Calendar events in a date range across the calendars shown in Google "
+    "Calendar (recurring events included): title, start/end time, calendar, location",
     {"day": str, "days": int},
 )
 @_guard
@@ -245,28 +234,26 @@ async def calendar_events(args: dict) -> dict:
         return _err(f"invalid day: {day!r}")
     days = _clamp(args.get("days", 1), 1, CALENDAR_DAYS_MAX, 1)
     start = dt.datetime.combine(first, dt.time())
-    rows = await _outlook(_events_sync(start, start + dt.timedelta(days=days)))
+    rows = await _google(_events_sync, start, start + dt.timedelta(days=days))
     return _ok(_format_events(rows))
 
 
-def _find_calendar(ns, name: str):
-    """The calendar folder called `name` (casefolded): the default calendar,
-    one of its subfolders, or another account's calendar."""
+def _find_calendar(name: str) -> dict | None:
+    """The writable calendar called `name` (casefolded, by the user's name
+    for it or its title)."""
     want = name.casefold()
-    default = ns.GetDefaultFolder(FOLDER_CALENDAR)
-    candidates = [default, *list(_get(default, "Folders", []) or [])]
-    for store in list(_get(ns, "Stores", []) or []):
-        with contextlib.suppress(Exception):
-            candidates.append(store.GetDefaultFolder(FOLDER_CALENDAR))
-    for f in candidates:
-        if _clean(_get(f, "Name")).casefold() == want:
-            return f
+    for c in _calendars():
+        if c.get("accessRole") not in ("owner", "writer"):
+            continue
+        names = {_calendar_name(c).casefold(), _clean(c.get("summary")).casefold()}
+        if want in names:
+            return c
     return None
 
 
 @tool(
     "calendar_create",
-    "Create an Outlook calendar event (default calendar unless one is named)",
+    "Create a Google Calendar event (primary calendar unless one is named)",
     {"title": str, "start": str, "minutes": int, "calendar": str},
 )
 @_guard
@@ -282,20 +269,19 @@ async def calendar_create(args: dict) -> dict:
     minutes = _clamp(args.get("minutes", 60), 1, 24 * 60, 60)
     calendar = _clean(args.get("calendar", ""))
 
-    def go(app, ns):
+    def go():
+        cal_id = "primary"
         if calendar:
-            folder = _find_calendar(ns, calendar)
-            if folder is None:
+            found = _find_calendar(calendar)
+            if found is None:
                 return _err(f"there's no calendar called {calendar!r}")
-            appt = folder.Items.Add(ITEM_APPOINTMENT)
-        else:
-            appt = app.CreateItem(ITEM_APPOINTMENT)
-        appt.Subject = title
-        appt.Start = start
-        appt.Duration = minutes
-        appt.Save()
+            cal_id = found["id"]
+        end = start + dt.timedelta(minutes=minutes)
+        google.post(f"{CALENDAR_API}/calendars/{quote(cal_id, safe='')}/events",
+                    {"summary": title, "start": {"dateTime": _rfc3339(start)},
+                     "end": {"dateTime": _rfc3339(end)}})
         return _ok(f"Created '{title}'")
-    return await _outlook(go)
+    return await _google(go)
 
 
 # -- mail -------------------------------------------------------------------
@@ -306,101 +292,105 @@ def _format_mail(rows: list[tuple]) -> str:
     return "\n".join(out) if out else "No messages."
 
 
-def _sender(m) -> str:
-    """"Name <address>" when Outlook has an SMTP address, else the name.
-    Exchange senders carry an X.500 path instead; their SMTP address is
-    looked up through the address book."""
-    name = _clean(_get(m, "SenderName"))
-    addr = _clean(_get(m, "SenderEmailAddress"))
-    if addr and "@" not in addr:
-        addr = ""
-        with contextlib.suppress(Exception):
-            addr = _clean(m.Sender.GetExchangeUser().PrimarySmtpAddress)
+def _sender(raw: str) -> str:
+    """A From header as "Name <address>", or whichever of the two it has."""
+    name, addr = (_clean(p) for p in email.utils.parseaddr(raw or ""))
     if addr and name and addr.casefold() != name.casefold():
         return f"{name} <{addr}>"
-    return name or addr or "(unknown sender)"
+    return name or addr or _clean(raw) or "(unknown sender)"
 
 
-def _mail_rows(items, limit: int) -> list[tuple]:
+def _mail_row(m: dict) -> tuple | None:
+    headers = {h.get("name", "").casefold(): h.get("value", "")
+               for h in (m.get("payload") or {}).get("headers") or []}
+    try:
+        when = dt.datetime.fromtimestamp(int(m["internalDate"]) / 1000)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        when = None
+        if headers.get("date"):
+            with_tz = email.utils.parsedate_to_datetime(headers["date"])
+            when = with_tz.astimezone().replace(tzinfo=None) if with_tz.tzinfo else with_tz
+    if when is None:
+        return None
+    preview = _clean(html.unescape(m.get("snippet", "")))[:PREVIEW_CHARS]
+    return (_sender(headers.get("from", "")), _clean(headers.get("subject")) or "(no subject)",
+            when, preview)
+
+
+def _mail_sync(q: str, limit: int) -> list[tuple]:
+    """Newest-first messages matching Gmail search `q`, up to `limit`."""
+    ids = google.get(f"{GMAIL_API}/messages", params={"q": q, "maxResults": limit}).get("messages") or []
     rows = []
-    for m in _walk(items):
-        if len(rows) >= limit:
-            break
-        if _get(m, "Class", CLASS_MAIL) != CLASS_MAIL:
-            continue                    # meeting requests, receipts, ...
-        when = _naive(_get(m, "ReceivedTime", None))
-        if when is None:
-            continue
-        preview = _clean(_get(m, "Body"))[:PREVIEW_CHARS]
-        rows.append((_sender(m), _clean(_get(m, "Subject")) or "(no subject)", when, preview))
+    for ref in ids[:limit]:
+        m = google.get(f"{GMAIL_API}/messages/{quote(ref['id'], safe='')}",
+                       params={"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]})
+        row = _mail_row(m)
+        if row is not None:
+            rows.append(row)
     return rows
 
 
-def _inbox_items(ns):
-    items = ns.GetDefaultFolder(FOLDER_INBOX).Items
-    items.Sort("[ReceivedTime]", True)       # newest first
-    return items
+UNREAD_QUERY = "is:unread in:inbox"
 
 
-@tool("mail_unread", "List unread Outlook inbox messages: sender, subject, date, preview", {"limit": int})
+@tool("mail_unread", "List unread Gmail inbox messages: sender, subject, date, preview", {"limit": int})
 @_guard
 async def mail_unread(args: dict) -> dict:
     limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
-
-    def go(app, ns):
-        return _mail_rows(_inbox_items(ns).Restrict("[UnRead] = True"), limit)
-    return _ok(_format_mail(await _outlook(go)))
+    return _ok(_format_mail(await _google(_mail_sync, UNREAD_QUERY, limit)))
 
 
 async def mail_unread_count() -> int:
-    """The inbox's unread count, straight from the folder property — a plain
+    """The inbox's unread count, straight from the INBOX label — a plain
     helper (not an MCP tool) for the proactive briefing, which wants the
     real number rather than the capped `mail_unread` listing. Raises
-    RuntimeError when Outlook fails or reports something that isn't an
-    integer."""
-    def go(app, ns):
-        return ns.GetDefaultFolder(FOLDER_INBOX).UnReadItemCount
+    RuntimeError (google.GoogleError is one) when Gmail fails or reports
+    something that isn't an integer."""
     try:
-        n = await _outlook(go)
-    except OutlookUnavailable:
+        body = await _google(google.get, f"{GMAIL_API}/labels/INBOX")
+    except google.GoogleError:
         raise
     except Exception as exc:
-        raise RuntimeError(_com_message(exc)) from None
+        raise RuntimeError(str(exc)) from None
+    n = body.get("messagesUnread")
     try:
         return int(n)
     except (TypeError, ValueError):
         raise RuntimeError(f"unexpected unread count: {n!r}") from None
 
 
-def _dasl_like(text: str) -> str:
-    """`text` as the inside of a DASL LIKE '%...%' literal: quotes doubled,
-    and the filter's own wildcard/escape characters dropped."""
-    return re.sub(r"[%_\[\]\x00-\x1f]", " ", text).replace("'", "''")
+def mail_search_query(query: str) -> str:
+    """`query` as one quoted Gmail phrase: quotes, backslashes and control
+    characters dropped so it can't close the phrase and add operators."""
+    q = " ".join(re.sub(r"[\"\\\x00-\x1f]", " ", query).split())
+    return f'"{q}"'
 
 
-def mail_search_filter(query: str) -> str:
-    q = _dasl_like(query)
-    fields = ("urn:schemas:httpmail:subject", "urn:schemas:httpmail:fromname",
-              "urn:schemas:httpmail:fromemail")
-    return "@SQL=" + " OR ".join(f"\"{f}\" LIKE '%{q}%'" for f in fields)
-
-
-@tool("mail_search", "Search the Outlook inbox by subject/sender substring", {"query": str, "limit": int})
+@tool("mail_search",
+      "Search Gmail (sender, subject and text; spam and trash excluded) for a phrase",
+      {"query": str, "limit": int})
 @_guard
 async def mail_search(args: dict) -> dict:
     query = _clean(args.get("query", ""))[:200]
-    if not query:
+    if not query or mail_search_query(query) == '""':
         return _err("query is required")
     limit = _clamp(args.get("limit", 5), 1, MAIL_LIMIT_MAX, 5)
+    return _ok(_format_mail(await _google(_mail_sync, mail_search_query(query), limit)))
 
-    def go(app, ns):
-        return _mail_rows(_inbox_items(ns).Restrict(mail_search_filter(query)), limit)
-    return _ok(_format_mail(await _outlook(go)))
+
+def _raw_message(rec: "Recipient", subject: str, body: str) -> str:
+    """An RFC 2822 message, base64url as Gmail's messages.send wants it.
+    Gmail fills in From (the connected account) and Date."""
+    msg = EmailMessage()
+    msg["To"] = rec.handle if rec.name == rec.handle else email.utils.formataddr((rec.name, rec.handle))
+    msg["Subject"] = subject
+    msg.set_content(body)
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
 
 
 @tool("mail_send",
-      "Compose and send an email from Outlook. `to` is an email address or a contact's name "
-      "(looked up in Outlook contacts and the address book)",
+      "Compose and send an email from Gmail. `to` is an email address or a contact's name "
+      "(looked up in Google Contacts)",
       {"to": str, "subject": str, "body": str})
 @_guard
 async def mail_send(args: dict) -> dict:
@@ -416,20 +406,14 @@ async def mail_send(args: dict) -> dict:
         rec = await resolve_recipient_async(to)
     except ValueError as exc:
         return _err(str(exc))
-
-    def go(app, ns):
-        msg = app.CreateItem(ITEM_MAIL)
-        msg.To = rec.handle
-        msg.Subject = subject
-        msg.Body = body
-        msg.Send()
-        return _ok(f"Sent to {rec.name}")
-    return await _outlook(go)
+    await _google(google.post, f"{GMAIL_API}/messages/send", {"raw": _raw_message(rec, subject, body)})
+    return _ok(f"Sent to {rec.name}")
 
 
-# -- recipients (Outlook contacts / address book) -----------------------------
+# -- recipients (Google Contacts) -------------------------------------------
 RESOLVED_TTL_S = 300          # a confirmed name -> address holds this long
 _EMAIL_RE = re.compile(r"[^@\s<>\"']+@[^@\s<>\"']+\.[^@\s<>\"']+")
+PEOPLE_MASK = "names,emailAddresses"
 
 
 @dataclass(frozen=True)
@@ -443,57 +427,40 @@ def is_handle(to: str) -> bool:
     return bool(_EMAIL_RE.fullmatch(to.strip()))
 
 
-def _contact_row(c) -> tuple[str, list[str]]:
-    """An Outlook ContactItem as (display name, [SMTP addresses...])."""
-    display = (_clean(_get(c, "FullName")) or _clean(_get(c, "NickName"))
-               or _clean(_get(c, "CompanyName")))
-    emails = []
-    for i in (1, 2, 3):
-        addr = _clean(_get(c, f"Email{i}Address"))
-        if "@" in addr:                       # an Exchange (EX) entry is X.500, not SMTP
-            emails.append(addr)
-    return display, emails
+def _person_row(p: dict) -> tuple[str, list[str]]:
+    """A People API person as (display name, [email addresses...]); an
+    "other contact" (someone you've mailed) may have only an address."""
+    emails = [_clean(e.get("value")) for e in p.get("emailAddresses") or [] if e.get("value")]
+    names = p.get("names") or []
+    display = _clean(names[0].get("displayName")) if names else ""
+    return display or (emails[0] if emails else ""), emails
 
 
-def _name_matches(query: str, display: str, extra: list[str]) -> bool:
-    q = query.casefold()
-    names = [display, *extra]
-    return any(n and (n.casefold().startswith(q)
-                      or any(part.startswith(q) for part in n.casefold().split()))
-               for n in names)
+_warmed: set[str] = set()
 
 
-def _search_outlook(ns, name: str) -> list[tuple[str, list[str]]]:
-    found = []
-    folder = ns.GetDefaultFolder(FOLDER_CONTACTS)
-    for c in _walk(folder.Items):
-        if _get(c, "Class", 40) != 40:        # olContact (skips distribution lists)
-            continue
-        display, emails = _contact_row(c)
-        extra = [_clean(_get(c, "FirstName")), _clean(_get(c, "LastName")), _clean(_get(c, "NickName"))]
-        if display and _name_matches(name, display, extra):
-            found.append((display, emails))
-    if found:
-        return found
-    # Not in personal contacts: let Outlook resolve it against the address
-    # book (an Exchange GAL, say). Resolve() fails on an ambiguous name.
-    rcp = ns.CreateRecipient(name)
-    if rcp.Resolve():
-        entry = rcp.AddressEntry
-        addr = _clean(_get(entry, "Address"))
-        if "@" not in addr:
-            addr = ""
-            with contextlib.suppress(Exception):
-                addr = _clean(entry.GetExchangeUser().PrimarySmtpAddress)
-        return [(_clean(_get(rcp, "Name")) or name, [addr] if addr else [])]
-    return []
+def _people_query(endpoint: str, name: str) -> list[tuple[str, list[str]]]:
+    url = f"{PEOPLE_API}/{endpoint}"
+    params = {"readMask": PEOPLE_MASK, "pageSize": 10}
+    if endpoint not in _warmed:
+        # The search cache is only filled by an empty-query request first.
+        google.get(url, params={**params, "query": ""})
+        _warmed.add(endpoint)
+    found = google.get(url, params={**params, "query": name}).get("results") or []
+    return [row for row in (_person_row(r.get("person") or {}) for r in found) if row[0]]
+
+
+def _people_search(name: str) -> list[tuple[str, list[str]]]:
+    """Saved contacts matching `name`, else "other contacts" (people you've
+    exchanged mail with). Synchronous; raises google.GoogleError."""
+    return (_people_query("people:searchContacts", name)
+            or _people_query("otherContacts:search", name))
 
 
 def _contacts_search(name: str) -> list[tuple[str, list[str]]]:
-    """People matching `name`, as (display name, [email addresses...]), from
-    Outlook's contacts and then its address book. Tests replace this.
-    Synchronous; raises OutlookUnavailable without Outlook."""
-    return _in_outlook(lambda app, ns: _search_outlook(ns, name))
+    """People matching `name`, as (display name, [email addresses...]).
+    Tests replace this."""
+    return _people_search(name)
 
 
 def _or_list(items: list[str]) -> str:
@@ -513,7 +480,7 @@ def _pick(name: str, found: list[tuple[str, list[str]]]) -> Recipient:
     who, handles = found[0]
     handles = list(dict.fromkeys(h for h in handles if is_handle(h)))
     if not handles:
-        raise ValueError(f"{who} has no email address in Outlook.")
+        raise ValueError(f"{who} has no email address in your contacts.")
     if len(handles) > 1:
         raise ValueError(f"{who} has several: {_or_list(handles[:4])}. Which one?")
     return Recipient(who, handles[0])
@@ -524,10 +491,10 @@ _resolved: dict[str, tuple[float, Recipient]] = {}
 
 def resolve_recipient(to: str) -> Recipient:
     """A mail recipient from what the brain said: an address as-is, a name
-    looked up in Outlook. Raises ValueError with a short, speakable reason
-    (ambiguous, unknown, no Outlook) instead of guessing. A name resolved
-    here is remembered for a few minutes, so the send goes to the very
-    address the confirm showed."""
+    looked up in Google Contacts. Raises ValueError with a short, speakable
+    reason (ambiguous, unknown, Google not connected) instead of guessing.
+    A name resolved here is remembered for a few minutes, so the send goes
+    to the very address the confirm showed."""
     to = to.strip()
     if is_handle(to):
         return Recipient(to, to)
@@ -539,8 +506,8 @@ def resolve_recipient(to: str) -> Recipient:
         return hit[1]
     try:
         found = _contacts_search(to)
-    except OutlookUnavailable:
-        raise ValueError(OUTLOOK_MISSING + " Or give me the email address.") from None
+    except google.GoogleError as exc:
+        raise ValueError(f"{exc} Or give me the email address.") from None
     rec = _pick(to, found)
     _resolved[key] = (time.monotonic(), rec)
     log.info("mail recipient %r -> %s", to, rec.name)
@@ -551,7 +518,15 @@ async def resolve_recipient_async(to: str) -> Recipient:
     return await asyncio.to_thread(resolve_recipient, to)
 
 
-# -- reminders (Outlook tasks) ---------------------------------------------
+# -- reminders (Google Tasks) ----------------------------------------------
+# Google Tasks keeps only a due *date* (the time part of `due` is always
+# midnight UTC and ignored), and never notifies at a time. reminder_create
+# therefore writes a given time into the task's notes as "Due at HH:MM",
+# and reminders_due reads it back from there; any other task shows 00:00.
+TASKLIST = "@default"
+_DUE_AT_RE = re.compile(r"\bDue at (\d{1,2}):(\d{2})\b")
+
+
 def _format_reminders(rows: list[tuple]) -> str:
     """rows: (title, due, list). "YYYY-MM-DD HH:MM  name" [" (list)"] —
     proactive.py parses it."""
@@ -564,41 +539,51 @@ def _format_reminders(rows: list[tuple]) -> str:
     return "\n".join(out) if out else "No reminders due."
 
 
-def _task_due(t) -> dt.datetime | None:
-    """When a task is due: its reminder time when it has one (that carries
-    the hour), else its due date; None for an undated task."""
-    for attr, enabled in (("ReminderTime", bool(_get(t, "ReminderSet", False))), ("DueDate", True)):
-        if not enabled:
+def _task_due(t: dict) -> dt.datetime | None:
+    """When a task is due: its date, at the "Due at HH:MM" time from its
+    notes when there is one; None for an undated task."""
+    try:
+        day = dt.datetime.strptime(str(t.get("due", ""))[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    m = _DUE_AT_RE.search(t.get("notes") or "")
+    if m and int(m[1]) < 24 and int(m[2]) < 60:
+        return day.replace(hour=int(m[1]), minute=int(m[2]))
+    return day
+
+
+def _reminders_sync(end: dt.datetime) -> list[tuple]:
+    lst = _clean(google.get(f"{TASKS_API}/users/@me/lists/{TASKLIST}").get("title")) or "Tasks"
+    items = _pages(f"{TASKS_API}/lists/{TASKLIST}/tasks",
+                   {"showCompleted": "false", "showHidden": "false", "maxResults": 100,
+                    # due is a date at 00:00Z: the whole last day is asked
+                    # for, and the time cut made below.
+                    "dueMax": f"{end:%Y-%m-%d}T23:59:59Z"})
+    rows = []
+    for t in items:
+        if t.get("status") == "completed" or t.get("deleted"):
             continue
-        d = _naive(_get(t, attr, None))
-        if d is not None and d.year < NO_DATE_YEAR:
-            return d
-    return None
+        due = _task_due(t)
+        if due is not None and due < end:
+            rows.append((_clean(t.get("title")) or "(no title)", due, lst))
+    return sorted(rows, key=lambda r: r[1])
 
 
 @tool(
     "reminders_due",
-    "List incomplete Outlook tasks due within N days (including overdue)",
+    "List incomplete Google Tasks due within N days (including overdue)",
     {"days": int},
 )
 @_guard
 async def reminders_due(args: dict) -> dict:
     days = _clamp(args.get("days", 1), 1, REMINDERS_DAYS_MAX, 1)
     end = dt.datetime.now() + dt.timedelta(days=days)
-
-    def go(app, ns):
-        folder = ns.GetDefaultFolder(FOLDER_TASKS)
-        lst = _clean(_get(folder, "Name", "Tasks"))
-        rows = []
-        for t in _walk(folder.Items.Restrict("[Complete] = False")):
-            due = _task_due(t)
-            if due is not None and due < end:
-                rows.append((_clean(_get(t, "Subject")) or "(no title)", due, lst))
-        return sorted(rows, key=lambda r: r[1])
-    return _ok(_format_reminders(await _outlook(go)))
+    return _ok(_format_reminders(await _google(_reminders_sync, end)))
 
 
-@tool("reminder_create", "Create an Outlook task, optionally with a due time and reminder",
+@tool("reminder_create",
+      "Create a Google Task, optionally due at a date and time (Google Tasks keeps the date; "
+      "the time is noted on the task)",
       {"title": str, "when": str})
 @_guard
 async def reminder_create(args: dict) -> dict:
@@ -606,43 +591,59 @@ async def reminder_create(args: dict) -> dict:
     if not title:
         return _err("title is required")
     when_s = str(args.get("when", "") or "").strip()
-    when = None
+    task = {"title": title}
     if when_s:
         try:
             when = _parse_start(when_s)
         except ValueError:
             return _err(f"invalid when: {when_s!r}, expected 'YYYY-MM-DD HH:MM'")
-
-    def go(app, ns):
-        task = app.CreateItem(ITEM_TASK)
-        task.Subject = title
-        if when is not None:
-            task.DueDate = dt.datetime.combine(when.date(), dt.time())
-            task.ReminderSet = True
-            task.ReminderTime = when
-        task.Save()
-        return _ok(f"Created reminder '{title}'")
-    return await _outlook(go)
+        task["due"] = f"{when:%Y-%m-%d}T00:00:00.000Z"
+        task["notes"] = f"Due at {when:%H:%M}"
+    await _google(google.post, f"{TASKS_API}/lists/{TASKLIST}/tasks", task)
+    return _ok(f"Created reminder '{title}'")
 
 
-# -- notes -----------------------------------------------------------------
-@tool("notes_create", "Create an Outlook note", {"title": str, "body": str})
+# -- notes (Google Docs) ------------------------------------------------------
+def _notes_folder() -> str:
+    """The id of the "Veronica Notes" Drive folder, made on first use. With
+    the drive.file scope only folders this app created are visible, so a
+    same-named folder of the user's own is never written into."""
+    q = f"name = '{NOTES_FOLDER}' and mimeType = '{MIME_FOLDER}' and trashed = false"
+    found = google.get(f"{DRIVE_API}/files",
+                       params={"q": q, "spaces": "drive", "fields": "files(id)", "pageSize": 1})
+    files = found.get("files") or []
+    if files:
+        return files[0]["id"]
+    return google.post(f"{DRIVE_API}/files", {"name": NOTES_FOLDER, "mimeType": MIME_FOLDER},
+                       params={"fields": "id"})["id"]
+
+
+def _multipart(metadata: dict, text: str) -> tuple[bytes, str]:
+    """A multipart/related upload body: JSON metadata, then the plain text
+    Drive converts into a Google Doc. Returns (body, content type)."""
+    boundary = f"veronica-{uuid.uuid4().hex}"
+    body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{json.dumps(metadata)}\r\n"
+            f"--{boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n"
+            f"{text}\r\n--{boundary}--\r\n")
+    return body.encode("utf-8"), f"multipart/related; boundary={boundary}"
+
+
+@tool("notes_create", "Create a note as a Google Doc in the 'Veronica Notes' Drive folder",
+      {"title": str, "body": str})
 @_guard
 async def notes_create(args: dict) -> dict:
     title = _clean(args.get("title", ""))
     if not title:
         return _err("title is required")
     body = str(args.get("body", "") or "").replace("\r\n", "\n")
-    # A note has no separate title: Outlook shows the body's first line as
-    # its subject. Plain text, so nothing needs escaping.
-    text = f"{title}\n{body}" if body else title
 
-    def go(app, ns):
-        note = app.CreateItem(ITEM_NOTE)
-        note.Body = text.replace("\n", "\r\n")
-        note.Save()
+    def go():
+        data, ctype = _multipart({"name": title, "mimeType": MIME_DOC, "parents": [_notes_folder()]}, body)
+        google.request("POST", DRIVE_UPLOAD, params={"uploadType": "multipart", "fields": "id"},
+                       data=data, headers={"Content-Type": ctype})
         return _ok(f"Created note '{title}'")
-    return await _outlook(go)
+    return await _google(go)
 
 
 # -- timers -----------------------------------------------------------------

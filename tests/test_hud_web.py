@@ -24,10 +24,10 @@ def test_hud_dom_and_canvas_react():
         page.evaluate("window.hud.push({kind:'state', payload:'speaking'})")
         page.evaluate("window.hud.push({kind:'voice', payload:{step_ms:50, levels:[1,1,1,1,1,1,1,1,1,1]}})")
         page.evaluate("window.hud.push({kind:'sentence', payload:'It is noon.'})")
-        page.evaluate("window.hud.push({kind:'tool', payload:{summary:'Open Safari', decision:'auto'}})")
+        page.evaluate("window.hud.push({kind:'tool', payload:{summary:'Open Edge', decision:'auto'}})")
         page.wait_for_function("document.querySelector('#reply .msg').textContent === 'It is noon.'", timeout=3000)
         assert page.inner_text("#heard .msg") == "what time is it"
-        assert page.inner_text("#tool .msg") == "Open Safari"
+        assert page.inner_text("#tool .msg") == "Open Edge"
         assert "auto" in page.get_attribute("#tool .badge", "class")
         page.wait_for_timeout(120)
         speaking_px = page.evaluate("document.getElementById('orb').toDataURL()")
@@ -779,7 +779,7 @@ def test_plan_checklist_renders_each_state():
 
         page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
         page.evaluate(_plan(("Read: /a", "done"), ("Bash: rm x", "declined"),
-                            ("Open Safari", "running"), ("Copy to clipboard", "pending")))
+                            ("Open Edge", "running"), ("Copy to clipboard", "pending")))
 
         rows = page.eval_on_selector_all(
             "#plan .step", "els => els.map(e => [e.className, e.querySelector('.mark').textContent, "
@@ -787,7 +787,7 @@ def test_plan_checklist_renders_each_state():
         assert rows == [
             ["step done", "✓", "Read: /a"],
             ["step declined", "✕", "Bash: rm x"],
-            ["step running", "▸", "Open Safari"],
+            ["step running", "▸", "Open Edge"],
             ["step pending", "○", "Copy to clipboard"],
         ]
         assert page.locator("#plan .more").count() == 0
@@ -870,14 +870,14 @@ def test_plan_mini_mode_shows_only_the_running_step():
 
         page.evaluate("window.hud.setMode('mini')")
         page.evaluate("window.hud.push({kind:'state', payload:'thinking'})")
-        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "running"),
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Edge", "running"),
                             ("Copy to clipboard", "pending")))
 
         # The full checklist lives in #text, which mini mode hides wholesale.
         assert page.eval_on_selector("#text", "el => getComputedStyle(el).display") == "none"
         # ...so the caption pill carries the one step that is running.
         assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") != "none"
-        assert page.inner_text("#caption .step") == "2/3 Open Safari"
+        assert page.inner_text("#caption .step") == "2/3 Open Edge"
         assert page.inner_text("#caption .msg") == "Thinking…"
 
         cap = page.eval_on_selector("#caption", "el => el.getBoundingClientRect()")
@@ -885,11 +885,11 @@ def test_plan_mini_mode_shows_only_the_running_step():
         assert cap["right"] <= 400 and cap["bottom"] <= 72
 
         # Nothing running (every step settled): no step chip at all.
-        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "done")))
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Edge", "done")))
         assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") == "none"
 
         # Back to full: the checklist is there, the caption chip is not.
-        page.evaluate(_plan(("Read: /a", "done"), ("Open Safari", "running")))
+        page.evaluate(_plan(("Read: /a", "done"), ("Open Edge", "running")))
         page.evaluate("window.hud.setMode('full')")
         assert page.eval_on_selector("#plan", "el => getComputedStyle(el).display") != "none"
         assert page.eval_on_selector("#caption .step", "el => getComputedStyle(el).display") == "none"
@@ -954,7 +954,7 @@ def test_plan_does_not_overlap_the_rest_of_the_card():
             "detail:'Bash: rm -rf build', decision:'ask', timeout_ms:8000}})"
         )
         page.evaluate(_plan(("Read: /a", "done"), ("Grep: TODO", "done"), ("Read: /b", "done"),
-                            ("Open Safari", "done"), ("Copy to clipboard: a rather long one", "done"),
+                            ("Open Edge", "done"), ("Copy to clipboard: a rather long one", "done"),
                             ("Bash: rm -rf build", "pending")))
         page.wait_for_timeout(100)
 

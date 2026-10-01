@@ -8,7 +8,7 @@ the loopback port and token named by the endpoint file in $VERONICA_GATE):
 the app asks the same question the in-process gate would — policy, trust
 window, voice confirm — and, when it allows, runs the tool ITSELF and sends
 the content back. Nothing here touches the screen, the keyboard, the
-clipboard or Outlook: this process belongs to the CLI that spawned it and
+clipboard or your Google account: this process belongs to the CLI that spawned it and
 has none of the app's state (the HUD, the screenshot handling, the
 timers). Running the
 tool in the app is also why a timer set from an external brain announces

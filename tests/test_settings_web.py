@@ -23,7 +23,12 @@ def fixture_state(**over) -> dict:
     state = {
         "general": {"language": "en", "start_at_login": False, "ptt_enabled": True, "hud_mode": "full",
                     "hud_hide_after_s": 3.0, "hud_particles": 4000, "hud_intensity": 1.0,
-                    "can_start_at_login": True},
+                    "can_start_at_login": True, "spotify_client_id": "",
+                    "accounts": [
+                        {"id": "spotify", "label": "Spotify", "configured": False, "connected": False,
+                         "busy": False, "detail": "Set a Spotify Client ID above (needs Spotify Premium)."},
+                        {"id": "google", "label": "Google", "configured": True, "connected": False,
+                         "busy": False, "detail": "Not connected."}]},
         "voice": {"voice": "af_sarah", "hindi_voice": "hf_alpha", "speed": 1.0,
                   "voices": [{"id": "af_sarah", "name": "Sarah", "hindi": False},
                              {"id": "bm_george", "name": "George", "hindi": False},
@@ -229,7 +234,7 @@ def test_history_search_forget_and_clear():
     from playwright.sync_api import sync_playwright
 
     items = [{"id": 2, "ts": "2026-09-17T14:05:00", "heard": "what time is it", "reply": "It is two."},
-             {"id": 1, "ts": "2026-09-16T09:30:00", "heard": "open safari", "reply": "Opening Safari."}]
+             {"id": 1, "ts": "2026-09-16T09:30:00", "heard": "open edge", "reply": "Opening Edge."}]
     with sync_playwright() as p:
         browser, page = open_page(p)
         page.evaluate("window.settings.select('history')")
@@ -546,4 +551,33 @@ def test_general_tab_links_to_windows_settings():
         page.click("#pane button[data-cmd=open_mic_privacy]")
         assert sent(page)[-1]["cmd"] == "open_mic_privacy"
         assert "Mac" not in page.inner_text("#pane")
+        browser.close()
+
+
+@pytest.mark.live
+def test_accounts_connect_and_disconnect():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        assert page.is_visible("#pane input[data-key=spotify_client_id]")
+        assert page.is_disabled("#pane button[data-cmd=connect_account][data-account=spotify]")   # no Client ID
+        page.click("#pane button[data-cmd=connect_account][data-account=google]")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "connect_account" and msg["args"] == {"account": "google"}
+        assert "browser" in page.inner_text('#pane .row[data-account="google"] .status')
+        # a push while signing in (busy) keeps the waiting text
+        busy = fixture_state()
+        busy["general"]["accounts"][1].update(busy=True, detail="Finish signing in in your browser.")
+        page.evaluate("s => window.settings.state(s)", busy)
+        assert page.is_disabled("#pane button[data-cmd=connect_account][data-account=google]")
+        assert "browser" in page.inner_text('#pane .row[data-account="google"] .status')
+        done = fixture_state()
+        done["general"]["accounts"][1].update(connected=True, detail="Connected as me@gmail.com.")
+        page.evaluate("s => window.settings.state(s)", done)
+        reply(page, msg["id"], {"ok": True, "message": "Google is connected as me@gmail.com."})
+        assert page.inner_text('#pane .row[data-account="google"] .status') == "Google is connected as me@gmail.com."
+        assert page.inner_text("#pane button[data-account=google]") == "Disconnect Google"
+        page.click("#pane button[data-cmd=disconnect_account][data-account=google]")
+        assert sent(page)[-1]["cmd"] == "disconnect_account"
         browser.close()

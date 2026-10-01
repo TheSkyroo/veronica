@@ -5,9 +5,10 @@ loaded on first use and this module still imports — and the window classes'
 unit tests (which pass fakes for all of it) still run — on Linux.
 
 Coordinates are physical pixels with the origin at the primary monitor's
-top-left corner, y growing downwards (pywebview makes the process DPI aware
-before it creates the first window, so EnumDisplayMonitors/GetWindowRect/
-SetWindowPos all agree on that space).
+top-left corner, y growing downwards (veronica.__main__ makes the process
+per-monitor DPI aware before any window exists, so EnumDisplayMonitors/
+GetWindowRect/SetWindowPos all agree on that space; `dpi_scale` converts the
+CSS-pixel sizes in Settings for the monitor a window is on).
 """
 from __future__ import annotations
 

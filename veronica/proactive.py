@@ -286,7 +286,7 @@ class Proactive:
         try:
             events = parse_events(await self._calendar_events("today", 1), now.date())
         except Exception as e:
-            # Calendar unavailable (Outlook unavailable, timeout): don't hammer
+            # Calendar unavailable (Google not connected, timeout): don't hammer
             # it every tick, and don't let the ticker log a traceback a
             # minute — cache "no events" for the usual window and log once.
             if self._events_error is None or self._events_error != str(e):

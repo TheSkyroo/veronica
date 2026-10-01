@@ -1,4 +1,4 @@
-"""Antigravity (`agy` 1.2.7) as a Veronica brain.
+r"""Antigravity (`agy` 1.2.7) as a Veronica brain.
 
 How it runs (verified against agy 1.2.7 on macOS, 2026-09-19; the paths
 below are under %USERPROFILE% on Windows):
