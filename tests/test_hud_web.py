@@ -632,7 +632,7 @@ def test_confirm_redirected_pill():
         page.evaluate("window.hud.push({kind:'prompt', payload:'Run Open Chrome?'})")
         page.evaluate(
             "window.hud.push({kind:'tool', payload:{summary:'Open Chrome', "
-            "detail:'mac: open -a Google Chrome', decision:'ask', timeout_ms:8000}})"
+            "detail:'win: start chrome', decision:'ask', timeout_ms:8000}})"
         )
         assert page.inner_text("#hint .msg") == 'say "yes" or "no"'
 
@@ -641,7 +641,7 @@ def test_confirm_redirected_pill():
         assert page.inner_text("#tool .badge") == "↪"
         assert page.inner_text("#tool .pill") == "REDIRECTED"
         assert "redirected" in page.get_attribute("#tool .pill", "class")
-        assert page.inner_text("#tool .detail") == "mac: open -a Google Chrome"
+        assert page.inner_text("#tool .detail") == "win: start chrome"
         assert page.inner_text("#hint .msg") == ""
         assert page.inner_text("#prompt .msg") == ""
         pill_color = page.evaluate("getComputedStyle(document.querySelector('#tool .pill')).color")
@@ -712,7 +712,7 @@ def test_brain_label_from_hud_backend_event():
         assert page.inner_text("#brain") == "Brain: Codex"
         assert page.is_visible("#brain")
 
-        # a stand-in reads the same way the menu bar shows it
+        # a stand-in reads the same way the tray menu shows it
         page.evaluate("window.hud.push({kind:'hud', payload:{backend:'Claude (for Codex)'}})")
         assert page.inner_text("#brain") == "Brain: Claude (for Codex)"
 
@@ -972,4 +972,55 @@ def test_plan_does_not_overlap_the_rest_of_the_card():
 
         page.locator("#card").screenshot(path=str(SCREENSHOT_DIR / "hud-plan.png"))
         assert not errors, f"page errors: {errors}"
+        browser.close()
+
+
+@pytest.mark.live
+def test_click_asks_for_the_menu_and_drag_moves_the_window():
+    """hud.js talks to pywebview's js_api: a plain click (or right-click)
+    asks for the menu, a press-and-drag reports offsets and then drag_end."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.add_init_script("""
+            window.__calls = [];
+            const rec = name => (...a) => { window.__calls.push([name, ...a]); return Promise.resolve(null); };
+            window.pywebview = {api: {drag_start: rec('drag_start'), drag_to: rec('drag_to'),
+                                      drag_end: rec('drag_end'), menu: rec('menu')}};
+        """)
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.mouse.click(100, 100)
+        assert [c[0] for c in page.evaluate("window.__calls")] == ["drag_start", "drag_end", "menu"]
+        page.evaluate("window.__calls = []")
+        page.mouse.click(100, 100, button="right")
+        assert [c[0] for c in page.evaluate("window.__calls")] == ["menu"]
+        page.evaluate("window.__calls = []")
+        page.mouse.move(100, 100)
+        page.mouse.down()
+        page.mouse.move(140, 120, steps=5)
+        page.wait_for_timeout(50)
+        page.mouse.up()
+        names = [c[0] for c in page.evaluate("window.__calls")]
+        assert names[0] == "drag_start" and names[-1] == "drag_end" and "menu" not in names
+        moves = [c for c in page.evaluate("window.__calls") if c[0] == "drag_to"]
+        assert moves and moves[-1][1:] == [40, 20]
+        browser.close()
+
+
+@pytest.mark.live
+def test_set_visible_fades_the_page():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 540, "height": 300})
+        page.goto(HUD.as_uri())
+        page.wait_for_function("window.hud !== undefined")
+        page.evaluate("window.hud.setVisible(false)")
+        assert page.evaluate("document.body.classList.contains('faded')")
+        page.evaluate("window.hud.setVisible(true)")
+        assert not page.evaluate("document.body.classList.contains('faded')")
         browser.close()

@@ -1,4 +1,4 @@
-import plistlib
+"""Start at Login via HKCU\\...\\Run, with an in-memory fake winreg."""
 from pathlib import Path
 
 import pytest
@@ -6,116 +6,115 @@ import pytest
 from veronica.ui import login_item
 
 
-@pytest.fixture
-def fake_home(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    return tmp_path
+class FakeKey:
+    def __init__(self, reg, path):
+        self.reg, self.path = reg, path
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FakeWinreg:
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_READ, KEY_SET_VALUE = 1, 2
+    REG_SZ = 1
+
+    def __init__(self):
+        self.keys: dict[str, dict] = {}
+        self.calls = []
+
+    def OpenKey(self, root, path, reserved=0, access=0):  # noqa: N802 — winreg's names
+        self.calls.append(("open", root, path, access))
+        if path not in self.keys:
+            raise FileNotFoundError(path)
+        return FakeKey(self, path)
+
+    def CreateKeyEx(self, root, path, reserved=0, access=0):  # noqa: N802
+        self.calls.append(("create", root, path, access))
+        self.keys.setdefault(path, {})
+        return FakeKey(self, path)
+
+    def QueryValueEx(self, key, name):  # noqa: N802
+        values = self.keys[key.path]
+        if name not in values:
+            raise FileNotFoundError(name)
+        return values[name]
+
+    def SetValueEx(self, key, name, reserved, kind, value):  # noqa: N802
+        self.keys[key.path][name] = (value, kind)
+
+    def DeleteValue(self, key, name):  # noqa: N802
+        if name not in self.keys[key.path]:
+            raise FileNotFoundError(name)
+        del self.keys[key.path][name]
 
 
 @pytest.fixture
-def fake_launchctl(monkeypatch):
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append(args)
-
-        class Result:
-            returncode = 0
-
-        return Result()
-
-    monkeypatch.setattr(login_item.subprocess, "run", fake_run)
-    return calls
+def reg():
+    return FakeWinreg()
 
 
-def test_is_enabled_false_when_no_plist(fake_home):
+EXE = Path(r"C:\Users\Me\Veronica App\dist\Veronica\Veronica.exe")
+
+
+def test_is_enabled_false_when_no_run_value(reg):
+    assert login_item.is_enabled(reg) is False
+    reg.keys[login_item.RUN_KEY] = {}             # key exists, value doesn't
+    assert login_item.is_enabled(reg) is False
+
+
+def test_enable_writes_quoted_exe_path_under_hkcu_run(reg):
+    login_item.enable(EXE, reg)
+    assert reg.keys[login_item.RUN_KEY]["Veronica"] == (f'"{EXE}"', reg.REG_SZ)
+    assert ("create", "HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run", reg.KEY_SET_VALUE) in reg.calls
+    assert login_item.is_enabled(reg) is True
+    assert login_item.registered_command(reg) == f'"{EXE}"'
+
+
+def test_enable_leaves_other_run_values_alone(reg):
+    reg.keys[login_item.RUN_KEY] = {"OneDrive": ("onedrive.exe", 1)}
+    login_item.enable(EXE, reg)
+    login_item.disable(reg)
+    assert reg.keys[login_item.RUN_KEY] == {"OneDrive": ("onedrive.exe", 1)}
+
+
+def test_disable_removes_the_value(reg):
+    login_item.enable(EXE, reg)
+    login_item.disable(reg)
+    assert login_item.is_enabled(reg) is False
+
+
+def test_disable_is_noop_when_not_enabled(reg):
+    login_item.disable(reg)                       # no key at all
+    reg.keys[login_item.RUN_KEY] = {}
+    login_item.disable(reg)                       # key, no value
+
+
+def test_is_enabled_false_off_windows(monkeypatch):
+    def no_winreg():
+        raise ImportError("winreg")
+
+    monkeypatch.setattr(login_item, "_winreg", no_winreg)
     assert login_item.is_enabled() is False
 
 
-def test_enable_writes_plist_and_calls_launchctl(fake_home, fake_launchctl):
-    app_path = fake_home / "Applications" / "Veronica.app"
-    login_item.enable(app_path)
-
-    path = login_item.plist_path()
-    assert path.is_file()
-    assert login_item.is_enabled() is True
-
-    with open(path, "rb") as f:
-        data = plistlib.load(f)
-    assert data["Label"] == "io.manik.veronica"
-    assert data["ProgramArguments"] == [str(app_path / "Contents" / "MacOS" / "Veronica")]
-    assert data["RunAtLoad"] is True
-    assert data["KeepAlive"] is False
-    expected_log = str(fake_home / ".veronica" / "logs" / "launchd.log")
-    assert data["StandardOutPath"] == expected_log
-    assert data["StandardErrorPath"] == expected_log
-
-    assert any(args[0] == "launchctl" and args[1] == "bootstrap" for args in fake_launchctl)
+def test_command_for_quotes_the_path():
+    assert login_item.command_for(EXE) == f'"{EXE}"'
 
 
-def test_disable_removes_plist_and_calls_launchctl(fake_home, fake_launchctl):
-    app_path = fake_home / "Applications" / "Veronica.app"
-    login_item.enable(app_path)
-    assert login_item.is_enabled() is True
-
-    login_item.disable()
-    assert login_item.is_enabled() is False
-    assert any(args[0] == "launchctl" and args[1] == "bootout" for args in fake_launchctl)
+def test_app_exe_path_only_when_frozen():
+    assert login_item.app_exe_path(frozen=False, executable=str(EXE), exists=lambda p: True) is None
+    assert login_item.app_exe_path(frozen=True, executable=str(EXE), exists=lambda p: True) == EXE
 
 
-def test_disable_is_noop_when_not_enabled(fake_home, fake_launchctl):
-    login_item.disable()
-    assert fake_launchctl == []
+def test_app_exe_path_must_be_an_existing_exe():
+    assert login_item.app_exe_path(frozen=True, executable=str(EXE), exists=lambda p: False) is None
+    assert login_item.app_exe_path(frozen=True, executable="/usr/bin/python3", exists=lambda p: True) is None
 
 
-def test_enable_ignores_launchctl_failure(fake_home, monkeypatch):
-    def raising_run(*a, **k):
-        raise OSError("no launchctl")
-
-    monkeypatch.setattr(login_item.subprocess, "run", raising_run)
-    app_path = fake_home / "Applications" / "Veronica.app"
-    login_item.enable(app_path)  # must not raise
-    assert login_item.is_enabled() is True
-
-
-def test_bundle_app_path():
-    assert login_item.bundle_app_path("/Applications/Veronica.app/Contents/MacOS/Veronica", env={}) == Path(
-        "/Applications/Veronica.app"
-    )
-    assert login_item.bundle_app_path("/usr/bin/python3", env={}) is None
-    assert login_item.bundle_app_path("veronica/__main__.py", env={}) is None
-
-
-def test_bundle_app_path_prefers_app_bundle_env():
-    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica.app"}
-    # the launcher runs `python -m veronica`, so argv0 is __main__.py: env must win
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) == Path(
-        "/Apps/Veronica.app"
-    )
-
-
-def test_bundle_app_path_env_must_exist_and_end_with_app():
-    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica.app"}
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: False) is None
-    env = {"VERONICA_APP_BUNDLE": "/Apps/Veronica"}
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) is None
-    assert login_item.bundle_app_path("veronica/__main__.py", env={"VERONICA_APP_BUNDLE": ""}, exists=lambda p: True) is None
-
-
-def test_bundle_app_path_derives_from_bundle_build():
-    env = {"VERONICA_BUNDLE_BUILD": "/Apps/Veronica.app/Contents/Resources/build.json"}
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) == Path(
-        "/Apps/Veronica.app"
-    )
-    # a build.json that isn't inside a .app is ignored
-    env = {"VERONICA_BUNDLE_BUILD": "/tmp/x/y/build.json"}
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: True) is None
-    env = {"VERONICA_BUNDLE_BUILD": "/Apps/Veronica.app/Contents/Resources/build.json"}
-    assert login_item.bundle_app_path("veronica/__main__.py", env=env, exists=lambda p: False) is None
-
-
-def test_bundle_app_path_falls_back_to_argv_when_env_empty():
-    assert login_item.bundle_app_path(
-        "/Applications/Veronica.app/Contents/MacOS/Veronica", env={}, exists=lambda p: False
-    ) == Path("/Applications/Veronica.app")
-    assert login_item.bundle_app_path("veronica/__main__.py", env={}) is None
+def test_app_exe_path_dev_run_is_none():
+    # the test process is a plain interpreter, never a frozen exe
+    assert login_item.app_exe_path() is None

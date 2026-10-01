@@ -1,6 +1,9 @@
+"""scripts/build_app.py: the PyInstaller build, driven with a fake `run`
+(no PyInstaller, no git), plus the generated Veronica.exe entry script."""
 import importlib.util
-import plistlib
-import stat
+import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -8,26 +11,12 @@ import pytest
 from tests.fakes import FakeRun
 
 REPO = Path(__file__).resolve().parent.parent
-FAKE_CLAUDE = Path("/fake/claude/bin/claude")
 
 GIT_SCRIPT = {
     "git rev-parse --short HEAD": (0, "a517483\n", ""),
     "git log -1 --format=%cI": (0, "2026-09-17T00:00:48+05:30\n", ""),
     "git status --porcelain": (0, "", ""),
 }
-
-
-def _fake_run() -> FakeRun:
-    return FakeRun(GIT_SCRIPT)
-
-
-def _fake_compiler(source: str, out, defines: dict) -> None:
-    """Stand-in for clang: writes the C source plus the -D defines as text so
-    tests can assert what got baked into the launcher."""
-    out.write_text(source + "\n" + "\n".join(f"#define {k} \"{v}\"" for k, v in defines.items()) + "\n")
-
-
-FAKE_LIBPYTHON = Path("/fake/python/lib/libpython3.12.dylib")
 
 
 def _load_build_app():
@@ -37,304 +26,188 @@ def _load_build_app():
     return mod
 
 
-def test_build_app_structure_and_plist(tmp_path):
-    build_app = _load_build_app()
-    app = build_app.build_app(
-        repo=REPO,
-        dist_dir=tmp_path,
-        venv_python=Path("/fake/.venv/bin/python"),
-        codesign_enabled=False,
-        claude_bin=FAKE_CLAUDE,
-        compiler=_fake_compiler,
-        libpython=FAKE_LIBPYTHON,
-        run=_fake_run(),
-    )
+class FakePyInstallerRun(FakeRun):
+    """git answers from GIT_SCRIPT; a PyInstaller call "builds" the onedir
+    folder it was asked for (or fails, or builds nothing)."""
 
-    assert app == tmp_path / "Veronica.app"
-    launcher = app / "Contents" / "MacOS" / "Veronica"
-    plist_path = app / "Contents" / "Info.plist"
-    pkginfo = app / "Contents" / "PkgInfo"
+    def __init__(self, *, rc=0, produce=True, stderr=""):
+        super().__init__(GIT_SCRIPT)
+        self.rc, self.produce, self.stderr = rc, produce, stderr
+        self.pyinstaller = None
 
-    assert launcher.is_file()
-    assert plist_path.is_file()
-    assert pkginfo.is_file()
-    assert pkginfo.read_text() == "APPL????"
-
-    # launcher is executable and points at the given repo/python
-    mode = launcher.stat().st_mode
-    assert mode & stat.S_IXUSR
-    text = launcher.read_text()
-    assert f'#define REPO_DIR "{REPO}"' in text
-    assert '#define VENV_PYTHON "/fake/.venv/bin/python"' in text
-    assert '#define LIBPYTHON "/fake/python/lib/libpython3.12.dylib"' in text
-    assert 'args[n++] = "-m";' in text and 'args[n++] = "veronica";' in text
-
-    # PATH is baked in with the resolved claude dir first, and set before Python starts
-    assert '#define PATH_PREFIX "/fake/claude/bin:' in text
-    assert "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" in text
-    assert 'setenv("PATH", PATH_PREFIX, 1);' in text
-    assert text.index('setenv("PATH"') < text.index("py_main(n, args)")
-
-    with open(plist_path, "rb") as f:
-        plist = plistlib.load(f)
-    assert plist["CFBundleName"] == "Veronica"
-    assert plist["CFBundleIdentifier"] == "io.manik.veronica"
-    assert plist["CFBundleExecutable"] == "Veronica"
-    assert plist["CFBundleIconFile"] == "Veronica"
-    assert plist["LSUIElement"] is True
-    assert plist["LSMinimumSystemVersion"] == "13.0"
-    assert "NSMicrophoneUsageDescription" in plist
-    assert "Messages" in plist["NSContactsUsageDescription"]
-    desc = plist["NSAppleEventsUsageDescription"]
-    for app_name in ("Calendar", "Mail", "Reminders", "Notes", "Music", "Chrome", "Safari", "System Events"):
-        assert app_name in desc
-    assert plist["NSHighResolutionCapable"] is True
-    assert plist["CFBundleVersion"] == plist["CFBundleShortVersionString"]
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        if argv[1:3] == ["-m", "PyInstaller"]:
+            self.calls.append(argv)
+            self.kwargs.append(kwargs)
+            self.pyinstaller = argv
+            if self.produce and self.rc == 0:
+                dist = Path(argv[argv.index("--distpath") + 1]) / "Veronica"
+                (dist / "_internal").mkdir(parents=True)
+                (dist / "Veronica.exe").write_bytes(b"MZ fake")
+            import subprocess
+            return subprocess.CompletedProcess(argv, self.rc, "", self.stderr)
+        return super().__call__(argv, **kwargs)
 
 
-def test_build_app_copies_icon_when_present(tmp_path):
-    build_app = _load_build_app()
-    icns_src = REPO / "assets" / "Veronica.icns"
-    if not icns_src.exists():
-        pytest.skip("assets/Veronica.icns not built")
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
-    assert (app / "Contents" / "Resources" / "Veronica.icns").is_file()
+@pytest.fixture
+def repo(tmp_path):
+    """A minimal checkout: a venv interpreter and the icon."""
+    r = tmp_path / "repo"
+    py = r / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    (r / "assets").mkdir()
+    (r / "assets" / "Veronica.ico").write_bytes(b"\0\0\1\0")
+    return r
 
 
-def test_build_app_is_idempotent(tmp_path):
-    build_app = _load_build_app()
-    app1 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
-    marker = app1 / "stray_file"
-    marker.write_text("leftover")
-    app2 = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
-    assert app1 == app2
-    assert not marker.exists()
+def test_build_app_runs_pyinstaller_and_installs_dist(repo):
+    mod = _load_build_app()
+    run = FakePyInstallerRun()
+    exe = mod.build_app(repo=repo, run=run)
+    assert exe == repo / "dist" / "Veronica" / "Veronica.exe"
+    assert exe.read_bytes() == b"MZ fake"
+    assert not (repo / "build" / "pyinstaller" / "dist" / "Veronica").exists()   # moved, not copied
+    argv = run.pyinstaller
+    assert argv[0] == str(mod._venv_python(repo))              # the checkout's own venv
+    assert run.kwargs[-1]["cwd"] == repo
 
 
-def test_build_app_skips_codesign_when_missing(tmp_path, monkeypatch):
-    build_app = _load_build_app()
-    monkeypatch.setattr(build_app.shutil, "which", lambda name: None)
-    # should not raise even though codesign_enabled=True (claude_bin passed
-    # explicitly so the claude-resolution check isn't what's being tested here)
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=True, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=_fake_run())
-    assert app.is_dir()
+def test_pyinstaller_argv_is_a_windowed_onedir_build_with_icon_and_data(repo):
+    mod = _load_build_app()
+    run = FakePyInstallerRun()
+    mod.build_app(repo=repo, run=run)
+    argv = run.pyinstaller
+    assert {"--onedir", "--windowed", "--noconfirm", "--clean"} <= set(argv)
+    assert argv[argv.index("--name") + 1] == "Veronica"
+    assert argv[argv.index("--icon") + 1] == str(repo / "assets" / "Veronica.ico")
+    assert argv[3] == str(repo / "build" / "pyinstaller" / "veronica_entry.py")
+    pairs = list(zip(argv, argv[1:]))
+    # every veronica module (the brains run `Veronica.exe -m veronica.tools.serve`)
+    # and its web pages / browser extension
+    assert ("--collect-submodules", "veronica") in pairs
+    assert ("--collect-data", "veronica") in pairs
+    assert ("--collect-all", "webview") in pairs and ("--hidden-import", "pystray._win32") in pairs
+    build_json = repo / "build" / "pyinstaller" / "build.json"
+    assert ("--add-data", f"{build_json}{mod.os.pathsep}.") in pairs
+    # models are never bundled
+    assert not any("models" in a for a in argv)
 
 
-def test_build_app_fails_clearly_when_claude_not_found(tmp_path, monkeypatch):
-    build_app = _load_build_app()
-    monkeypatch.setattr(build_app.shutil, "which", lambda name: None)
-    with pytest.raises(RuntimeError, match="claude"):
-        build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, run=_fake_run())
+def test_build_json_records_the_commit_and_the_checkout(repo):
+    mod = _load_build_app()
+    mod.build_app(repo=repo, run=FakePyInstallerRun())
+    data = json.loads((repo / "build" / "pyinstaller" / "build.json").read_text())
+    assert data == {"sha": "a517483", "built_at": "2026-09-17T00:00:48+05:30", "dirty": False,
+                    "source": "git", "repo": str(repo)}
 
 
-def test_build_app_resolves_claude_via_which(tmp_path, monkeypatch):
-    build_app = _load_build_app()
-    monkeypatch.setattr(build_app.shutil, "which", lambda name: "/opt/homebrew/bin/claude" if name == "claude" else None)
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, run=_fake_run(), compiler=_fake_compiler, libpython=FAKE_LIBPYTHON)
-    launcher = app / "Contents" / "MacOS" / "Veronica"
-    assert "/opt/homebrew/bin" in launcher.read_text()
+def test_build_app_without_icon_still_builds(repo, capsys):
+    (repo / "assets" / "Veronica.ico").unlink()
+    mod = _load_build_app()
+    run = FakePyInstallerRun()
+    mod.build_app(repo=repo, run=run)
+    assert "--icon" not in run.pyinstaller
+    assert "make_icon.py" in capsys.readouterr().out
 
 
-def test_build_app_writes_build_json_and_launcher_exports_it(tmp_path):
-    import json
-
-    build_app = _load_build_app()
-    run = _fake_run()
-    app = build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler, libpython=FAKE_LIBPYTHON, run=run)
-
-    build_json = tmp_path / "veronica-build.json"   # outside the bundle: keeps the cdhash (and TCC grants) stable
-    assert build_json.is_file()
-    data = json.loads(build_json.read_text())
-    assert data["sha"] == "a517483"
-    assert data["built_at"] == "2026-09-17T00:00:48+05:30"
-    assert data["dirty"] is False
-    assert data["source"] == "git"
-    # git ran against the repo, not the cwd
-    assert all(kw.get("cwd") == REPO for kw in run.kwargs)
-
-    text = (app / "Contents" / "MacOS" / "Veronica").read_text()
-    assert f'#define BUILD_JSON "{build_json}"' in text
-    assert 'setenv("VERONICA_BUNDLE_BUILD", BUILD_JSON, 1);' in text
-    # the launcher runs `python -m veronica` (argv0 = __main__.py), so it must
-    # tell the process where the .app is for relaunch / Start at Login
-    assert f'#define APP_BUNDLE "{app}"' in text
-    assert 'setenv("VERONICA_APP_BUNDLE", APP_BUNDLE, 1);' in text
+def test_build_app_is_idempotent(repo):
+    mod = _load_build_app()
+    mod.build_app(repo=repo, run=FakePyInstallerRun())
+    stale = repo / "dist" / "Veronica" / "stale.txt"
+    stale.write_text("old")
+    exe = mod.build_app(repo=repo, run=FakePyInstallerRun())
+    assert exe.exists() and not stale.exists()
+    assert sorted(p.name for p in (repo / "dist").iterdir()) == ["Veronica"]   # no .old left behind
 
 
-def test_build_app_fails_clearly_without_clang(tmp_path, monkeypatch):
-    build_app = _load_build_app()
-    monkeypatch.setattr(build_app.shutil, "which", lambda name: None if name == "clang" else "/fake/claude/bin/claude")
-    with pytest.raises(RuntimeError, match="clang not found"):
-        build_app.build_app(repo=REPO, dist_dir=tmp_path, codesign_enabled=False, claude_bin=FAKE_CLAUDE,
-                            libpython=FAKE_LIBPYTHON, run=_fake_run())
+def test_build_app_stages_next_to_a_running_install(repo, monkeypatch, capsys):
+    mod = _load_build_app()
+    mod.build_app(repo=repo, run=FakePyInstallerRun())
+    target = repo / "dist" / "Veronica"
+    real_rename = Path.rename
+
+    def locked(self, dest):
+        if self == target:
+            raise PermissionError("in use")
+        return real_rename(self, dest)
+
+    monkeypatch.setattr(Path, "rename", locked)
+    exe = mod.build_app(repo=repo, run=FakePyInstallerRun())
+    assert exe == target / "Veronica.exe"                       # where it'll be after the restart
+    staged = repo / "dist" / "Veronica.new"
+    assert (staged / "Veronica.exe").exists() and (target / "Veronica.exe").exists()
+    assert "staged" in capsys.readouterr().out
+    # the relaunch helper looks for it in the same place
+    from veronica.ui.relaunch import staged_dir
+    assert staged_dir(exe) == staged
 
 
-def test_libpython_for_resolves_symlinked_venv_python(tmp_path):
-    build_app = _load_build_app()
-    root = tmp_path / "cpython"
-    (root / "bin").mkdir(parents=True)
-    (root / "lib").mkdir()
-    (root / "bin" / "python3.12").write_text("")
-    (root / "lib" / "libpython3.12.dylib").write_text("")
-    venv_bin = tmp_path / ".venv" / "bin"
-    venv_bin.mkdir(parents=True)
-    (venv_bin / "python").symlink_to(root / "bin" / "python3.12")
-    assert build_app._libpython_for(venv_bin / "python") == root / "lib" / "libpython3.12.dylib"
-    (root / "lib" / "libpython3.12.dylib").unlink()
-    with pytest.raises(RuntimeError, match="libpython"):
-        build_app._libpython_for(venv_bin / "python")
+def test_build_app_fails_clearly_without_the_venv(tmp_path):
+    mod = _load_build_app()
+    with pytest.raises(RuntimeError, match="uv sync"):
+        mod.build_app(repo=tmp_path, run=FakePyInstallerRun())
 
 
-def test_bundle_bytes_are_identical_across_rebuilds(tmp_path):
-    """Nothing inside the .app may change between two builds of the same
-    source (the build stamp lives outside), or TCC forgets every grant."""
-    import hashlib
-
-    build_app = _load_build_app()
-
-    def digest(app):
-        h = hashlib.sha256()
-        for f in sorted(p for p in app.rglob("*") if p.is_file()):
-            h.update(str(f.relative_to(app)).encode())
-            h.update(f.read_bytes())
-        return h.hexdigest()
-
-    kw = dict(repo=REPO, codesign_enabled=False, claude_bin=FAKE_CLAUDE, compiler=_fake_compiler,
-              libpython=FAKE_LIBPYTHON, venv_python=Path("/fake/.venv/bin/python"))
-    a = build_app.build_app(dist_dir=tmp_path, run=_fake_run(), **kw)
-    first = digest(a)
-    later = FakeRun({**GIT_SCRIPT, "git log -1 --format=%cI": (0, "2027-01-01T00:00:00+00:00\n", "")})
-    b = build_app.build_app(dist_dir=tmp_path, run=later, **kw)   # same dist dir, new build stamp
-    assert digest(b) == first
+def test_build_app_reports_pyinstaller_failure(repo):
+    mod = _load_build_app()
+    run = FakePyInstallerRun(rc=1, stderr="lots of output\nModuleNotFoundError: No module named 'webview'\n")
+    with pytest.raises(RuntimeError, match="No module named 'webview'"):
+        mod.build_app(repo=repo, run=run)
+    assert not (repo / "dist").exists()
 
 
-def test_brain_dirs_follow_per_shell_symlinks(tmp_path):
-    """A version manager's per-shell bin (fnm/nvm "multishell") disappears
-    with the shell that created it, so the baked-in PATH must also carry the
-    node installation the shim resolves to."""
-    from scripts.build_app import _brain_dirs
-
-    install = tmp_path / "node-versions" / "v26" / "installation"
-    (install / "bin").mkdir(parents=True)
-    pkg_bin = install / "lib" / "node_modules" / "@openai" / "codex" / "bin"
-    pkg_bin.mkdir(parents=True)
-    (pkg_bin / "codex.js").write_text("#!/usr/bin/env node\n")
-    shell_bin = tmp_path / "fnm_multishells" / "123" / "bin"
-    shell_bin.mkdir(parents=True)
-    (shell_bin / "codex").symlink_to(pkg_bin / "codex.js")
-
-    dirs = _brain_dirs(which=lambda n: str(shell_bin / "codex") if n == "codex" else None)
-    assert str(install / "bin") in dirs      # survives the shell
+def test_build_app_fails_when_no_exe_was_produced(repo):
+    mod = _load_build_app()
+    with pytest.raises(RuntimeError, match="did not produce"):
+        mod.build_app(repo=repo, run=FakePyInstallerRun(produce=False))
 
 
-def test_launcher_path_starts_with_the_brain_dirs():
-    from scripts.build_app import _launcher_defines
-    from pathlib import Path
+# -- the generated entry script --------------------------------------------------------
 
-    defines = _launcher_defines(Path("/repo"), Path("/py"), "/claude/bin", Path("/b.json"),
-                                Path("/A.app"), Path("/libpython"), brain_dirs=["/node/bin", "/claude/bin"])
-    parts = defines["PATH_PREFIX"].split(":")
-    assert parts[0] == "/claude/bin" and "/node/bin" in parts
-    assert len(parts) == len(set(parts))     # no duplicates
-    assert parts[-4:] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-
-
-def test_a_per_shell_directory_is_never_baked_into_the_path(tmp_path):
-    """fnm's multishell dir carries the shell's pid, so baking it in makes
-    every build byte-different — and macOS then re-asks for Microphone and
-    Screen Recording, because TCC keys those grants on the signature."""
-    from scripts.build_app import _brain_dirs
-
-    install = tmp_path / "node-versions" / "v26" / "installation"
-    (install / "bin").mkdir(parents=True)
-    pkg_bin = install / "lib" / "node_modules" / "@openai" / "codex" / "bin"
-    pkg_bin.mkdir(parents=True)
-    (pkg_bin / "codex.js").write_text("#!/usr/bin/env node\n")
-    shell_bin = tmp_path / "fnm_multishells" / "85428_1790348230402" / "bin"
-    shell_bin.mkdir(parents=True)
-    (shell_bin / "codex").symlink_to(pkg_bin / "codex.js")
-
-    dirs = _brain_dirs(which=lambda n: str(shell_bin / "codex") if n == "codex" else None)
-    assert str(install / "bin") in dirs
-    assert not any("fnm_multishells" in d for d in dirs)
+@pytest.fixture
+def entry(tmp_path, monkeypatch):
+    mod = _load_build_app()
+    ns = types.ModuleType("veronica_entry")
+    exec(compile(mod.ENTRY_SOURCE, "veronica_entry.py", "exec"), ns.__dict__)
+    bundle = tmp_path / "_internal"
+    bundle.mkdir()
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.delenv("VERONICA_BUNDLE_BUILD", raising=False)
+    monkeypatch.delenv("VERONICA_REPO", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return ns, bundle
 
 
-def test_the_baked_path_is_the_same_on_every_build(tmp_path):
-    """Set iteration over strings is randomised per process; if the PATH
-    order wobbled, so would the launcher's bytes and the app's signature —
-    and macOS would ask for Microphone and Screen Recording all over again."""
-    import subprocess
-    import sys
-    import textwrap
-
-    script = textwrap.dedent(f"""
-        import sys
-        sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
-        from pathlib import Path
-        from scripts.build_app import _brain_dirs
-        home = Path({str(tmp_path)!r})
-        bins = {{}}
-        for name in ("claude", "codex", "agy", "copilot"):
-            d = home / name / "bin"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / name).write_text("#!/bin/sh\\n")
-            bins[name] = str(d / name)
-        print(":".join(_brain_dirs(which=bins.get)))
-    """)
-    runs = {
-        subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                       env={"PYTHONHASHSEED": str(seed), "PATH": "/usr/bin:/bin"}).stdout
-        for seed in (0, 1, 2, 3)
-    }
-    assert len(runs) == 1, runs
+def test_entry_exports_build_info_and_enters_the_checkout(entry, tmp_path, monkeypatch):
+    ns, bundle = entry
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (bundle / "build.json").write_text(json.dumps({"sha": "a517483", "repo": str(checkout)}))
+    ns._setup()
+    import os
+    assert os.environ["VERONICA_BUNDLE_BUILD"] == str(bundle / "build.json")
+    assert os.environ["VERONICA_REPO"] == str(checkout)
+    assert Path.cwd() == checkout
 
 
-def test_the_launcher_keeps_its_uuid(tmp_path):
-    """dyld on macOS 27 refuses an image with no LC_UUID, so the launcher must
-    never be linked with -no_uuid — it would build fine and never start."""
-    from scripts.build_app import STUB_SOURCE, _launcher_defines
-    import scripts.build_app as build_app
-
-    seen = {}
-
-    def fake_which(name):
-        return "/usr/bin/clang" if name == "clang" else None
-
-    class Done:
-        returncode = 0
-        stderr = ""
-
-    def fake_run(argv, **kw):
-        seen["argv"] = argv
-        Path(argv[argv.index("-o") + 1]).write_bytes(b"")
-        return Done()
-
-    monkey = pytest.MonkeyPatch()
-    try:
-        monkey.setattr(build_app.shutil, "which", fake_which)
-        monkey.setattr(build_app.subprocess, "run", fake_run)
-        defines = _launcher_defines(Path("/repo"), Path("/py"), "/c/bin", Path("/b.json"),
-                                    Path("/A.app"), Path("/libpython"))
-        build_app._compile_with_clang(STUB_SOURCE, tmp_path / "Veronica", defines)
-    finally:
-        monkey.undo()
-    assert not any("no_uuid" in a for a in seen["argv"]), seen["argv"]
+def test_entry_tolerates_a_missing_build_json(entry, tmp_path):
+    ns, bundle = entry
+    ns._setup()
+    import os
+    assert os.environ["VERONICA_BUNDLE_BUILD"] == str(bundle / "build.json")
+    assert "VERONICA_REPO" not in os.environ
+    assert Path.cwd() == tmp_path
 
 
-def test_signing_prefers_the_stable_certificate_over_ad_hoc():
-    """Ad-hoc signing re-asks for Microphone and Screen Recording after every
-    change; the certificate keeps the grant. Use it whenever it exists."""
-    from scripts.build_app import SIGN_IDENTITY, signing_identity
-
-    class Done:
-        def __init__(self, out, rc=0):
-            self.stdout, self.returncode = out, rc
-
-    assert signing_identity(run=lambda *a, **k: Done(f'  1) ABC "{SIGN_IDENTITY}"\n')) == SIGN_IDENTITY
-    assert signing_identity(run=lambda *a, **k: Done("     0 valid identities found\n")) == "-"
-    assert signing_identity(run=lambda *a, **k: Done("", rc=1)) == "-"
-
-    def missing(*a, **k):
-        raise OSError("no security tool")
-
-    assert signing_identity(run=missing) == "-"
+def test_entry_runs_dash_m_modules_like_python(entry, tmp_path, monkeypatch):
+    ns, _ = entry
+    pkg = tmp_path / "mods"
+    pkg.mkdir()
+    (pkg / "entry_probe.py").write_text(
+        "import sys\nRESULT = list(sys.argv)\nsys.modules['entry_probe_result'] = RESULT\n")
+    monkeypatch.syspath_prepend(str(pkg))
+    monkeypatch.setattr(sys, "argv", ["Veronica.exe", "-m", "entry_probe", "serve", "--flag"])
+    ns.main()
+    assert sys.modules.pop("entry_probe_result")[1:] == ["serve", "--flag"]

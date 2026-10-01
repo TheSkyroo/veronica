@@ -3,8 +3,7 @@
 
 JS → Python: settings.js calls `window.pywebview.api.handle(id, cmd, args)`;
 pywebview runs that on one of its own threads, which hops onto the UI thread
-(`_on_message`) so commands run in order, one at a time, as they did on the
-old AppKit main thread. `bridge.handle` answers and the reply goes back as
+(`_on_message`) so commands run in order, one at a time. `bridge.handle` answers and the reply goes back as
 `window.settings.reply(id, result)`. Long commands (`LONG_COMMANDS`) run on a
 worker via `bridge.run_thread` and reply when done. Python → JS:
 `push_state(state)` → `window.settings.state(json)`.

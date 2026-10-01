@@ -1,29 +1,69 @@
 """Music playback control, exposed to Claude as in-process MCP tools.
 
-Playback goes through Windows' Global System Media Transport Controls (the
-same session the media overlay and keyboard media keys drive), so it works
-with whatever player currently owns it: Spotify, a browser tab, Groove /
-Media Player... A search opens Spotify's own search when Spotify is
-installed, else YouTube Music in the browser. All allow-class — playback
-control only, no filesystem/network access beyond what the player does.
+Pause / next / previous / now-playing / volume go through Windows' Global
+System Media Transport Controls (the session the media overlay and keyboard
+media keys drive), so they work with whatever player owns it: Spotify, a
+browser tab, Media Player...
+
+"Play <something>" actually starts playback:
+  1. Spotify, when the user connected their account (veronica.spotify_account):
+     Web API search -> pick a device (the active one, else this PC's Spotify
+     app, launching it and waiting up to SPOTIFY_LAUNCH_WAIT_S if needed) ->
+     start playback there. A query naming an artist exactly ("daft punk")
+     plays the artist (their top tracks); "playlist <name>" plays the top
+     playlist; anything else plays the top track. Playback control needs
+     Spotify Premium: on PREMIUM_REQUIRED (or no device, or any API trouble)
+     we fall back to 2.
+  2. YouTube, no account needed: the top video of a YouTube search (scraped
+     from the results page's ytInitialData, no API key), opened at
+     www.youtube.com/watch?v=<id> in the default browser — www rather than
+     music.youtube.com because its watch page autoplays reliably for a
+     fresh tab. If the search can't be read, the results page is opened.
+All allow-class: playback control and opening a media URL only.
 
 The winrt and pycaw imports live inside the functions: they exist on
 Windows only, and the tests replace `_media_session`, `_spotify_installed`,
-`_open` and `_set_app_volume` with fakes.
+`_open`, `_set_app_volume`, `_spotify_connected`, `_spotify_api`,
+`_http_get` and `_sleep` with fakes.
 """
 import asyncio
 import contextlib
+import json
+import logging
 import os
+import platform
+import re
+import time
 import urllib.parse
 from pathlib import Path
 
+import httpx
 from claude_agent_sdk import create_sdk_mcp_server, tool
+
+from veronica import spotify_account
+
+log = logging.getLogger("veronica.music")
 
 NOTHING_PLAYING = "Nothing is playing."
 NO_PLAYER = "no music app is open; say what to play"
 # GlobalSystemMediaTransportControlsSessionPlaybackStatus
 STATUS_PLAYING = 4
 STATUS_PAUSED = 5
+
+SPOTIFY_API = "https://api.spotify.com/v1"
+SPOTIFY_LAUNCH_WAIT_S = 10.0
+SPOTIFY_POLL_S = 1.0
+HTTP_TIMEOUT_S = 8.0
+PREMIUM_NOTE = "Spotify Premium is needed for playback control"
+YT_RESULTS = "https://www.youtube.com/results?search_query="
+YT_WATCH = "https://www.youtube.com/watch?v="
+YT_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+# Pre-answered consent so EU visitors get results, not the consent wall.
+YT_COOKIES = {"CONSENT": "YES+cb", "SOCS": "CAI"}
 
 
 def _ok(text: str = "ok") -> dict:
@@ -74,7 +114,60 @@ def _spotify_installed() -> bool:
 
 
 def _open(target: str) -> None:
-    os.startfile(target)   # a spotify:search: URI or an https URL we built
+    """Hand a URL we built to the shell: http(s) pages and the spotify: app
+    URI only, never a path or another protocol."""
+    if not target.startswith(("https://", "http://", "spotify:")):
+        raise ValueError(f"refusing to open {target!r}")
+    os.startfile(target)
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _spotify_connected() -> bool:
+    return spotify_account.is_connected()
+
+
+class SpotifyError(Exception):
+    """A Spotify Web API failure; `reason` is Spotify's reason code
+    (PREMIUM_REQUIRED, NO_ACTIVE_DEVICE...) when it gave one."""
+
+    def __init__(self, status: int, message: str, reason: str = ""):
+        super().__init__(message)
+        self.status, self.reason = status, reason
+
+
+def _spotify_api(method: str, path: str, params: dict | None = None,
+                 body: dict | None = None) -> dict:
+    """Call the Spotify Web API as the connected user; the JSON reply ({}
+    for an empty one). Non-2xx raises SpotifyError. Synchronous."""
+    token = spotify_account.access_token()
+    if not token:
+        raise SpotifyError(401, "Spotify isn't connected")
+    try:
+        r = httpx.request(method, SPOTIFY_API + path, params=params, json=body,
+                          headers={"Authorization": f"Bearer {token}"}, timeout=HTTP_TIMEOUT_S)
+    except httpx.HTTPError as e:
+        raise SpotifyError(0, f"couldn't reach Spotify: {e}") from e
+    try:
+        data = r.json() if r.content else {}
+    except ValueError:
+        data = {}
+    if r.status_code >= 300:
+        err = data.get("error") if isinstance(data, dict) else None
+        err = err if isinstance(err, dict) else {}
+        raise SpotifyError(r.status_code, str(err.get("message") or f"HTTP {r.status_code}"),
+                           str(err.get("reason") or ""))
+    return data if isinstance(data, dict) else {}
+
+
+def _http_get(url: str) -> str:
+    """GET a web page as a desktop browser in English would. Synchronous."""
+    r = httpx.get(url, headers=YT_HEADERS, cookies=YT_COOKIES, timeout=HTTP_TIMEOUT_S,
+                  follow_redirects=True)
+    r.raise_for_status()
+    return r.text
 
 
 def _app_matches(app_id: str, process_name: str) -> bool:
@@ -128,13 +221,171 @@ async def _control(method: str, done: str) -> dict:
     return _ok(done)
 
 
-def _search_target(query: str) -> tuple[str, str]:
-    """(URI to open, what to say) for a search. The query is a URI path /
-    query component: percent-encode it (spaces, '&', '#', non-ASCII...)."""
-    if _spotify_installed():
-        return f"spotify:search:{urllib.parse.quote(query, safe='')}", f"Searching Spotify for {query}."
-    return (f"https://music.youtube.com/search?q={urllib.parse.quote_plus(query)}",
-            f"Searching YouTube Music for {query}.")
+# -- Spotify ----------------------------------------------------------------------------
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.casefold()).split())
+
+
+def _first(items) -> dict | None:
+    return next((i for i in items or [] if isinstance(i, dict) and i.get("uri")), None)
+
+
+def _spotify_pick(query: str) -> tuple[dict, str]:
+    """(play body, what's playing) for a query: "playlist X" -> the top
+    playlist; a query that *is* an artist's name -> that artist (Spotify
+    plays their top tracks); else the top track."""
+    words = query.split()
+    if len(words) > 1 and words[0].casefold() == "playlist":
+        found = _spotify_api("GET", "/search", {"q": " ".join(words[1:]), "type": "playlist", "limit": 1})
+        pl = _first(found.get("playlists", {}).get("items"))
+        if pl is None:
+            raise SpotifyError(404, f"no Spotify playlist for {query}")
+        return {"context_uri": pl["uri"]}, f"the playlist {pl.get('name') or query}"
+    found = _spotify_api("GET", "/search", {"q": query, "type": "track,artist", "limit": 1,
+                                            "market": "from_token"})
+    artist = _first(found.get("artists", {}).get("items"))
+    if artist is not None and _norm(artist.get("name", "")) == _norm(query):
+        return {"context_uri": artist["uri"]}, str(artist.get("name"))
+    track = _first(found.get("tracks", {}).get("items"))
+    if track is None:
+        raise SpotifyError(404, f"nothing on Spotify for {query}")
+    by = ", ".join(a.get("name", "") for a in track.get("artists", []) if a.get("name"))
+    name = track.get("name") or query
+    return {"uris": [track["uri"]]}, f"{name} by {by}" if by else name
+
+
+def _this_pc() -> str:
+    return (os.environ.get("COMPUTERNAME") or platform.node()).casefold()
+
+
+def _choose_device(devices: list) -> dict | None:
+    """The active device, else this PC's Spotify app."""
+    usable = [d for d in devices if isinstance(d, dict) and d.get("id") and not d.get("is_restricted")]
+    for d in usable:
+        if d.get("is_active"):
+            return d
+    pcs = [d for d in usable if str(d.get("type", "")).casefold() == "computer"]
+    me = _this_pc()
+    return next((d for d in pcs if str(d.get("name", "")).casefold() == me), pcs[0] if pcs else None)
+
+
+def _spotify_device() -> dict | None:
+    """A device to play on, launching the Spotify app and waiting for it to
+    register when there's none."""
+    device = _choose_device(_spotify_api("GET", "/me/player/devices").get("devices", []))
+    if device is not None or not _spotify_installed():
+        return device
+    _open("spotify:")
+    deadline = time.monotonic() + SPOTIFY_LAUNCH_WAIT_S
+    for _ in range(int(SPOTIFY_LAUNCH_WAIT_S / SPOTIFY_POLL_S) + 1):
+        _sleep(SPOTIFY_POLL_S)
+        device = _choose_device(_spotify_api("GET", "/me/player/devices").get("devices", []))
+        if device is not None or time.monotonic() > deadline:
+            break
+    return device
+
+
+def _play_spotify(query: str) -> str:
+    """Start `query` on Spotify; the reply text. SpotifyError when it can't."""
+    body, what = _spotify_pick(query)
+    device = _spotify_device()
+    if device is None:
+        raise SpotifyError(404, "no Spotify device available", "NO_ACTIVE_DEVICE")
+    _spotify_api("PUT", "/me/player/play", {"device_id": device["id"]}, body)
+    return f"Playing {what} on Spotify."
+
+
+# -- YouTube ----------------------------------------------------------------------------
+_YT_DATA = re.compile(r"(?:var\s+ytInitialData|window\[[\"']ytInitialData[\"']\])\s*=\s*")
+_YT_ID = re.compile(r'"videoId":"([\w-]{11})"')
+
+
+def _yt_text(node) -> str:
+    if not isinstance(node, dict):
+        return ""
+    if node.get("simpleText"):
+        return str(node["simpleText"])
+    return "".join(str(r.get("text", "")) for r in node.get("runs", []) if isinstance(r, dict))
+
+
+def _yt_renderers(node):
+    """Every videoRenderer in page order (ads and shorts use other
+    renderer types, so they're skipped by construction)."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            vr = cur.get("videoRenderer")
+            if isinstance(vr, dict):
+                yield vr
+            stack.extend(reversed(list(cur.values())))
+        elif isinstance(cur, list):
+            stack.extend(reversed(cur))
+
+
+def _yt_is_live(vr: dict) -> bool:
+    badges = json.dumps(vr.get("badges", [])) + json.dumps(vr.get("thumbnailOverlays", []))
+    return "LIVE" in badges or "lengthText" not in vr
+
+
+def _youtube_top(html: str) -> tuple[str, str] | None:
+    """(video id, title) of the first regular video on a YouTube results
+    page; title "" when only the regex fallback found an id."""
+    m = _YT_DATA.search(html)
+    if m:
+        try:
+            data, _ = json.JSONDecoder().raw_decode(html, m.end())
+        except ValueError:
+            data = None
+        fallback = None
+        for vr in _yt_renderers(data):
+            vid = str(vr.get("videoId", ""))
+            if not re.fullmatch(r"[\w-]{11}", vid):
+                continue
+            hit = (vid, " ".join(_yt_text(vr.get("title")).split()))
+            if not _yt_is_live(vr):
+                return hit
+            fallback = fallback or hit
+        if fallback:
+            return fallback
+    m = _YT_ID.search(html)
+    return (m.group(1), "") if m else None
+
+
+def _play_youtube(query: str, note: str = "") -> str:
+    lead = f"{note}, so " if note else ""
+    results = YT_RESULTS + urllib.parse.quote_plus(query)
+    try:
+        top = _youtube_top(_http_get(results))
+    except Exception as e:
+        log.info("music: YouTube search failed: %s", e)
+        top = None
+    if top is None:
+        _open(results)
+        said = f"I couldn't start a video, so I opened YouTube results for {query}."
+        return f"{note}. {said}" if note else said
+    vid, title = top
+    _open(YT_WATCH + vid)
+    said = f"playing {title or query} on YouTube."
+    return lead + said if lead else said[0].upper() + said[1:]
+
+
+def _play_query(query: str) -> str:
+    """Play `query`: Spotify when connected, else (or if that fails)
+    YouTube. Synchronous (network + polling) — run via asyncio.to_thread."""
+    note = ""
+    try:
+        connected = _spotify_connected()
+    except Exception:
+        connected = False
+    if connected:
+        try:
+            return _play_spotify(query)
+        except Exception as e:
+            log.info("music: Spotify play failed: %s", e)
+            if isinstance(e, SpotifyError) and e.reason == "PREMIUM_REQUIRED":
+                note = PREMIUM_NOTE
+    return _play_youtube(query, note)
 
 
 @tool("music_play", "Play music, optionally searching for a track/artist", {"query": str})
@@ -143,9 +394,7 @@ async def music_play(args: dict) -> dict:
     query = " ".join(str(args.get("query", "") or "").split())[:200]
     if not query:
         return await _control("try_play_async", "Playing.")
-    target, said = await asyncio.to_thread(_search_target, query)
-    await asyncio.to_thread(_open, target)
-    return _ok(said)
+    return _ok(await asyncio.to_thread(_play_query, query))
 
 
 @tool("music_pause", "Pause the currently playing music", {})
