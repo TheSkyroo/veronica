@@ -250,6 +250,10 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="veronica")
     p.add_argument("--text", help="ask once via text, no audio input (speaks the reply)")
     args = p.parse_args(argv)
+    # Before any window, tray icon or capture exists: per-monitor DPI
+    # awareness keeps screenshots and clicks in the same physical pixels.
+    from veronica.tools.computer_events import ensure_dpi_awareness
+    ensure_dpi_awareness()
     setup_logging()
     if os.environ.get("ANTHROPIC_API_KEY"):
         os.environ.pop("ANTHROPIC_API_KEY")
