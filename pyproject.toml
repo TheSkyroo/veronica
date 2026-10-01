@@ -36,6 +36,8 @@ dependencies = [
   "winrt-Windows.Media.Control>=2.3; sys_platform == 'win32'",
   "winrt-Windows.Media.Ocr>=2.3; sys_platform == 'win32'",
   "winrt-Windows.Storage.Streams>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.UI.Notifications>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Data.Xml.Dom>=2.3; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

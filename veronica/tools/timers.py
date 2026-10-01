@@ -1,5 +1,5 @@
-"""In-process timers: fire an announcement (and a notification banner) after
-a delay, with no persistence — timers are lost on restart, by design."""
+"""In-process timers: fire an announcement (and a Windows toast notification)
+after a delay, with no persistence — timers are lost on restart, by design."""
 import asyncio
 import contextlib
 import logging

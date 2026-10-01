@@ -3359,7 +3359,7 @@ async def test_quick_time_reply_skips_brain_and_logs():
     assert o.store.turns[-1] == ("what day is it", o.tts.said[0])
 
 
-async def test_quick_battery_reads_pmset(monkeypatch):
+async def test_quick_battery_reads_battery(monkeypatch):
     monkeypatch.setattr(system_tools_mod, "read_battery", lambda: (72, "charging"))
     o, _ = build(rec_pcms=[np.zeros(1, np.int16), None], stt_texts=["battery level"])
     await o.one_turn()
@@ -3423,28 +3423,6 @@ async def test_quick_does_not_run_when_local_intent_matched():
     await o.one_turn()
     assert o.store.facts == ["time is 5"]
     assert o.tts.said == ["Got it."]
-
-
-def test_read_battery_parses_pmset():
-    class R:
-        def __init__(self, out):
-            self.stdout = out
-            self.returncode = 0
-    run = lambda *a, **k: R("Now drawing from 'AC Power'\n -InternalBattery-0 (id=123)\t72%; charging; 0:45 remaining present: true\n")
-    assert system_tools_mod.read_battery(run=run) == (72, "charging")
-    run = lambda *a, **k: R(" -InternalBattery-0\t100%; charged; 0:00 remaining\n")
-    assert system_tools_mod.read_battery(run=run) == (100, "charged")
-    run = lambda *a, **k: R(" -InternalBattery-0\t35%; discharging; 3:10 remaining\n")
-    assert system_tools_mod.read_battery(run=run) == (35, "discharging")
-    # plugged in but not charging (battery-health hold): the state is unknown, not "charging"
-    run = lambda *a, **k: R(" -InternalBattery-0\t98%; AC attached; not charging present: true\n")
-    assert system_tools_mod.read_battery(run=run) == (98, None)
-    run = lambda *a, **k: R(" -InternalBattery-0\t80%; finishing charge; 0:05 remaining present: true\n")
-    assert system_tools_mod.read_battery(run=run) == (80, "charging")
-    run = lambda *a, **k: R("Now drawing from 'AC Power'\n")
-    assert system_tools_mod.read_battery(run=run) == (None, None)
-    run = lambda *a, **k: (_ for _ in ()).throw(OSError("no pmset"))
-    assert system_tools_mod.read_battery(run=run) == (None, None)
 
 
 @pytest.mark.parametrize("heard,ok", [

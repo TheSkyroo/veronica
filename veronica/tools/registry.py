@@ -2,10 +2,12 @@
 
 Everything that isn't the Claude SDK calls in here: `LocalBrain` directly,
 and an external brain's `tools.serve` child indirectly, over the gate
-socket. Running the handlers in the app process and nowhere else is what
-keeps macOS's TCC grants pointed at Veronica.app — a capture (or a key
-press, or an Apple Event) issued from a helper the CLI spawned is
-attributed to that helper, which was never granted anything."""
+socket. Running the handlers in the app process and nowhere else keeps
+what Windows ties to a process with Veronica: the foreground rights and
+integrity level SendInput and UI Automation need, the toast identity, the
+Outlook COM connection and the audio sessions — a call issued from a
+helper the CLI spawned would run in that helper's (often hidden, console)
+context instead."""
 import base64
 import logging
 
