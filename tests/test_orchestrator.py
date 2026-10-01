@@ -47,11 +47,21 @@ class TTS:
         self.said.append(text)
         return np.zeros(10, dtype=np.float32), 24000
 
+@pytest.fixture(autouse=True)
+def _replace_mode_by_default(monkeypatch):
+    """Most barge tests here pin down the interrupt-and-replace path (still
+    what stop / hold on / "…instead" do); the queueing tests turn
+    queue_requests back on themselves."""
+    monkeypatch.setenv("VERONICA_QUEUE_REQUESTS", "false")
+
+
 class Player:
-    def __init__(self): self.played = 0; self.stops = 0; self.resets = 0
+    def __init__(self): self.played = 0; self.stops = 0; self.resets = 0; self.pauses = 0; self.paused = False
     async def play(self, s): self.played += 1
-    def stop(self): self.stops += 1
+    def stop(self): self.stops += 1; self.paused = False
     def reset(self): self.resets += 1
+    def pause(self): self.pauses += 1; self.paused = True
+    def resume(self): self.paused = False
 
 
 def build(rec_pcms=(), stt_texts=()):
@@ -5424,3 +5434,146 @@ def test_ptt_press_counts_while_muted_in_ptt_only_mode():
     o.s.listen_mode = "ptt"
     o.ptt_start()                                  # the only way to say "unmute"
     assert o._ptt_event.is_set()
+
+
+# -- request queue: talking to her while she's busy ----------------------------------
+
+class _BusyBrain:
+    """Answers "First." then keeps working on the first request until
+    finish() — long enough to be asked something else meanwhile."""
+
+    def __init__(self):
+        self.asked = []
+        self.interrupts = 0
+        self.ev = asyncio.Event()
+
+    async def ask(self, text, images=()):
+        self.asked.append(text)
+        yield "First."
+        if len(self.asked) == 1:
+            await self.ev.wait()
+        yield "Done."
+
+    def finish(self):
+        self.ev.set()
+
+    async def interrupt(self):
+        self.interrupts += 1
+        self.ev.set()
+
+
+def build_queue(stt_texts, n_pcms=4):
+    o, states = build_ptt(stt_texts=stt_texts)
+    o.s.queue_requests = True
+    o.recorder = SlowRec([np.zeros(1, np.int16)] * n_pcms + [None])
+    o.brain = _BusyBrain()
+    return o, states
+
+
+async def _start_busy_turn(o):
+    t = asyncio.create_task(o.one_turn())
+    await _settle()
+    o.recorder.finish()          # the first request is heard -> the brain starts working
+    await _settle()
+    assert o.brain.asked == ["open my email"]
+    return t
+
+
+async def test_request_while_busy_is_queued_and_runs_after(monkeypatch):
+    o, _ = build_queue(["open my email", "play some music"])
+    t = await _start_busy_turn(o)
+    o.ptt_start()
+    await _settle()
+    assert o.player.pauses == 1 and o.player.paused          # her voice is held while she listens
+    assert o.recorder.hold_calls == [False, True]
+    o.ptt_end()
+    await _settle()
+    assert o.brain.interrupts == 0                            # the running task was NOT dropped
+    assert [q.text for q in o._queued] == ["play some music"]
+    assert ("queue", ["play some music"]) in o.events
+    assert not o.player.paused                               # and she carries on
+    o.brain.finish()
+    await _settle()
+    assert o.brain.asked == ["open my email", "play some music"]   # then the queued one
+    assert ("queue", []) in o.events
+    o.recorder.stop()                                         # end the follow-up window
+    await _settle()
+    assert t.done() and t.exception() is None
+    assert o.state == "idle"
+
+
+async def test_wake_word_request_while_busy_is_queued_too():
+    o, _ = build_queue(["open my email", "what's the weather"])
+    t = await _start_busy_turn(o)
+    o.wake.q.put_nowait(True)                                  # "Veronica, what's the weather"
+    await _settle()
+    o.recorder.finish()
+    await _settle()
+    assert o.brain.interrupts == 0
+    assert [q.text for q in o._queued] == ["what's the weather"]
+    o.brain.finish()
+    await _settle()
+    assert o.brain.asked == ["open my email", "what's the weather"]
+    o.recorder.stop()
+    await _settle()
+    await asyncio.wait_for(t, 1)
+
+
+async def test_stop_while_busy_still_interrupts_and_clears_the_queue():
+    o, _ = build_queue(["open my email", "play some music", "stop"])
+    t = await _start_busy_turn(o)
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()
+    assert len(o._queued) == 1
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()   # "stop"
+    await asyncio.wait_for(t, 1)
+    assert o.brain.interrupts == 1                            # the running task was stopped
+    assert o.brain.asked == ["open my email"]                 # and the queued one never ran
+    assert not o._queued
+    assert o.recorder.hold_calls == [False, True, True]       # "stop" was heard once, not twice
+
+
+async def test_instead_replaces_the_running_request():
+    o, _ = build_queue(["open my email", "no, open spotify instead"])
+    t = await _start_busy_turn(o)
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()
+    assert o.brain.interrupts == 1 and not o._queued
+    o.recorder.stop()
+    await _settle()
+    await asyncio.wait_for(t, 1)
+    assert o.brain.asked == ["open my email", "no, open spotify instead"]
+
+
+async def test_clear_the_queue_keeps_the_running_request():
+    o, _ = build_queue(["open my email", "play some music", "clear the queue"])
+    t = await _start_busy_turn(o)
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()
+    assert not o._queued and o.brain.interrupts == 0
+    o.brain.finish()
+    await _settle()
+    o.recorder.stop()
+    await _settle()
+    await asyncio.wait_for(t, 1)
+    assert o.brain.asked == ["open my email"]
+
+
+async def test_queue_off_restores_interrupt_and_replace():
+    o, _ = build_queue(["open my email", "play some music"])
+    o.s.queue_requests = False
+    t = await _start_busy_turn(o)
+    o.ptt_start(); await _settle(); o.ptt_end(); await _settle()
+    assert o.brain.interrupts == 1 and not o._queued and o.player.pauses == 0
+    o.recorder.stop()
+    await _settle()
+    await asyncio.wait_for(t, 1)
+    assert o.brain.asked == ["open my email", "play some music"]
+
+
+@pytest.mark.parametrize("text, replaces", [
+    ("stop", True), ("that's all", True), ("hold on", True), ("mute", True),
+    ("no, use chrome instead", True), ("actually open notepad", True), ("cancel that", True),
+    ("play some music", False), ("what's the weather", False), ("mini mode", False),
+    ("open the downloads folder", False),
+])
+def test_replaces_current(text, replaces):
+    assert Orchestrator._replaces_current(text) is replaces

@@ -142,3 +142,9 @@ body.icon-mode #orb{width:100vw;height:100vh;flex:0 0 auto}
 /* The window is hidden FADE_S (hud/__init__.py) after this starts. */
 body{transition:opacity .15s ease}
 body.faded{opacity:0}
+
+/* requests queued while she was busy */
+#queue { display: flex; gap: 8px; align-items: baseline; margin-top: 6px; font-size: 12px; opacity: .85; }
+#queue.hidden { display: none; }
+#queue .who { text-transform: uppercase; letter-spacing: .06em; font-size: 10px; opacity: .7; white-space: nowrap; }
+#queue .msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
