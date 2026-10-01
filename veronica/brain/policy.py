@@ -8,6 +8,7 @@ and `.exe` is optional, so a command head is compared as its lowercased
 basename without `.exe` (`C:\\Windows\\System32\\SHUTDOWN.EXE` is `shutdown`)."""
 import ipaddress
 import ntpath
+import re
 import shlex
 from collections.abc import Callable
 from typing import Literal
@@ -250,10 +251,26 @@ def _bash_is_safe(command: str) -> bool:
     head = command_head(argv[0])
     if head == "curl":
         return _curl_is_safe(argv)
+    args = [a.strip("'\"") for a in argv[1:]]
     if head in ("start-process", "saps", "start"):
-        # Opening a web page in the default browser: same as open_url.
-        return len(argv) == 2 and argv[1].startswith(("http://", "https://"))
+        # Opening a web page in the default browser (same as open_url), or
+        # a Windows folder / Settings page (same as open_app).
+        if len(args) == 1:
+            return args[0].startswith(("http://", "https://")) or _is_windows_place(args[0])
+        return len(args) == 2 and command_head(args[0]) == "explorer" and _is_windows_place(args[1])
+    if head in ("explorer", "ii", "invoke-item"):
+        return len(args) == 1 and _is_windows_place(args[0])
     return head in SAFE_BASH
+
+
+_WINDOWS_PLACE = re.compile(r"(?:shell:[A-Za-z][A-Za-z ]{0,40}|ms-settings:[a-z0-9-]{0,40})", re.IGNORECASE)
+
+
+def _is_windows_place(target: str) -> bool:
+    """A shell folder ("shell:MyComputerFolder", "shell:Downloads") or a
+    Settings page ("ms-settings:bluetooth"): opening one only shows it, the
+    same thing the allow-class open_app does."""
+    return bool(_WINDOWS_PLACE.fullmatch(target))
 
 
 # Confirm-class tools the user may switch off one by one, in Settings ›
