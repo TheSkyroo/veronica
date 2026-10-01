@@ -20,6 +20,7 @@ def make(tmp_path, spawn=None, **settings):
     b.hooks_file = tmp_path / "gemini" / "config" / "hooks.json"   # never the real ~/.gemini
     runs = []
     b._run = lambda argv, **kw: runs.append(argv)
+    b._resolve = lambda argv: list(argv)       # never look agy up on PATH
     return b, runs, cards
 
 
@@ -70,7 +71,7 @@ def test_workspace_files_and_hook_merge(tmp_path):
     # agy's own default is 30 s; ours is explicit and above the gate budget
     assert pre[1]["hooks"][0]["timeout"] == gateclient.HOOK_TIMEOUT_S
     assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
-    assert cmd.startswith(f"{sys.executable} -m veronica.brain.hook antigravity --sock {b.s.gate_socket} ")
+    assert cmd.startswith(f"{sys.executable} -m veronica.brain.hook antigravity --gate {b.s.gate_endpoint} ")
     assert f"--log {b.hook_log}" in cmd and cmd.endswith(f"--scope-file {b.workspace / 'active-conversation'}")
     # idempotent
     b.prepare_workspace("SYSTEM PROMPT", native=True)
@@ -79,7 +80,7 @@ def test_workspace_files_and_hook_merge(tmp_path):
     assert (b.workspace / "AGENTS.md").read_text().startswith("SYSTEM PROMPT\n\nDo not run shell commands")
     # MCP servers registered once per process, with the gate env
     assert len(runs) == len(hook.OUR_SERVERS)
-    assert runs[0] == ["agy", "mcp", "add", "--env", f"VERONICA_GATE_SOCK={b.s.gate_socket}",
+    assert runs[0] == ["agy", "mcp", "add", "--env", f"VERONICA_GATE={b.s.gate_endpoint}",
                        "--env", "VERONICA_BRAIN=antigravity", "--env", f"VERONICA_HOOK_LOG={b.hook_log}",
                        "veronica-system", sys.executable, "-m", "veronica.tools.serve", "system"]
     assert {r[-1] for r in runs} == set(hook.OUR_SERVERS)
@@ -233,9 +234,28 @@ async def test_close_removes_our_hook_entry(tmp_path):
     await b.close()                                # idempotent
 
 
-def test_hook_command_quotes_paths(tmp_path):
+def test_hook_command_uses_short_paths_for_spaces(tmp_path, monkeypatch):
+    """C:\\Users\\Mani Kumar\\...: the 8.3 form reads the same to cmd.exe
+    and PowerShell, so whichever shell agy uses gets one argument."""
+    from veronica.brain.backends import winproc
+
+    b, _, _ = make(tmp_path)
+    b.workspace = tmp_path / "with space"
+    b.workspace.mkdir()
+    b.hook_log = b.workspace / "hook.log"
+    b.scope_file = b.workspace / "active-conversation"
+    monkeypatch.setattr(winproc, "_short_path_win", lambda p: p.replace("with space", "WITHSP~1"))
+    cmd = b.hook_command()
+    assert f"--log {tmp_path / 'WITHSP~1' / 'hook.log'}" in cmd
+    assert cmd.endswith(f"--scope-file {tmp_path / 'WITHSP~1' / 'active-conversation'}")
+    assert b.HOOK_MARKER in cmd
+
+
+def test_hook_command_quotes_a_path_without_a_short_form(tmp_path):
+    """Short names switched off on the volume: the path keeps its space and
+    is double-quoted (cmd.exe's rule)."""
     b, _, _ = make(tmp_path)
     b.workspace = tmp_path / "with space"
     b.hook_log = b.workspace / "hook.log"
     b.scope_file = b.workspace / "active-conversation"
-    assert f"'{b.hook_log}'" in b.hook_command() and f"'{b.scope_file}'" in b.hook_command()
+    assert f'"{b.hook_log}"' in b.hook_command() and f'"{b.scope_file}"' in b.hook_command()

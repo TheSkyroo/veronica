@@ -112,7 +112,7 @@ def summarize_detail(tool_name: str, input: dict) -> str:
         if short == "clipboard_write":
             return "Copy to clipboard: " + str(input.get("text", ""))[:60]
         if short == "powershell":
-            return "PowerShell: " + str(input.get("script") or input.get("command") or "")[:60]
+            return "PowerShell: " + str(input.get("script", ""))[:60]
         return short
     if tool_name.startswith(PIM_PREFIX):
         short = tool_name[len(PIM_PREFIX):]

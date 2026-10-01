@@ -1,5 +1,4 @@
 import time
-from pathlib import Path
 
 import pytest
 
@@ -74,7 +73,7 @@ async def test_a_shell_screen_capture_is_redirected(command):
 
 async def test_an_ordinary_command_is_not_redirected():
     g, calls, _ = make([True])
-    assert (await g.decide("Bash", {"command": "Get-Process screenshot-helper"})).kind == "auto"
+    assert (await g.decide("Bash", {"command": "Get-Process screenshot-helper"})).kind == "auto" and calls == []
 
 
 async def test_trust_window_allows_second_click_same_app():
