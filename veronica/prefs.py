@@ -19,7 +19,7 @@ _LOCK = threading.RLock()
 
 def _read() -> dict:
     try:
-        return json.loads(_PREFS_PATH.read_text())
+        return json.loads(_PREFS_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (json.JSONDecodeError, OSError):
@@ -33,7 +33,7 @@ def _write(data: dict) -> None:
     _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".prefs.", suffix=".tmp", dir=_PREFS_PATH.parent)
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(data))
             f.flush()
             os.fsync(f.fileno())

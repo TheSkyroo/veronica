@@ -38,6 +38,10 @@ class Recorder:
         self._vad = self._vad_cls(settings.vad_aggressiveness)
         self._stop = threading.Event()
         self._finish = threading.Event()
+        # release_to_vad(): a push-to-talk *tap* — the hold capture carries on
+        # as an ordinary one that ends at the next silence. Holds the onset
+        # wait (seconds) to allow from then on; None when not requested.
+        self._to_vad_wait_s: float | None = None
         self._capturing = False
         self.input_latency_s = 0.0
         self._hold = False
@@ -134,6 +138,15 @@ class Recorder:
         if self._capturing and self._hold:
             self._finish.set()
 
+    def release_to_vad(self, wait_s: float) -> None:
+        """Turn the in-flight hold-mode capture into a normal one: instead of
+        waiting for finish(), it ends when the speaker falls silent (or after
+        `wait_s` with no speech at all). For a push-to-talk key that was only
+        tapped — tap to talk, rather than hold to talk. A no-op unless a
+        hold-mode capture is running."""
+        if self._capturing and self._hold:
+            self._to_vad_wait_s = float(wait_s)
+
     async def capture(
         self,
         max_s: int | None = None,
@@ -198,6 +211,7 @@ class Recorder:
         capture())."""
         self._stop.clear()
         self._finish.clear()
+        self._to_vad_wait_s = None
         self._hold = hold
         self._capturing = True
         self._armed = True
@@ -353,6 +367,17 @@ class Recorder:
                 if hold and self._finish.is_set():
                     self._finish.clear()
                     break
+                if hold and self._to_vad_wait_s is not None:
+                    # A tap, not a hold: from here on this is an ordinary
+                    # capture — it ends at silence, and gives up if no
+                    # speech starts within the new wait.
+                    tap_wait = max(1, int(self._to_vad_wait_s * 1000 // fm))
+                    self._to_vad_wait_s = None
+                    hold = False
+                    hold_cap_frames = None
+                    if not started:
+                        wait_frames = waited + tap_wait
+                        elapsed = 0
                 is_speech = self._is_speech(
                     self._vad, heard, rms(np.frombuffer(heard, dtype=np.int16)) if den is not None else None)
                 if self._on_level is not None:
@@ -424,6 +449,7 @@ class Recorder:
                     self._finish.clear()
         finally:
             self._capturing = False
+            self._to_vad_wait_s = None
 
         if not hold and speech_frames < min_speech_frames:
             return None

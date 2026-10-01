@@ -87,18 +87,24 @@ Optional, but recommended:
 
 - **Wake word:** say "Veronica" or "hey Veronica", then the request **in the same breath**: "Veronica, what's on
   my calendar today?". Anything you say right after the wake word is kept, so there's no need to pause.
-- **Push-to-talk:** hold **Win+Space**, speak, and release. No wake word needed. While you hold it, Windows
-  doesn't switch your keyboard layout and letting go doesn't open the Start menu. To use other keys, change
-  *Push-to-talk keys* in Settings → General (for example `ctrl+alt+space` or `right_ctrl`).
+- **Push-to-talk:** press the **Copilot key** (on laptops that have one) or **Ctrl+Alt+Space**. You can use it two
+  ways:
+  - **Hold** it while you speak, then let go.
+  - **Tap** it, speak, and she stops listening when you go quiet. Some Copilot keys only ever send a tap, so this
+    always works.
+
+  The key doesn't do its usual job while you're using it (Copilot doesn't open, no space is typed), and letting go
+  doesn't open the Start menu. To use other keys, set *Push-to-talk keys* in Settings → General. It takes a
+  comma-separated list, for example `copilot, ctrl+alt+space`, `f9` or `right_ctrl`.
 - **Listening mode:** choose how she listens. You can switch by voice ("push-to-talk mode" / "always listen"), from
   the tray's **Listening** menu, or in Settings → General.
   - **Always listening** (default): she listens for her name whenever she's idle, and push-to-talk works too.
-  - **Push-to-talk only:** the microphone stays off until you hold Win+Space. There's no wake word and no follow-up
+  - **Push-to-talk only:** the microphone stays off until you press the push-to-talk key. There's no wake word and no follow-up
     window; she only opens the mic herself to hear your yes/no when she asks a question. While muted in this mode,
-    hold Win+Space and say "unmute".
+    press the push-to-talk key and say "unmute".
 - **Follow-ups:** after a reply she listens for 4 more seconds, so you can keep going without the wake word
   (always-listening mode only).
-- **Asking for more while she's busy:** say "Veronica, …" or hold Win+Space while she's working on something or
+- **Asking for more while she's busy:** say "Veronica, …" or press the push-to-talk key while she's working on something or
   answering. She holds her voice for a moment, hears you, and **adds the request to a queue**, while the first task
   keeps going. When it's finished she does the queued ones in order. The HUD shows what's **Up next**.
   - To **replace** what she's doing instead, say so: "no, open Spotify instead", "actually …", "cancel that".
@@ -368,7 +374,7 @@ menu.
 Most settings apply immediately; the rest show a *Restart to apply* banner. Values are saved in
 `%USERPROFILE%\.veronica\prefs.json` and override `.env`. Any setting can also be given as a `VERONICA_<NAME>`
 environment variable or in a `.env` file in the repo, for example `VERONICA_HUD_ENABLED=false`,
-`VERONICA_PTT_ENABLED=false`, `VERONICA_PTT_HOTKEY=ctrl+alt+space`, `VERONICA_LISTEN_MODE=ptt`, `VERONICA_FOLLOWUP_WINDOW_S=6` or `VERONICA_LOG_LEVEL=DEBUG`.
+`VERONICA_PTT_ENABLED=false`, `VERONICA_PTT_HOTKEY=f9`, `VERONICA_LISTEN_MODE=ptt`, `VERONICA_FOLLOWUP_WINDOW_S=6` or `VERONICA_LOG_LEVEL=DEBUG`.
 
 ---
 
@@ -411,7 +417,7 @@ Logs are written to `%USERPROFILE%\.veronica\logs\veronica.log`.
 seconds.
 
 **Push-to-talk does nothing.** The tray shows "Push-to-talk unavailable" if the keyboard hook couldn't be installed.
-Restart Veronica. Some games and anti-cheat tools block global hooks. If another app already uses Win+Space, pick
+Restart Veronica. Some games and anti-cheat tools block global hooks. If another app already uses the Copilot key or Ctrl+Alt+Space, pick
 different keys in Settings → General → *Push-to-talk keys*.
 
 **Clicks land in the wrong place.** Take a fresh screenshot ("look at my screen") first. Clicking into
