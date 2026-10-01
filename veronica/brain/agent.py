@@ -74,6 +74,16 @@ def summarize_tool(tool_name: str, input: dict) -> str:
     return desc[:80].rstrip(".")
 
 
+def _browser_target(input: dict) -> str:
+    """What a browser click/type is aimed at, for the confirm: its name if
+    the brain gave one, else the element number from browser_elements."""
+    target = str(input.get("target") or "").strip()
+    if target:
+        return target
+    ref = input.get("ref")
+    return f"element {ref}" if ref not in (None, "") else ""
+
+
 def _pt(input: dict, xk: str = "x", yk: str = "y") -> str:
     def n(v):
         try:
@@ -190,11 +200,13 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return "Read the page"
         if short == "browser_find":
             return f"Find '{input.get('text', '')}' on the page"
+        if short == "browser_elements":
+            return "List what's clickable on the page"
         if short == "browser_click":
-            return f"Click '{input.get('target', '')}'"
+            return f"Click '{_browser_target(input)}'"
         if short == "browser_type":
             text = str(input.get("text", ""))[:40]
-            desc = f"Type '{text}' into '{input.get('target', '')}'"
+            desc = f"Type '{text}' into '{_browser_target(input)}'"
             return desc + " and press Enter" if input.get("submit") else desc
         if short == "browser_scroll":
             return f"Scroll {input.get('direction', 'down')}"

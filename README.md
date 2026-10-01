@@ -189,7 +189,18 @@ down", "press ctrl S", "where's the Settings icon?"
 "Read this page", "summarise this article", "find pricing on this page", "click the login button", "type hello in
 the search box and press Enter", "open a new tab with YouTube", "go back".
 
-This needs the [browser extension](#browser-extension). Clicking and typing in a page always ask first.
+She can also do multi-step tasks, for example "open YouTube, search for Samay Raina and play the latest video".
+
+- **How she knows what to click:** she lists everything on the page that can be clicked or typed into (links,
+  buttons, video players, search boxes), each with a number, and picks by number rather than guessing text.
+- **How she clicks:** where she can, with the real mouse at that element's spot on screen. Many sites ignore
+  clicks made by a script, and browsers only start a video with sound, go fullscreen or open some popups after a
+  real click. She uses the real mouse only when the browser is the window in front and nothing (not even her
+  HUD) covers that spot; otherwise she falls back to a script click.
+- **Checking her work:** she looks again afterwards, for example whether the video is actually playing.
+
+This needs the [browser extension](#browser-extension). Clicking and typing in a page always ask first; say
+"always" to stop being asked.
 
 ### Mail, calendar, tasks and notes (Google)
 
@@ -328,6 +339,9 @@ The extension lets Veronica work in your normal Chrome or Edge profile, with you
    - **Edge:** the same at `edge://extensions` (Developer mode is in the left sidebar).
 3. On the options page that opens, paste the contents of `browser_token` and click **Save**. It should say
    *Connected to Veronica*.
+
+**After updating Veronica,** open `chrome://extensions` (or `edge://extensions`) and click **Reload** on the Veronica
+extension, because the browser doesn't pick up the new version by itself.
 
 You can install it in both browsers; she uses the one you focused last. The port is 8765 by default
 (`VERONICA_BROWSER_PORT`; set the same port in the extension's options). Internal pages (`chrome://`, `edge://`,
