@@ -100,6 +100,30 @@ async def test_open_app_known_bare_name(apps, started):
     assert started == ["winword"] and not res.get("is_error")
 
 
+@pytest.mark.parametrize("name,target", [
+    ("This PC", "shell:MyComputerFolder"),
+    ("open this pc", "shell:MyComputerFolder"),
+    ("the Downloads folder", "shell:Downloads"),
+    ("Recycle Bin", "shell:RecycleBinFolder"),
+    ("bluetooth settings", "ms-settings:bluetooth"),
+    ("Device Manager", "devmgmt.msc"),
+    ("control panel", "control"),
+    ("Task Manager app", "taskmgr"),
+])
+async def test_open_app_system_places_and_tools(apps, started, name, target):
+    res = await system.open_app.handler({"name": name})
+    assert not res.get("is_error")
+    assert started == [target]
+    assert apps["uwp_calls"] == 0       # resolved before the Start-menu scan
+
+
+def test_system_targets_are_fixed_strings():
+    # Every target is a shell folder, a settings page or a bare System32
+    # name: nothing that could carry a path or arguments.
+    for target in system.SYSTEM_TARGETS.values():
+        assert target.startswith(("shell:", "ms-settings:")) or system._APP_NAME_RE.fullmatch(target)
+
+
 async def test_open_app_unknown_is_a_spoken_error(apps, started):
     res = await system.open_app.handler({"name": "Nope"})
     assert res["is_error"] and "no app called 'Nope'" in text(res) and started == []

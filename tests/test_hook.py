@@ -19,6 +19,8 @@ from veronica.brain.base import Decision
     ("codex", "shell", {"command": ["pwsh", "-File", "x.ps1", "-c", "y"]},
      ("Bash", {"command": "pwsh -File x.ps1 -c y"})),
     ("copilot", "bash", {"command": "pwd"}, ("Bash", {"command": "pwd"})),
+    ("copilot", "powershell", {"command": "Get-Location"}, ("Bash", {"command": "Get-Location"})),
+    ("copilot", "read_powershell", {"shellId": "1"}, None),
     ("antigravity", "write_file", {"file_path": "/tmp/x", "content": "y"}, ("Write", {"file_path": "/tmp/x", "content": "y"})),
     ("codex", "apply_patch", {"patch": "*** Begin Patch"}, ("Edit", {"patch": "*** Begin Patch"})),
     ("antigravity", "read_file", {"file_path": "/tmp/x"}, None),

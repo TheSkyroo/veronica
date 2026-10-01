@@ -1233,7 +1233,7 @@ class Orchestrator:
             # run_tool: an external brain's tools.serve child asks the gate
             # to run our tools here, in the app process, so every tool runs
             # with the app's own identity and state.
-            self._gate_server = GateServer(gate, self.s.gate_socket, run_tool=registry.call_tool)
+            self._gate_server = GateServer(gate, self.s.gate_endpoint, run_tool=registry.call_tool)
             await self._gate_server.start()
 
     async def stop_brain(self) -> None:

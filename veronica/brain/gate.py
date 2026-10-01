@@ -441,7 +441,8 @@ class GateServer:
         # Written beside and moved into place, so a caller never reads half
         # a file; a stale one from a crashed run is simply replaced.
         tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps({"v": 1, "port": self.port, "token": self._token, "pid": os.getpid()}), encoding="utf-8")
+        endpoint = {"v": 1, "port": self.port, "token": self._token, "pid": os.getpid()}
+        tmp.write_text(json.dumps(endpoint), encoding="utf-8")
         os.replace(tmp, self.path)
         log.info("gate listening on %s:%d", LOOPBACK, self.port)
 

@@ -111,7 +111,7 @@ class RecordingCopilot(_Recording, CopilotBrain):
 
 
 async def _gate_server(home, answers, cards, seen=None):
-    """A ToolGate served on home/gate.sock whose confirm pops `answers`;
+    """A ToolGate served through home/run/gate.json whose confirm pops `answers`;
     every tool name that reaches `decide` (over the gate or in-process)
     is appended to `seen`."""
     s = Settings(home=home)
@@ -136,7 +136,7 @@ async def _gate_server(home, answers, cards, seen=None):
 
 
 async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity):
-    """A brain whose gate is served on home/gate.sock and whose confirm
+    """A brain whose gate is served through home/run/gate.json and whose confirm
     pops `answers`."""
     s, gate, srv = await _gate_server(home, answers, cards)
     return brain_cls(s, gate, on_tool=lambda su, d: cards.append((su, d))), srv

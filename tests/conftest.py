@@ -45,7 +45,7 @@ def _fake_contacts(monkeypatch):
     ("Priya Shah") unless a test swaps the list; returns it so tests can."""
     from veronica.tools import pim
 
-    book = [("Priya Shah", ["+91 98765 43210"])]
+    book = [("Priya Shah", ["priya@example.com"])]
 
     def search(name):
         n = name.casefold()
