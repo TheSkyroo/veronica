@@ -51,7 +51,8 @@ def test_defaults(tmp_home):
     assert s.memory_recent_turns == 6
     assert s.memory_path == tmp_home / "memory.db"
     assert s.ptt_enabled is True
-    assert s.ptt_keycode == 0xA3          # VK_RCONTROL: Right Ctrl
+    assert s.ptt_hotkey == "win+space"
+    assert s.listen_mode == "always"
     assert s.dictation_max_s == 60
     assert s.language == "en"
     assert s.whisper_multilingual_model == "small"

@@ -78,8 +78,31 @@ def up(mon, vk=hotkey.VK_RCONTROL, flags=0):
     return key(mon, hotkey.WM_KEYUP, vk, flags)
 
 
-def test_default_key_is_right_ctrl():
-    assert HotkeyMonitor(lambda: None, lambda: None)._keycode == hotkey.VK_RCONTROL == 0xA3
+def test_default_hotkey_is_win_space():
+    mon = HotkeyMonitor(lambda: None, lambda: None)
+    assert mon._mods == {"win"} and mon._keycode == hotkey.VK_SPACE
+    assert mon.description == "Win+Space"
+
+
+@pytest.mark.parametrize("spec, mods, vk", [
+    ("win+space", {"win"}, hotkey.VK_SPACE),
+    ("Windows + Space", {"win"}, hotkey.VK_SPACE),
+    ("ctrl+alt+p", {"ctrl", "alt"}, ord("P")),
+    ("right_ctrl", set(), hotkey.VK_RCONTROL),
+    (0xA5, set(), 0xA5),
+    ("fn", {"win"}, hotkey.VK_SPACE),             # Windows never sees fn: default
+    ("win+ctrl", {"win"}, hotkey.VK_SPACE),       # modifiers only: default
+    ("hyper+space", {"win"}, hotkey.VK_SPACE),    # unknown modifier: default
+])
+def test_parse_hotkey(spec, mods, vk):
+    assert hotkey.parse_hotkey(spec) == (frozenset(mods), vk)
+
+
+@pytest.mark.parametrize("spec, text", [
+    ("win+space", "Win+Space"), ("alt+shift+f5", "Alt+Shift+F5"), ("right_ctrl", "Right Ctrl"),
+])
+def test_describe_hotkey(spec, text):
+    assert hotkey.describe_hotkey(spec) == text
 
 
 @pytest.mark.parametrize("value, vk", [
@@ -124,7 +147,7 @@ def test_real_win32_unavailable_off_windows():
 
 async def test_hook_dispatches_press_and_release_and_chains(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     assert mon._install_hook() is True
 
@@ -141,7 +164,7 @@ async def test_hook_dispatches_press_and_release_and_chains(fake_win32):
 async def test_syskey_messages_count_too(fake_win32):
     """Alt combos arrive as WM_SYSKEYDOWN/UP."""
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode="right_alt")
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_alt")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     key(mon, hotkey.WM_SYSKEYDOWN, hotkey.VK_RMENU)
@@ -152,7 +175,7 @@ async def test_syskey_messages_count_too(fake_win32):
 
 async def test_hook_ignores_other_keys(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     down(mon, vk=hotkey.VK_LCONTROL)
@@ -163,7 +186,7 @@ async def test_hook_ignores_other_keys(fake_win32):
 
 async def test_left_ctrl_held_does_not_mask_right_ctrl_release(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     down(mon, vk=hotkey.VK_LCONTROL)
@@ -175,7 +198,7 @@ async def test_left_ctrl_held_does_not_mask_right_ctrl_release(fake_win32):
 
 async def test_hook_ignores_autorepeat_down_events(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     down(mon)
@@ -187,7 +210,7 @@ async def test_hook_ignores_autorepeat_down_events(fake_win32):
 
 async def test_hook_ignores_injected_events(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     down(mon, flags=hotkey.LLKHF_INJECTED)
@@ -197,7 +220,7 @@ async def test_hook_ignores_injected_events(fake_win32):
 
 async def test_hook_ignores_non_action_codes_but_still_chains(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon._loop = asyncio.get_running_loop()
     mon._install_hook()
     key(mon, hotkey.WM_KEYDOWN, hotkey.VK_RCONTROL, n_code=-1)
@@ -210,7 +233,7 @@ def test_hook_survives_callback_errors(fake_win32):
     def bad():
         raise RuntimeError("orchestrator gone")
 
-    mon = HotkeyMonitor(bad, lambda: None)
+    mon = HotkeyMonitor(bad, lambda: None, hotkey="right_ctrl")
     mon._install_hook()
     assert down(mon) == 0                            # no exception escapes into Windows
     assert fake_win32.next_calls == [(0, hotkey.WM_KEYDOWN)]
@@ -241,7 +264,7 @@ async def test_start_unavailable_does_not_hang(monkeypatch):
 
 def test_start_without_running_loop_calls_back_directly(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon.start()  # no asyncio loop running in this (sync) test: must not raise
     assert mon._loop is None
     mon._dispatch(True)
@@ -253,9 +276,85 @@ def test_stop_while_held_releases_the_key(fake_win32):
     """The key-up can never arrive once the hook is gone: don't leave
     push-to-talk believing the key is still down."""
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey="right_ctrl")
     mon.start()
     down(mon)
     mon.stop()
     assert events == ["press", "release"]
     assert mon._pressed is False
+
+
+# -- combos (Win+Space) -----------------------------------------------------------
+def combo(fake_win32, spec="win+space"):
+    events = []
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), hotkey=spec)
+    mon._install_hook()
+    mon._thread_id = 4242
+    return mon, events
+
+
+SWALLOWED = 1
+
+
+def test_win_space_hold_and_release_space(fake_win32):
+    mon, events = combo(fake_win32)
+    assert down(mon, vk=hotkey.VK_LWIN) == 0                 # Win passes through
+    assert down(mon, vk=hotkey.VK_SPACE) == SWALLOWED        # no layout switch
+    assert down(mon, vk=hotkey.VK_SPACE) == SWALLOWED        # auto-repeat swallowed too
+    assert up(mon, vk=hotkey.VK_SPACE) == SWALLOWED
+    assert up(mon, vk=hotkey.VK_LWIN) == 0
+    assert events == ["press", "release"]
+    # the Start-menu mask was requested once, while Win was down
+    assert fake_win32.posted == [(4242, hotkey.WM_APP_MASK)]
+
+
+def test_releasing_win_first_ends_the_hold(fake_win32):
+    mon, events = combo(fake_win32)
+    down(mon, vk=hotkey.VK_RWIN)
+    down(mon, vk=hotkey.VK_SPACE)
+    up(mon, vk=hotkey.VK_RWIN)
+    assert events == ["press", "release"]
+    assert up(mon, vk=hotkey.VK_SPACE) == SWALLOWED          # its down was ours
+    assert events == ["press", "release"]
+
+
+def test_plain_space_is_never_touched(fake_win32):
+    mon, events = combo(fake_win32)
+    assert down(mon, vk=hotkey.VK_SPACE) == 0
+    assert up(mon, vk=hotkey.VK_SPACE) == 0
+    assert events == [] and fake_win32.posted == []
+
+
+def test_other_win_shortcuts_pass_through(fake_win32):
+    mon, events = combo(fake_win32)
+    down(mon, vk=hotkey.VK_LWIN)
+    assert down(mon, vk=ord("E")) == 0                       # Win+E still opens Explorer
+    assert up(mon, vk=ord("E")) == 0
+    assert events == []
+
+
+def test_injected_keys_are_ignored_for_combos(fake_win32):
+    mon, events = combo(fake_win32)
+    down(mon, vk=hotkey.VK_LWIN, flags=hotkey.LLKHF_INJECTED)
+    assert down(mon, vk=hotkey.VK_SPACE) == 0                # Win wasn't really held
+    assert events == []
+
+
+def test_ctrl_combo_needs_no_mask(fake_win32):
+    mon, events = combo(fake_win32, "ctrl+shift+space")
+    down(mon, vk=hotkey.VK_LCONTROL)
+    down(mon, vk=hotkey.VK_RSHIFT)
+    assert down(mon, vk=hotkey.VK_SPACE) == SWALLOWED
+    up(mon, vk=hotkey.VK_SPACE)
+    assert events == ["press", "release"] and fake_win32.posted == []
+
+
+def test_mask_message_injects_the_mask_key(fake_win32):
+    sent = []
+    fake_win32.SendInput = lambda n, ptr, size: sent.append((n, size)) or n
+    mon, _ = combo(fake_win32)
+    mon._send_mask()
+    assert sent == [(2, ctypes.sizeof(hotkey._INPUT))]
+    inputs = hotkey._mask_inputs()
+    assert [i.ki.wVk for i in inputs] == [hotkey.VK_MASK] * 2
+    assert [i.ki.dwFlags for i in inputs] == [0, hotkey.KEYEVENTF_KEYUP]

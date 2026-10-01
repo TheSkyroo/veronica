@@ -29,7 +29,7 @@ import time
 
 from veronica import updater, version
 from veronica.__main__ import build_orchestrator
-from veronica.audio.hotkey import HotkeyMonitor
+from veronica.audio.hotkey import HotkeyMonitor, describe_hotkey
 from veronica.brain.backends import BACKENDS, check_backend
 from veronica.config import settings
 from veronica.speech import voices
@@ -62,6 +62,8 @@ UPDATE_LATEST_SPOKEN = "You're already on the latest."
 UPDATE_CHECK_FAILED_SPOKEN = "Couldn't check for updates, check the log."
 
 PTT_UNAVAILABLE_TITLE = "Push-to-talk unavailable"
+LISTEN_ALWAYS_TITLE = "Always listening (wake word)"
+LISTEN_PTT_TITLE = "Push-to-talk only ({keys})"
 LOGIN_ITEM_TITLE = "Start at Login"
 LOGIN_ITEM_BUILD_FIRST_TITLE = "Start at Login (build the app first)"
 
@@ -223,9 +225,21 @@ class VeronicaApp:
             self._brain_items[name] = item
             brain_menu.add(item)
         self._brain_menu = self._brain_item = brain_menu
+        # Listening submenu: wake word + push-to-talk, or push-to-talk only.
+        listen_menu = MenuItem("Listening")
+        self._listen_items = {
+            "always": MenuItem(LISTEN_ALWAYS_TITLE, lambda _i: self._pick_listen_mode("always"), checkable=True),
+            "ptt": MenuItem(LISTEN_PTT_TITLE.format(keys=describe_hotkey(settings.ptt_hotkey)),
+                            (lambda _i: self._pick_listen_mode("ptt")) if settings.ptt_enabled else None,
+                            checkable=True),
+        }
+        for item in self._listen_items.values():
+            listen_menu.add(item)
+        self._listen_menu = listen_menu
+        self._refresh_listen_menu(settings.listen_mode)
         menu_items = [
             self._about_item, self._settings_item, check_item, self._update_item, None,
-            self._mute_item, hud_mode_item, voice_menu, brain_menu, login_item_item, None,
+            self._mute_item, listen_menu, hud_mode_item, voice_menu, brain_menu, login_item_item, None,
         ]
         self._hud_mode_item = hud_mode_item
         self._login_item_item = login_item_item
@@ -240,7 +254,7 @@ class VeronicaApp:
         self._hotkey: HotkeyMonitor | None = None
         self._ptt_item: MenuItem | None = None
         if settings.ptt_enabled:
-            self._hotkey = HotkeyMonitor(self._on_ptt_press, self._on_ptt_release, keycode=settings.ptt_keycode)
+            self._hotkey = HotkeyMonitor(self._on_ptt_press, self._on_ptt_release, hotkey=settings.ptt_hotkey)
             self._hotkey.start(loop=self._loop)
             if not self._hotkey.available:
                 # No permission to ask for on Windows: the keyboard hook
@@ -427,7 +441,22 @@ class VeronicaApp:
             self.title = f"Veronica — {STATE_LABELS.get(self._state, self._state)}"
         self._refresh_voice_menu()
         self._refresh_brain_menu()
+        mode = getattr(getattr(getattr(self, "_orch", None), "s", None), "listen_mode", None)
+        if mode is not None:
+            self._refresh_listen_menu(mode)
         self._sync_tray()
+
+    def _refresh_listen_menu(self, mode: str) -> None:
+        for name, item in self._listen_items.items():
+            item.state = name == mode
+
+    def _pick_listen_mode(self, mode: str) -> None:
+        """Listening submenu: switch modes on the orchestrator's loop (it
+        persists the choice and wakes the idle loop); quiet, no speech."""
+        self._refresh_listen_menu(mode)
+        orch = getattr(self, "_orch", None)
+        if orch is not None:
+            self._schedule(orch.set_listen_mode(mode))
 
     def _drain(self, _timer=None) -> None:
         # If the backlog has grown past 1000 (the HUD/UI thread falling
