@@ -1,4 +1,4 @@
-"""Live check: can two RawInputStreams read the mic concurrently on this Mac?"""
+"""Live check: can two RawInputStreams read the mic concurrently on this PC?"""
 import threading
 import time
 

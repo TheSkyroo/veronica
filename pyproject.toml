@@ -1,7 +1,7 @@
 [project]
 name = "veronica"
 version = "0.1.0"
-description = "Voice assistant for macOS powered by Claude Code"
+description = "Voice assistant for Windows powered by coding-agent CLIs"
 requires-python = ">=3.12"
 dependencies = [
   "claude-agent-sdk>=0.1.0",
@@ -14,17 +14,32 @@ dependencies = [
   "scipy>=1.11",
   "faster-whisper>=1.1.0",
   "kokoro-onnx>=0.4.0",
-  "rumps>=0.4.0",
   "pydantic-settings>=2.6",
-  "pyobjc-framework-WebKit>=10",
-  "pyobjc-framework-Quartz>=10",
-  "pyobjc-framework-vision>=10",
-  "pyobjc-framework-applicationservices>=10",
-  "pyobjc-framework-contacts>=10",
+  "websockets>=12",
+  "Pillow>=10",
+  "psutil>=5.9",
+  # Windows integration (UI, audio endpoints, input, screen, OCR, Outlook).
+  "pywebview>=5; sys_platform == 'win32'",
+  "pystray>=0.19; sys_platform == 'win32'",
+  "pywin32>=306; sys_platform == 'win32'",
+  "comtypes>=1.4; sys_platform == 'win32'",
+  "pycaw>=20240210; sys_platform == 'win32'",
+  "pynput>=1.7.7; sys_platform == 'win32'",
+  "mss>=9; sys_platform == 'win32'",
+  "uiautomation>=2.0.20; sys_platform == 'win32'",
+  "keyring>=25; sys_platform == 'win32'",
+  "winrt-runtime>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Globalization>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Media.Control>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Media.Ocr>=2.3; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams>=2.3; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "playwright>=1.45"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "playwright>=1.45", "pyinstaller>=6"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -36,7 +51,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-environments = ["sys_platform == 'darwin'"]
+# The app targets Windows; Linux is kept resolvable so the (hermetic) test
+# suite can run in CI containers.
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["veronica"]
