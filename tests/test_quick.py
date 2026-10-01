@@ -23,9 +23,9 @@ def at(text, lang="en"):
     ("hello", ("social", None)),
     ("good evening", ("social", "Good evening, Manik.")),
     ("shukriya", ("social", None)),
-    ("who are you", ("social", "I'm Veronica, your voice assistant on this Mac.")),
-    ("tum kaun ho", ("social", "मैं वेरोनिका हूँ, इस Mac पर आपकी voice assistant।")),
-    ("what can you do", ("social", "I can answer questions, control this Mac, read your calendar and mail, play music, take notes, control your browser, and remember things for you.")),
+    ("who are you", ("social", "I'm Veronica, your voice assistant on this PC.")),
+    ("tum kaun ho", ("social", "मैं वेरोनिका हूँ, इस PC पर आपकी voice assistant।")),
+    ("what can you do", ("social", "I can answer questions, control this PC, read your calendar and mail, play music, take notes, control your browser, and remember things for you.")),
     ("battery level", ("battery", "en")),
     ("battery kitni hai", ("battery", "hi")),
     ("what's the volume", ("volume", "en")),
@@ -127,7 +127,7 @@ def test_math_no_match(text):
 
 @pytest.mark.parametrize("text", [
     "set a timer for 5 minutes", "what time is my next meeting", "whats the date of the meeting",
-    "what's 5 plus 5 in binary", "hello can you open safari", "what's 10 divided by 0",
+    "what's 5 plus 5 in binary", "hello can you open edge", "what's 10 divided by 0",
     "what is 99999999999999 times 99999999999999", "1 plus 2 plus 3 plus 4 plus 5 plus 6 plus 7 plus 8",
     "time to go", "battery is low", "how are you going to do that",
 ])

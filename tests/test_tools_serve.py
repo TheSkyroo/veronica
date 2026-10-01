@@ -10,14 +10,14 @@ def _restore_handlers():
     # gated_server wraps the module-level servers in place; put them back so
     # one test's seam doesn't become the next test's "original".
     saved = [(serve.server_for(n), serve.server_for(n).get_request_handler("tools/call"))
-             for n in ("mac", "screen")]
+             for n in ("system", "screen")]
     yield
     for inst, entry in saved:
         inst.add_request_handler("tools/call", entry.params_type, entry.handler)
 
 
 def test_server_lookup():
-    assert serve.server_for("mac").name == "mac"
+    assert serve.server_for("system").name == "system"
     with pytest.raises(KeyError):
         serve.server_for("nope")
 
@@ -42,11 +42,11 @@ async def test_call_is_denied_then_run_by_the_app(monkeypatch):
         (Decision(False, "denied", "user declined"), [], True),
         (Decision(True, "approved", ""), [{"type": "text", "text": "copied"}], False),
     ], asked)
-    inst = serve.gated_server("mac")
+    inst = serve.gated_server("system")
     params = CallToolRequestParams(name="clipboard_write", arguments={"text": "hi"})
     denied = await _call_handler(inst)(None, params)
     assert denied.is_error and "Not allowed: user declined" in denied.content[0].text
-    assert asked[0][0] == "mcp__mac__clipboard_write" and asked[0][2] == {"origin": "mcp", "backend": "codex"}
+    assert asked[0][0] == "mcp__system__clipboard_write" and asked[0][2] == {"origin": "mcp", "backend": "codex"}
     ok = await _call_handler(inst)(None, params)
     assert not ok.is_error and ok.content[0].text == "copied"
 
@@ -55,7 +55,7 @@ async def test_the_proxy_never_runs_the_tool_itself(monkeypatch):
     """Even an allow must not reach the local handler: this process has no
     business doing what the app holds the permission for."""
     ran = []
-    inst = serve.server_for("mac")
+    inst = serve.server_for("system")
     original = _call_handler(inst)
 
     async def spy(ctx, params):
@@ -64,7 +64,7 @@ async def test_the_proxy_never_runs_the_tool_itself(monkeypatch):
 
     inst.add_request_handler("tools/call", CallToolRequestParams, spy)
     _fake_gate(monkeypatch, [(Decision(True, "auto", ""), [{"type": "text", "text": "42"}], False)])
-    res = await _call_handler(serve.gated_server("mac"))(
+    res = await _call_handler(serve.gated_server("system"))(
         None, CallToolRequestParams(name="volume_get", arguments={}))
     assert res.content[0].text == "42" and ran == []
 
@@ -83,19 +83,19 @@ async def test_image_content_survives_the_proxy(monkeypatch):
 
 async def test_an_unreadable_block_becomes_text(monkeypatch):
     _fake_gate(monkeypatch, [(Decision(True, "auto", ""), [{"type": "wat"}], False)])
-    res = await _call_handler(serve.gated_server("mac"))(
+    res = await _call_handler(serve.gated_server("system"))(
         None, CallToolRequestParams(name="volume_get", arguments={}))
     assert "unreadable" in res.content[0].text
 
 
 async def test_the_apps_error_flag_comes_through(monkeypatch):
     _fake_gate(monkeypatch, [(Decision(True, "auto", ""), [{"type": "text", "text": "error: nope"}], True)])
-    res = await _call_handler(serve.gated_server("mac"))(
+    res = await _call_handler(serve.gated_server("system"))(
         None, CallToolRequestParams(name="volume_get", arguments={}))
     assert res.is_error and res.content[0].text == "error: nope"
 
 
 async def test_list_tools_passthrough():
-    inst = serve.gated_server("mac")
+    inst = serve.gated_server("system")
     res = await inst.get_request_handler("tools/list").handler(None, None)
     assert any(t.name == "clipboard_write" for t in res.tools)

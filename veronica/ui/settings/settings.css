@@ -8,7 +8,7 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
-  font:13px/1.4 -apple-system,system-ui,"SF Pro Text","Noto Sans Devanagari",sans-serif;
+  font:13px/1.4 "Segoe UI Variable Text","Segoe UI",system-ui,"Nirmala UI","Noto Sans Devanagari",sans-serif;
   -webkit-user-select:none;cursor:default;overflow:hidden}
 body{display:flex;flex-direction:column}
 .hidden{display:none !important}
@@ -70,7 +70,7 @@ input[type=range]{-webkit-appearance:none;width:170px;height:4px;border-radius:2
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--gold);
   border:1px solid rgba(0,0,0,.4);box-shadow:0 0 0 3px rgba(240,195,108,.18)}
 .row .value{min-width:44px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ice);
-  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
+  font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:12px}
 
 button.btn,button.primary{padding:5px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg3);cursor:default}
 button.btn:hover{background:rgba(255,255,255,.11)}
@@ -100,7 +100,7 @@ button:disabled{opacity:.45}
 .about dl{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:12px 0;color:var(--dim)}
 .about dt{font-weight:500}
 .about dd{margin:0;color:var(--fg);-webkit-user-select:text;cursor:text;word-break:break-all;
-  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
+  font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:12px}
 .about .dirty{color:var(--amber)}
 .about .status{margin-top:12px;min-height:18px;color:var(--ice)}
 .about .status.error{color:var(--red)}

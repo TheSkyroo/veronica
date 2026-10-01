@@ -1,9 +1,8 @@
 import os
-import shlex
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES  # noqa: F401  (re-exported)
+from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES, split_command  # noqa: F401  (re-exported)
 
 
 def _image_media_type(data: bytes) -> str:
@@ -19,7 +18,7 @@ def _image_media_type(data: bytes) -> str:
 Confirm = Callable[..., Awaitable[Any]]
 
 
-MAC_PREFIX = "mcp__mac__"
+SYSTEM_PREFIX = "mcp__system__"
 PIM_PREFIX = "mcp__pim__"
 MEMORY_PREFIX = "mcp__memory__"
 SCREEN_PREFIX = "mcp__screen__"
@@ -33,7 +32,7 @@ COMPUTER_PREFIX = "mcp__computer__"
 
 
 # Summaries that already read as an action (the computer tools' "Click
-# 'Save'", "Press cmd+s") are asked as themselves; anything else gets the
+# 'Save'", "Press ctrl+s") are asked as themselves; anything else gets the
 # generic "Run X?".
 ACTION_SUMMARY_PREFIXES = ("Click ", "Double-click ", "Right-click ", "Type ", "Press ", "Drag ", "Scroll ")
 
@@ -53,7 +52,7 @@ def summarize_tool(tool_name: str, input: dict) -> str:
     desc = description.strip()
     if tool_name == "Bash":
         try:
-            argv = shlex.split(str(input.get("command", "")))
+            argv = split_command(str(input.get("command", "")))
         except ValueError:
             argv = []
         if argv:
@@ -104,18 +103,16 @@ def _summarize_computer(short: str, input: dict) -> str:
 
 
 def summarize_detail(tool_name: str, input: dict) -> str:
-    if tool_name.startswith(MAC_PREFIX):
-        short = tool_name[len(MAC_PREFIX):]
+    if tool_name.startswith(SYSTEM_PREFIX):
+        short = tool_name[len(SYSTEM_PREFIX):]
         if short == "open_app":
             return f"Open {input.get('name', '')}"
         if short == "open_url":
             return f"Open {input.get('url', '')}"
         if short == "clipboard_write":
             return "Copy to clipboard: " + str(input.get("text", ""))[:60]
-        if short == "applescript":
-            return "AppleScript: " + str(input.get("script", ""))[:60]
-        if short == "run_shortcut":
-            return f"Run the shortcut '{input.get('name', '')}'"
+        if short == "powershell":
+            return "PowerShell: " + str(input.get("script") or input.get("command") or "")[:60]
         return short
     if tool_name.startswith(PIM_PREFIX):
         short = tool_name[len(PIM_PREFIX):]
@@ -129,8 +126,6 @@ def summarize_detail(tool_name: str, input: dict) -> str:
             return f"Search mail: {input.get('query', '')}"
         if short == "mail_send":
             return f"Send mail to {input.get('to', '')}"
-        if short == "message_send":
-            return f"Message {input.get('to', '')}: " + str(input.get("body", ""))[:40]
         if short == "reminder_create":
             return f"Create reminder {input.get('title', '')}"
         if short == "reminders_due":

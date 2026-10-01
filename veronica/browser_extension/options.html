@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Veronica browser bridge</title>
+<style>
+  :root { color-scheme: light dark; font-family: "Segoe UI", system-ui, sans-serif; }
+  body { max-width: 34rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  label { display: block; margin-top: 1rem; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: .4rem; font: inherit; }
+  input#port { width: 8rem; }
+  button { margin-top: 1rem; padding: .4rem 1.2rem; font: inherit; }
+  code { font-size: .9em; }
+  #status { margin-top: 1rem; }
+</style>
+</head>
+<body>
+  <h1>Veronica</h1>
+  <p>Pair this browser with the Veronica app on this PC. Open
+     <code>%USERPROFILE%\.veronica\browser_token</code> in Notepad (Veronica creates it the
+     first time it starts) and paste its contents below.</p>
+  <label for="token">Pairing code</label>
+  <input id="token" type="password" autocomplete="off" spellcheck="false">
+  <label for="port">Port</label>
+  <input id="port" type="number" min="1" max="65535">
+  <button id="save">Save</button>
+  <p id="status"></p>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -81,7 +81,7 @@ def test_workspace_files_and_hook_merge(tmp_path):
     assert len(runs) == len(hook.OUR_SERVERS)
     assert runs[0] == ["agy", "mcp", "add", "--env", f"VERONICA_GATE_SOCK={b.s.gate_socket}",
                        "--env", "VERONICA_BRAIN=antigravity", "--env", f"VERONICA_HOOK_LOG={b.hook_log}",
-                       "veronica-mac", sys.executable, "-m", "veronica.tools.serve", "mac"]
+                       "veronica-system", sys.executable, "-m", "veronica.tools.serve", "system"]
     assert {r[-1] for r in runs} == set(hook.OUR_SERVERS)
 
 
@@ -119,7 +119,7 @@ def test_parse_mcp_and_error_shapes(tmp_path):
     conv = "c"
     su = lambda **kw: json.dumps({"event": "step_update", "step_update": {"conversation_id": conv, **kw}})
     [start] = b.parse(su(step_index=4, state="ACTIVE", step_type="tool", tool_name="call_mcp_tool",
-                         tool_info={"name": "call_mcp_tool", "parameters": {"ServerName": "veronica-mac", "ToolName": "volume_get"}}))
+                         tool_info={"name": "call_mcp_tool", "parameters": {"ServerName": "veronica-system", "ToolName": "volume_get"}}))
     assert isinstance(start, cli.ToolStart) and start.native is False and start.call_id == "c:4"
     [end] = b.parse(su(step_index=4, state="ERROR", step_type="tool", tool_name="run_command", tool_info={"error": {"message": "denied"}}))
     assert isinstance(end, cli.ToolEnd) and end.call_id == "c:4"

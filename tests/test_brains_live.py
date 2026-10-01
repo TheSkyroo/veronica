@@ -205,7 +205,7 @@ async def test_agy_mcp_tool_through_serve(short_home, agy_hooks_file):
     cards = []
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards)
     try:
-        out = [x async for x in b.ask("Call the veronica-mac MCP server's volume_get tool and tell me "
+        out = [x async for x in b.ask("Call the veronica-system MCP server's volume_get tool and tell me "
                                       "the volume level in one short sentence.")]
         assert any(any(ch.isdigit() for ch in x) for x in out), out
         # ours are unwrapped from call_mcp_tool and let through by the hook (tools.serve gates them)
@@ -284,7 +284,7 @@ async def test_codex_mcp_tool_through_serve(short_home):
     cards = []
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCodex)
     try:
-        out = [x async for x in b.ask("Call the veronica-mac MCP server's volume_get tool and tell me "
+        out = [x async for x in b.ask("Call the veronica-system MCP server's volume_get tool and tell me "
                                       "the volume level in one short sentence.")]
         assert any(any(ch.isdigit() for ch in x) for x in out), out
         assert any('"mcp_tool_call"' in l and "volume_get" in l for l in b.raw), b.raw
@@ -402,7 +402,7 @@ async def test_copilot_mcp_tool_through_serve(short_home, copilot_hooks_file):
     cards = []
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCopilot)
     try:
-        out = [x async for x in b.ask("Call the veronica-mac MCP server's volume_get tool and tell me "
+        out = [x async for x in b.ask("Call the veronica-system MCP server's volume_get tool and tell me "
                                       "the volume level in one short sentence.")]
         assert any(any(ch.isdigit() for ch in x) for x in out), out
         assert any('"tool.execution_start"' in l and "volume_get" in l for l in b.raw), b.raw
@@ -436,7 +436,7 @@ async def test_every_brain_answers_through_the_gate(name, short_home, agy_hooks_
     try:
         out = [x async for x in b.ask(VOLUME_PROMPT)]
         assert out and any(x.strip() for x in out), out                    # a sentence was spoken
-        assert seen.count("mcp__mac__volume_get") == 1, seen              # gated exactly once
+        assert seen.count("mcp__system__volume_get") == 1, seen              # gated exactly once
         assert ("volume_get", "auto") in cards, cards
         assert not any(c[0] == "confirm" for c in cards), cards            # read-only: no question asked
     finally:
@@ -456,7 +456,7 @@ async def test_claude_brain_in_process_through_the_gate(short_home):
     try:
         out = [x async for x in b.ask(VOLUME_PROMPT)]
         assert out and any(x.strip() for x in out), out
-        assert seen == ["mcp__mac__volume_get"], seen
+        assert seen == ["mcp__system__volume_get"], seen
         assert ("volume_get", "auto") in cards, cards
         assert s.session_file.read_text().strip()                          # session saved for resume
         assert not (short_home / "backends" / "claude").exists()           # no CLI workspace / hook log

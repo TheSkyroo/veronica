@@ -20,7 +20,7 @@ from veronica.orchestrator import ConfirmResult, Orchestrator
 from veronica.speech import voices
 from veronica.speech.stt import Transcriber, stt_spec
 from veronica.speech.tts import Synthesizer
-from veronica.tools import mac as mac_tools, memory_tools, pim
+from veronica.tools import system as system_tools, memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
@@ -28,7 +28,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
                        updater_check=None, updater_update=None, relaunch=None, can_relaunch=None,
                        version_describe=None) -> Orchestrator:
     """`updater_check`/`updater_update`/`relaunch`/`can_relaunch` are the
-    menu bar app's self-update hooks (see Orchestrator); None (text mode)
+    tray app's self-update hooks (see Orchestrator); None (text mode)
     disables the "update yourself" turn. `version_describe` is a cached
     "Veronica x.y.z (sha, date)" for the version turn (default: git, on a
     thread)."""
@@ -102,7 +102,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
     # (or a mail count) and composes the announcement itself.
-    # A failed fetch (timeout, Automation denied) raises so build_briefing's
+    # A failed fetch (timeout, Outlook unavailable) raises so build_briefing's
     # guarded fetch logs it and drops the sentence, rather than reading the
     # error text as "Nothing on your calendar today."
     def _text_or_raise(res: dict) -> str:
@@ -128,8 +128,8 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
         return _text_or_raise(await pim.reminders_due.handler({"days": days}))
 
     async def _battery() -> tuple[int | None, str | None]:
-        # pmset shells out: off the loop, like the battery quick reply.
-        return await asyncio.to_thread(mac_tools.read_battery)
+        # psutil reads the battery: off the loop, like the battery quick reply.
+        return await asyncio.to_thread(system_tools.read_battery)
 
     pro = None
     if audio:
@@ -214,7 +214,7 @@ def _ask_stdin(prompt: str) -> str:
 
 
 def _quit_noop() -> None:
-    # --text mode has no running app/menu bar to tear down; just acknowledge.
+    # --text mode has no running app/tray to tear down; just acknowledge.
     print("[quit] Veronica isn't running as a background app in --text mode.")
 
 
@@ -263,28 +263,50 @@ def main(argv: list[str] | None = None) -> None:
     if lock is None:
         logging.getLogger("veronica").error("another Veronica is already running; exiting")
         return
-    from veronica.ui.menubar import run_app
+    # The browser extension reconnects on its own schedule; listening from
+    # startup means it is attached before the first browser tool call.
+    from veronica.tools.browser import start_bridge
+    start_bridge()
+    from veronica.ui.tray import run_app
     run_app()
 
 
 def acquire_instance_lock(path):
-    """Hold an exclusive advisory lock on `path` for the life of the
-    process so two Veronicas can't fight over the microphone (the second
-    one would hear nothing and the wake word would look broken). Returns
-    the open file (keep it referenced) or None when another instance holds
-    it."""
-    import fcntl
+    """Hold an exclusive lock on `path` for the life of the process so two
+    Veronicas can't fight over the microphone (the second one would hear
+    nothing and the wake word would look broken). Returns the open file
+    (keep it referenced) or None when another instance holds it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    f = open(path, "w")
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    # "a+" rather than "w": opening for write truncates, and Windows refuses
+    # to truncate a file whose first byte another process has locked.
+    f = open(path, "a+")
+    if not _lock_first_byte(f):
         f.close()
         return None
+    f.truncate(0)
     f.write(str(os.getpid()))
     f.flush()
     return f
 
+
+def _lock_first_byte(f) -> bool:
+    """Non-blocking exclusive lock on byte 0 of `f`; False if it's held.
+    The lock goes away with the process, so a crash never strands it."""
+    try:
+        import msvcrt
+    except ImportError:  # not Windows: only the test suite runs here
+        import fcntl
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
+    f.seek(0)
+    try:
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
 
 if __name__ == "__main__":
     main(sys.argv[1:])

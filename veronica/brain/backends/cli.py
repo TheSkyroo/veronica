@@ -13,6 +13,12 @@ line (`turn_message`) and reads until the turn's `Done`/`Error`. An
 interrupt kills the child either way; the next `ask` respawns, resuming
 the saved session id through `argv`.
 
+On Windows the child is not started by name: npm installs the CLIs as
+`.cmd` shims, and those are never run (cmd.exe would re-parse the prompt
+— see winproc). `winproc.resolve_cli` turns the name into the program
+to execute, and an interrupt is CTRL_BREAK to the child's own process
+group, then a kill of its whole process tree.
+
 The canary: with the vendor CLI in auto-approve mode, our hook is the
 only gate on its own shell/file tools. Every native, non-read-only tool
 call therefore has to show up in `hook.log` (the hook writes a line
@@ -27,7 +33,6 @@ import datetime as dt
 import json
 import logging
 import os
-import signal
 import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
@@ -37,6 +42,7 @@ from typing import Literal
 
 from veronica import prefs
 from veronica.brain import hook
+from veronica.brain.backends import winproc
 from veronica.brain.gate import ToolGate, ToolStall
 from veronica.brain.prompts import system_prompt
 from veronica.brain.sentences import SentenceSplitter
@@ -145,9 +151,13 @@ class CliBrain:
         self._memory = memory
         self._spawn = spawn or self._subprocess_spawn
         self._clock = clock
-        # `subprocess.run` for one-off vendor commands (e.g. `agy mcp add`);
-        # tests swap in a recorder so no real CLI is ever called.
+        # `subprocess.run` for one-off vendor commands (e.g. `agy mcp add`,
+        # through _run_cli); tests swap in a recorder so no real CLI is
+        # ever called.
         self._run = subprocess.run
+        # Vendor name -> what to execute (winproc.resolve_cli); tests pin it.
+        self._resolve = winproc.resolve_cli
+        self._kill_tree = winproc.kill_tree
         self.workspace: Path = settings.backend_dir(self.name)
         self.hook_log: Path = self.workspace / "hook.log"
         self._proc = None
@@ -224,12 +234,12 @@ class CliBrain:
 
     def _load_session(self) -> str | None:
         f = self._session_file()
-        return f.read_text().strip() or None if f.exists() else None
+        return f.read_text(encoding="utf-8").strip() or None if f.exists() else None
 
     def _save_session(self, sid: str) -> None:
         f = self._session_file()
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(sid)
+        f.write_text(sid, encoding="utf-8")
 
     def _clear_session(self) -> None:
         f = self._session_file()
@@ -255,11 +265,17 @@ class CliBrain:
         return paths
 
     # -- process ----------------------------------------------------------------
+    def _run_cli(self, argv: list[str], **kw):
+        """One short vendor command, run to completion: resolved like the
+        brain itself (never through a .cmd) and without a console window."""
+        return self._run(self._resolve(argv), creationflags=winproc.no_window_flags(), **kw)
+
     async def _subprocess_spawn(self, argv: list[str], cwd: str, env: dict[str, str]):
         stdin = asyncio.subprocess.PIPE if self.mode == "persistent" else asyncio.subprocess.DEVNULL
         return await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=env, limit=STDOUT_LINE_LIMIT,
+            *self._resolve(argv), cwd=cwd, env=env, limit=STDOUT_LINE_LIMIT,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, stdin=stdin,
+            creationflags=winproc.spawn_flags(),
         )
 
     @staticmethod
@@ -276,7 +292,7 @@ class CliBrain:
     async def _start(self, argv: list[str]):
         env = {
             **os.environ, **self.env(),
-            "VERONICA_GATE_SOCK": str(self.s.gate_socket),
+            "VERONICA_GATE": str(self.s.gate_endpoint),
             "VERONICA_BRAIN": self.name,
             "VERONICA_HOOK_LOG": str(self.hook_log),
         }
@@ -305,11 +321,7 @@ class CliBrain:
         self._proc_native = None
         if proc is None:
             return
-        try:
-            if proc.returncode is None:
-                proc.kill()
-        except ProcessLookupError:
-            pass
+        await asyncio.to_thread(self._kill_tree, proc)
         try:
             async with asyncio.timeout(self.s.interrupt_drain_s):
                 await proc.wait()
@@ -325,7 +337,7 @@ class CliBrain:
             async with asyncio.timeout(self.s.interrupt_drain_s):
                 await proc.wait()
         except TimeoutError:
-            proc.kill()
+            await asyncio.to_thread(self._kill_tree, proc)
 
     async def _ensure_persistent(self, native: bool):
         """persistent mode: the live child, spawned (or respawned after a
@@ -386,7 +398,7 @@ class CliBrain:
         deadline = self._clock() + (self.canary_grace_s if grace is None else grace)
         while True:
             try:
-                for line in self.hook_log.read_text().splitlines():
+                for line in self.hook_log.read_text(encoding="utf-8").splitlines():
                     try:
                         entry = json.loads(line)
                     except ValueError:
@@ -406,7 +418,7 @@ class CliBrain:
         splitter = SentenceSplitter()
         image_paths = self._write_images(images)
         self.prepare_workspace(self._system_prompt(), native)
-        self.hook_log.write_text("")
+        self.hook_log.write_text("", encoding="utf-8")
         turn_start = time.time()   # wall clock: the hook stamps its lines with time.time()
         self._interrupted = False
         try:
@@ -549,23 +561,22 @@ class CliBrain:
             return
 
     async def interrupt(self) -> None:
-        """Stop the child: SIGINT, a short wait, then kill. The next ask()
-        respawns (resuming the saved session). Safe when idle."""
+        """Stop the child: CTRL_BREAK, a short wait, then kill its tree.
+        When the break can't be delivered (Veronica has no console to
+        share with it) the kill comes at once. The next ask() respawns
+        (resuming the saved session). Safe when idle."""
         proc = self._proc
         if proc is None:
             return
         self._interrupted = True
-        try:
-            proc.send_signal(signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        try:
-            async with asyncio.timeout(self.s.interrupt_drain_s):
-                await proc.wait()
-        except TimeoutError:
-            log.warning("%s: no exit %ss after SIGINT; killing", self.name, self.s.interrupt_drain_s)
-        except Exception:
-            log.exception("%s: wait after SIGINT failed", self.name)
+        if winproc.interrupt(proc):
+            try:
+                async with asyncio.timeout(self.s.interrupt_drain_s):
+                    await proc.wait()
+            except TimeoutError:
+                log.warning("%s: no exit %ss after CTRL_BREAK; killing", self.name, self.s.interrupt_drain_s)
+            except Exception:
+                log.exception("%s: wait after CTRL_BREAK failed", self.name)
         await self._kill()
 
     async def close(self) -> None:

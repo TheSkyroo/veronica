@@ -5,10 +5,9 @@ only looks at cheap local markers (binary on PATH, a file the login writes)
 so the menu bar and the switcher can poll it; nothing here spawns a CLI.
 
 `local` is the odd one out: no vendor, no login, just a llama.cpp server and
-a .gguf on this Mac, so its availability is "are those two files there"."""
+a .gguf on this PC, so its availability is "are those two files there"."""
 import logging
 import shutil
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +51,7 @@ BACKENDS: dict[str, BackendInfo] = {b.name: b for b in (
     BackendInfo("codex", "Codex", "codex", "npm i -g @openai/codex", "codex login",
                 (".codex/auth.json",), CodexBrain),
     BackendInfo("antigravity", "Antigravity", "agy",
-                "curl -fsSL https://antigravity.google/cli/install.sh | bash", "agy",
+                "the Antigravity CLI installer from antigravity.google", "agy",
                 (".gemini/antigravity-cli/conversations",), AntigravityBrain),
     # `claude` is not spawned by us (claude_agent_sdk finds it); listed for
     # the availability check only. The SDK reports a missing login itself.
@@ -65,17 +64,32 @@ BACKENDS: dict[str, BackendInfo] = {b.name: b for b in (
     BackendInfo("local", "Local", "llama-server", "", "", (), LocalBrain),
 )}
 
-# Antigravity keeps its Google credentials in the macOS Keychain; the
-# conversations directory only appears after the first chat, so fall back
-# to the Keychain item when the directory is missing.
-_ANTIGRAVITY_KEYCHAIN = ["security", "find-generic-password", "-a", "antigravity"]
+# Antigravity keeps its Google credentials in the OS credential store —
+# Windows Credential Manager — under a generic credential whose target
+# names "antigravity"; the conversations directory only appears after the
+# first chat, so fall back to the credential when the directory is missing.
+_ANTIGRAVITY_CREDENTIAL = "antigravity"
 
 
-def _keychain_has(run: Callable, argv: list[str]) -> bool:
+def _win_credential_targets(filter_: str) -> list[str]:
+    """Target names of the user's stored Windows credentials matching
+    `filter_` (CredEnumerateW wildcards). Only names are read, never the
+    secrets. Lazy: pywin32 is a Windows-only dependency."""
+    import win32cred  # type: ignore[import-not-found]
     try:
-        return run(argv, capture_output=True, timeout=5).returncode == 0
-    except Exception as e:  # noqa: BLE001  (missing `security`, timeout: treat as not logged in)
-        log.debug("keychain lookup failed: %s", e)
+        creds = win32cred.CredEnumerate(filter_, 0) or ()
+    except Exception:   # pywintypes.error ERROR_NOT_FOUND: no match
+        return []
+    return [str(c.get("TargetName") or "") for c in creds]
+
+
+def _credential_has(lookup: Callable[[str], list[str]], name: str) -> bool:
+    """Is there a stored credential whose target mentions `name`? Any
+    failure (no pywin32, no Credential Manager) reads as "not logged in"."""
+    try:
+        return any(name in t.lower() for t in lookup(f"*{name}*"))
+    except Exception as e:  # noqa: BLE001
+        log.debug("credential lookup failed: %s", e)
         return False
 
 
@@ -97,11 +111,12 @@ def check_backend(
     which: Callable[[str], str | None] = shutil.which,
     exists: Callable[[Path], bool] | None = None,
     home: Path | None = None,
-    run: Callable = subprocess.run,
+    credentials: Callable[[str], list[str]] = _win_credential_targets,
     settings: Settings | None = None,
 ) -> Availability:
     """Is `name` installed and logged in? Cheap and local: PATH + marker
-    files (+ the Keychain for Antigravity). `hint` reads naturally aloud."""
+    files (+ Credential Manager for Antigravity). `hint` reads naturally
+    aloud."""
     info = BACKENDS.get(name)
     if info is None:
         return Availability(False, "not installed", f"I don't know a brain called {name}.")
@@ -114,7 +129,7 @@ def check_backend(
                             f"{info.label} isn't installed — run {info.install_cmd}, then {info.login_cmd}.")
     home = Path.home() if home is None else home
     logged_in = (not info.login_markers or any(exists(home / m) for m in info.login_markers)
-                 or (name == "antigravity" and _keychain_has(run, _ANTIGRAVITY_KEYCHAIN)))
+                 or (name == "antigravity" and _credential_has(credentials, _ANTIGRAVITY_CREDENTIAL)))
     if not logged_in:
         return Availability(False, "not logged in",
                             f"{info.label} isn't logged in — run {info.login_cmd} in a terminal.")

@@ -164,7 +164,7 @@ async def test_dictation_skips_another_voice(monkeypatch):
     from veronica import orchestrator as orch_mod
 
     typed = []
-    monkeypatch.setattr(orch_mod.mac_tools, "dictate_type", lambda t: typed.append(t) or {})
+    monkeypatch.setattr(orch_mod.system_tools, "dictate_type", lambda t: typed.append(t) or {})
     o, _ = build(rec_pcms=[said(THEM), said(ME), None], stt_texts=["hello there"])
     await o._dictation_turn()
     assert typed == ["hello there"]

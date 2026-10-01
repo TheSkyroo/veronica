@@ -336,6 +336,7 @@
     },
     setVisible(visible) {
       visible = !!visible;
+      document.body.classList.toggle('faded', !visible);
       if (!visible) {
         rafActive = false;
         if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
@@ -347,6 +348,58 @@
     },
   };
   window.hud = hud;
+
+  // ---- window drag / click → menu (pywebview js_api) ----------------------
+  // The window is frameless and never activates, so Python can't see the
+  // mouse: a press-and-drag here moves it (drag_to gets the pointer's
+  // offset from the press, in physical pixels), and a plain click or a
+  // right-click asks for the menu. Outside pywebview (Playwright, icon
+  // mode) there's no api and all of this is a no-op.
+  const DRAG_THRESHOLD_PX = 4;
+  function api() {
+    try { return (window.pywebview && window.pywebview.api) || null; } catch (e) { return null; }
+  }
+  function call(name, ...args) {
+    const a = api();
+    if (!a || typeof a[name] !== 'function') return;
+    try { const p = a[name](...args); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ }
+  }
+  let press = null;          // {x, y, id, dragging} while the left button is down
+  let movePending = null;    // latest offset not yet sent (one drag_to per frame)
+  function flushMove() {
+    if (movePending) { call('drag_to', movePending[0], movePending[1]); movePending = null; }
+  }
+  window.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || ICON_MODE) return;
+    press = {x: e.screenX, y: e.screenY, id: e.pointerId, dragging: false};
+    try { document.documentElement.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    call('drag_start');
+  });
+  window.addEventListener('pointermove', e => {
+    if (!press || e.pointerId !== press.id) return;
+    const dx = e.screenX - press.x, dy = e.screenY - press.y;
+    if (!press.dragging && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+    press.dragging = true;
+    const k = window.devicePixelRatio || 1;
+    const first = movePending === null;
+    movePending = [Math.round(dx * k), Math.round(dy * k)];
+    if (first) requestAnimationFrame(flushMove);
+  });
+  function endPress(e, cancelled) {
+    if (!press || e.pointerId !== press.id) return;
+    const dragged = press.dragging;
+    press = null;
+    try { document.documentElement.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    flushMove();
+    call('drag_end');
+    if (!dragged && !cancelled) call('menu');
+  }
+  window.addEventListener('pointerup', e => endPress(e, false));
+  window.addEventListener('pointercancel', e => endPress(e, true));
+  window.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (!ICON_MODE) call('menu');
+  });
 
   if (ICON_MODE) {
     hud.push({kind: 'state', payload: 'speaking'});

@@ -64,12 +64,12 @@ def test_is_per_turn_and_argv_first_turn(tmp_path):
     assert c["features.hooks"] is True and c["include_permissions_instructions"] is False
     assert c["developer_instructions"] == "SYS" and c["model_reasoning_effort"] == "low"
     # our MCP servers, with the gate env, never written to ~/.codex/config.toml
-    assert c["mcp_servers.veronica-mac.command"] == sys.executable
-    assert c["mcp_servers.veronica-mac.args"] == ["-m", "veronica.tools.serve", "mac"]
-    assert c["mcp_servers.veronica-mac.env.VERONICA_GATE_SOCK"] == str(b.s.gate_socket)
-    assert c["mcp_servers.veronica-mac.env.VERONICA_BRAIN"] == "codex"
-    assert c["mcp_servers.veronica-mac.env.VERONICA_HOOK_LOG"] == str(b.hook_log)
-    assert c["mcp_servers.veronica-mac.default_tools_approval_mode"] == "approve"   # else codex refuses every MCP call
+    assert c["mcp_servers.veronica-system.command"] == sys.executable
+    assert c["mcp_servers.veronica-system.args"] == ["-m", "veronica.tools.serve", "system"]
+    assert c["mcp_servers.veronica-system.env.VERONICA_GATE"] == str(b.s.gate_endpoint)
+    assert c["mcp_servers.veronica-system.env.VERONICA_BRAIN"] == "codex"
+    assert c["mcp_servers.veronica-system.env.VERONICA_HOOK_LOG"] == str(b.hook_log)
+    assert c["mcp_servers.veronica-system.default_tools_approval_mode"] == "approve"   # else codex refuses every MCP call
     assert {k.split(".")[1] for k in c if k.startswith("mcp_servers.")} == {f"veronica-{s}" for s in hook.OUR_SERVERS}
 
 
@@ -93,7 +93,7 @@ def test_workspace_hooks_json(tmp_path):
     assert entry["matcher"] == "*" and entry["hooks"][0]["type"] == "command"
     cmd = entry["hooks"][0]["command"]
     assert cmd == b.hook_command()
-    assert cmd == f"{sys.executable} -m veronica.brain.hook codex --sock {b.s.gate_socket} --log {b.hook_log}"
+    assert cmd == f"{sys.executable} -m veronica.brain.hook codex --gate {b.s.gate_endpoint} --log {b.hook_log}"
     # An explicit hook timeout, so the gate answer can't outlive it (codex 0.155
     # reads `timeout` on the handler and `timeoutSec` on the matcher group).
     assert entry["timeoutSec"] == entry["hooks"][0]["timeout"] == gateclient.HOOK_TIMEOUT_S
@@ -111,8 +111,27 @@ def test_toml_str_roundtrips(s):
     assert tomllib.loads(f"x = {toml_str(s)}")["x"] == s
 
 
+def test_hook_command_survives_a_space_in_the_path(tmp_path, monkeypatch):
+    """C:\\Users\\Mani Kumar\\...: every path is given in its 8.3 short form,
+    which reads the same in cmd.exe and PowerShell."""
+    from veronica.brain.backends import winproc
+
+    home = tmp_path / "Mani Kumar"
+    b, _ = make(home)
+    monkeypatch.setattr(winproc, "_short_path_win", lambda p: p.replace("Mani Kumar", "MANIKU~1"))
+    cmd = b.hook_command()
+    assert "Mani Kumar" not in cmd and '"' not in cmd and "'" not in cmd
+    assert f"--log {str(b.hook_log).replace('Mani Kumar', 'MANIKU~1')}" in cmd
+
+
 def test_unwrap_shell():
     assert unwrap_shell("/bin/zsh -lc 'echo canary-ok'") == "echo canary-ok"
+    assert unwrap_shell("powershell.exe -Command 'Get-Date'") == "Get-Date"
+    assert unwrap_shell('"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Get-ChildItem C:\\"') \
+        == "Get-ChildItem C:\\"
+    assert unwrap_shell("pwsh -Command 'it''s'") == "it's"
+    assert unwrap_shell("C:\\WINDOWS\\system32\\cmd.exe /c dir") == "dir"
+    assert unwrap_shell("git commit -c x") == "git commit -c x"
     assert unwrap_shell("/bin/bash -lc \"ls -la 'My Dir'\"") == "ls -la 'My Dir'"
     assert unwrap_shell("echo hi") == "echo hi"
     assert unwrap_shell("bad 'quote") == "bad 'quote"
@@ -180,17 +199,17 @@ def test_parse_mcp_fixture(tmp_path):
     events = [e for line in lines("codex-mcp.jsonl") for e in b.parse(line)]
     [start] = [e for e in events if isinstance(e, cli.ToolStart)]
     [end] = [e for e in events if isinstance(e, cli.ToolEnd)]
-    assert start.tool == "mcp__mac__volume_get" and start.native is False and start.input == {}
+    assert start.tool == "mcp__system__volume_get" and start.native is False and start.input == {}
     assert start.call_id == end.call_id and isinstance(events[-1], cli.Done)
     assert not any(isinstance(e, cli.Error) for e in events)
 
 
 def test_parse_mcp_items(tmp_path):
     b, _ = make(tmp_path)
-    item = {"id": "item_2", "type": "mcp_tool_call", "server": "veronica-mac", "tool": "volume_get",
+    item = {"id": "item_2", "type": "mcp_tool_call", "server": "veronica-system", "tool": "volume_get",
             "arguments": {}, "status": "in_progress"}
     [start] = b.parse(json.dumps({"type": "item.started", "item": item}))
-    assert start == cli.ToolStart("item_2", "mcp__mac__volume_get", {}, native=False)
+    assert start == cli.ToolStart("item_2", "mcp__system__volume_get", {}, native=False)
     [end] = b.parse(json.dumps({"type": "item.completed", "item": {**item, "status": "completed", "result": {}}}))
     assert end == cli.ToolEnd("item_2")
     # another server's tool is not gated in tools.serve, so it must go through

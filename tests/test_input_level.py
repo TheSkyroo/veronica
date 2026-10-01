@@ -1,77 +1,78 @@
-"""Input-volume floor guard: hermetic (fake osascript runner, fake get/set,
-fake clock). Never touches osascript or CoreAudio."""
+"""Input-volume floor guard: hermetic (fake IAudioEndpointVolume, fake
+get/set, fake clock). Never touches COM or Core Audio."""
 import asyncio
 import logging
-import subprocess
 
 import pytest
 
 from veronica.audio import input_level
-from veronica.audio.input_level import InputLevelGuard, get_input_volume, run_periodic, set_input_volume
+from veronica.audio.input_level import (
+    InputLevelGuard,
+    get_input_volume,
+    run_periodic,
+    set_input_volume,
+)
 
 
-class _Proc:
-    def __init__(self, stdout="", returncode=0):
-        self.stdout, self.returncode = stdout, returncode
+class FakeEndpointVolume:
+    def __init__(self, scalar=0.33, fail=False):
+        self.scalar, self.fail = scalar, fail
+        self.sets = []
+
+    def GetMasterVolumeLevelScalar(self):
+        if self.fail:
+            raise OSError("AUDCLNT_E_DEVICE_INVALIDATED")
+        return self.scalar
+
+    def SetMasterVolumeLevelScalar(self, value, context):
+        if self.fail:
+            raise OSError("AUDCLNT_E_DEVICE_INVALIDATED")
+        self.sets.append((value, context))
+        self.scalar = value
 
 
 # -- get_input_volume ---------------------------------------------------------
 
-def test_get_input_volume_parses_osascript():
-    calls = []
-
-    def run(cmd, **kw):
-        calls.append((cmd, kw))
-        return _Proc("33\n")
-
-    assert get_input_volume(run=run) == 33
-    (cmd, kw), = calls
-    assert cmd == ["osascript", "-e", "input volume of (get volume settings)"]
-    assert kw["timeout"] == 5 and kw["capture_output"] and kw["text"]
+@pytest.mark.parametrize("scalar, expected", [(0.33, 33), (0.849999, 85), (0.0, 0), (1.0, 100), (1.2, 100)])
+def test_get_input_volume_maps_scalar_to_percent(scalar, expected):
+    assert get_input_volume(endpoint=lambda: FakeEndpointVolume(scalar)) == expected
 
 
-@pytest.mark.parametrize("out", ["", "missing value", "abc", "3.5"])
-def test_get_input_volume_none_on_non_int(out):
-    assert get_input_volume(run=lambda *a, **k: _Proc(out)) is None
+def test_get_input_volume_none_on_com_error():
+    assert get_input_volume(endpoint=lambda: FakeEndpointVolume(fail=True)) is None
+
+    def boom():
+        raise OSError("no capture endpoint")
+    assert get_input_volume(endpoint=boom) is None
 
 
-def test_get_input_volume_none_on_nonzero_exit():
-    assert get_input_volume(run=lambda *a, **k: _Proc("33", returncode=1)) is None
-
-
-def test_get_input_volume_none_on_exception():
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired("osascript", 5)
-    assert get_input_volume(run=boom) is None
+def test_get_input_volume_none_without_pycaw():
+    assert get_input_volume() is None                     # real endpoint: no COM on this platform
 
 
 # -- set_input_volume ---------------------------------------------------------
 
-@pytest.mark.parametrize("level, expected", [(85, 85), (-3, 0), (140, 100)])
+@pytest.mark.parametrize("level, expected", [(85, 0.85), (-3, 0.0), (140, 1.0)])
 def test_set_input_volume_clamps(level, expected):
-    calls = []
-
-    def run(cmd, **kw):
-        calls.append(cmd)
-        return _Proc()
-
-    assert set_input_volume(level, run=run) is True
-    assert calls == [["osascript", "-e", f"set volume input volume {expected}"]]
+    ep = FakeEndpointVolume()
+    assert set_input_volume(level, endpoint=lambda: ep) is True
+    assert ep.sets == [(pytest.approx(expected), None)]
 
 
 def test_set_input_volume_false_on_failure():
-    assert set_input_volume(85, run=lambda *a, **k: _Proc(returncode=1)) is False
+    assert set_input_volume(85, endpoint=lambda: FakeEndpointVolume(fail=True)) is False
 
-    def boom(*a, **k):
-        raise OSError("no osascript")
-    assert set_input_volume(85, run=boom) is False
+    def boom():
+        raise OSError("no capture endpoint")
+    assert set_input_volume(85, endpoint=boom) is False
+    assert set_input_volume(85) is False                  # no COM on this platform
 
 
 # -- InputLevelGuard ----------------------------------------------------------
 
 class Fake:
     """Fake get/set/clock/name/on_corrected bundle for the guard."""
-    def __init__(self, vol=33, name="AirPods", set_ok=True):
+    def __init__(self, vol=33, name="Headset", set_ok=True):
         self.vol, self.name, self.set_ok = vol, name, set_ok
         self.now = 1000.0
         self.gets, self.sets, self.corrected = 0, [], []
@@ -100,8 +101,8 @@ def test_guard_raises_below_floor_and_reports(caplog):
     with caplog.at_level(logging.INFO, logger="veronica.audio"):
         assert g.check() == 85
     assert f.sets == [85]
-    assert f.corrected == [(33, 85, "AirPods")]
-    assert "input volume 33 → 85 (AirPods)" in caplog.text
+    assert f.corrected == [(33, 85, "Headset")]
+    assert "input volume 33 → 85 (Headset)" in caplog.text
 
 
 def test_guard_unknown_device_name_in_log(caplog):
@@ -186,13 +187,13 @@ def test_guard_set_failure_no_report(caplog):
     with caplog.at_level(logging.INFO, logger="veronica.audio"):
         assert g.check() is None
     assert f.corrected == []
-    assert "input volume 33 → 85 (AirPods)" not in caplog.text
+    assert "input volume 33 → 85 (Headset)" not in caplog.text
     assert "could not raise input volume 33 → 85" in caplog.text
 
 
 def test_guard_survives_bad_device_name_and_callback(caplog):
     def bad_name():
-        raise RuntimeError("no coreaudio")
+        raise RuntimeError("no core audio")
 
     def bad_cb(o, n, d):
         raise RuntimeError("hud gone")

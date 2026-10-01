@@ -51,10 +51,10 @@ _SOCIAL: list[tuple[set[str], set[str], list[str], list[str]]] = [
      {"kaise ho", "kaisi ho", "kya haal hai", "kya haal hain"},
      ["I'm doing well, thanks. How can I help?"], ["मैं ठीक हूँ। आप बताइए, क्या करना है?"]),
     ({"who are you", "whats your name", "what is your name"}, {"tum kaun ho", "aap kaun ho", "tumhara naam kya hai"},
-     ["I'm Veronica, your voice assistant on this Mac."], ["मैं वेरोनिका हूँ, इस Mac पर आपकी voice assistant।"]),
+     ["I'm Veronica, your voice assistant on this PC."], ["मैं वेरोनिका हूँ, इस PC पर आपकी voice assistant।"]),
     ({"what can you do", "what do you do", "help", "what can i ask you"}, {"tum kya kar sakti ho", "kya kar sakti ho"},
-     ["I can answer questions, control this Mac, read your calendar and mail, play music, take notes, control your browser, and remember things for you."],
-     ["मैं सवाल-जवाब, Mac control, calendar और mail, music, notes, browser और याद रखने में मदद कर सकती हूँ।"]),
+     ["I can answer questions, control this PC, read your calendar and mail, play music, take notes, control your browser, and remember things for you."],
+     ["मैं सवाल-जवाब, PC control, calendar और mail, music, notes, browser और याद रखने में मदद कर सकती हूँ।"]),
 ]
 _GREETINGS = {"good morning": "Good morning, Manik.", "good afternoon": "Good afternoon, Manik.", "good evening": "Good evening, Manik."}
 _GOOD_NIGHT = {"good night": "Good night.", "shubh ratri": "शुभ रात्रि।"}

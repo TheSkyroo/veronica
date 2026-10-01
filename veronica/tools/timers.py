@@ -1,5 +1,5 @@
-"""In-process timers: fire an announcement (and a notification banner) after
-a delay, with no persistence — timers are lost on restart, by design."""
+"""In-process timers: fire an announcement (and a Windows toast notification)
+after a delay, with no persistence — timers are lost on restart, by design."""
 import asyncio
 import contextlib
 import logging
@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from veronica.tools import mac
+from veronica.tools import system
 
 log = logging.getLogger("veronica.timers")
 
@@ -68,4 +68,4 @@ class TimerService:
         except Exception:
             log.exception("timer on_fire failed")
         with contextlib.suppress(Exception):
-            await mac.notify.handler({"title": "Timer", "message": text})
+            await system.notify.handler({"title": "Timer", "message": text})

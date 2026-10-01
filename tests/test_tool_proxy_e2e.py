@@ -1,10 +1,10 @@
 """The external-brain tool path end to end: a `tools.serve` proxy talking
 to a real GateServer whose runner is the real registry. Nothing here fakes
 the wire, so it is the test that the tool really runs in the app process
-— which is what macOS's TCC grants, and the timer service, depend on."""
+— which is what the screen, clipboard and Outlook access, and the timer
+service, depend on."""
 import asyncio
 import base64
-from pathlib import Path
 
 import pytest
 from claude_agent_sdk import create_sdk_mcp_server
@@ -13,17 +13,15 @@ from mcp.types import CallToolRequestParams
 from veronica.brain.gate import GateServer, ToolGate
 from veronica.config import Settings
 from veronica.tools import (
-    browser, computer, mac, memory_tools, music, pim, registry, screen, serve,
+    browser, computer, memory_tools, music, pim, registry, screen, serve, system,
 )
 from veronica.tools.timers import TimerService
 
 
 @pytest.fixture
-def sock(tmp_path, monkeypatch):
-    """AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path on macOS
-    is longer, so bind relative to it."""
-    monkeypatch.chdir(tmp_path)
-    return Path("gate.sock")
+def sock(tmp_path):
+    """The gate's endpoint file (name kept from the Unix-socket days)."""
+    return tmp_path / "run" / "gate.json"
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +29,7 @@ def app_side(monkeypatch):
     """Give the registry its own server objects. In the app the proxy lives
     in another process; in one process it and the registry would share the
     module-level instances, and the proxy would end up calling itself."""
-    mods = {"mac": mac, "pim": pim, "memory": memory_tools, "screen": screen,
+    mods = {"system": system, "pim": pim, "memory": memory_tools, "screen": screen,
             "music": music, "browser": browser, "computer": computer}
     monkeypatch.setattr(registry, "SERVERS",
                         {n: create_sdk_mcp_server(n, tools=m.TOOLS) for n, m in mods.items()})
@@ -41,15 +39,15 @@ def app_side(monkeypatch):
 def _restore_handlers():
     # gated_server wraps the module-level servers in place; put them back.
     saved = [(serve.server_for(n), serve.server_for(n).get_request_handler("tools/call"))
-             for n in ("mac", "pim", "screen")]
+             for n in ("system", "pim", "screen")]
     yield
     for inst, entry in saved:
         inst.add_request_handler("tools/call", entry.params_type, entry.handler)
 
 
 async def proxy_call(sock, monkeypatch, server, tool, args, *, answers=(True,)):
-    """One `tools/call` through the real proxy -> socket -> gate -> registry."""
-    monkeypatch.setenv("VERONICA_GATE_SOCK", str(sock))
+    """One `tools/call` through the real proxy -> loopback -> gate -> registry."""
+    monkeypatch.setenv("VERONICA_GATE", str(sock))
     monkeypatch.setenv("VERONICA_BRAIN", "codex")
     pending = list(answers)
 
@@ -79,7 +77,7 @@ async def test_a_timer_set_through_an_external_brain_fires(sock, monkeypatch):
     async def no_banner(args):
         return {"content": []}
 
-    monkeypatch.setattr(mac.notify, "handler", no_banner)      # no real notification in a test
+    monkeypatch.setattr(system.notify, "handler", no_banner)      # no real notification in a test
     monkeypatch.setattr(pim, "service", TimerService(on_fire=announce))
     res = await proxy_call(sock, monkeypatch, "pim", "timer_set", {"minutes": 0.0001, "label": "tea"})
     assert not res.is_error and res.content[0].text.startswith("Timer set for")
@@ -90,7 +88,7 @@ async def test_a_timer_set_through_an_external_brain_fires(sock, monkeypatch):
     assert said == ["Timer tea done"]
 
 
-async def test_a_screenshot_comes_back_as_an_image_over_the_socket(sock, monkeypatch):
+async def test_a_screenshot_comes_back_as_an_image_over_the_gate(sock, monkeypatch):
     png = b"\x89PNG not really"
     monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": (png, None, "image/png"))
     monkeypatch.setattr(screen, "load_geometry", lambda: None)
@@ -102,13 +100,13 @@ async def test_a_screenshot_comes_back_as_an_image_over_the_socket(sock, monkeyp
 
 async def test_a_denied_call_never_reaches_the_tool(sock, monkeypatch):
     ran = []
-    monkeypatch.setattr(mac, "run", lambda *a, **k: ran.append(a))
-    res = await proxy_call(sock, monkeypatch, "mac", "clipboard_write", {"text": "hi"}, answers=(False,))
+    monkeypatch.setattr(system, "run", lambda *a, **k: ran.append(a))
+    res = await proxy_call(sock, monkeypatch, "system", "clipboard_write", {"text": "hi"}, answers=(False,))
     assert res.is_error and "Not allowed" in res.content[0].text and ran == []
 
 
 async def test_the_proxy_fails_closed_when_the_app_is_gone(sock, monkeypatch):
-    monkeypatch.setenv("VERONICA_GATE_SOCK", str(sock))       # never bound
+    monkeypatch.setenv("VERONICA_GATE", str(sock))       # never written
     ran = []
     monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": ran.append(region) or "no")
     inst = serve.gated_server("screen")

@@ -1,4 +1,4 @@
-html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"SF Pro Text","Noto Sans Devanagari","Devanagari Sangam MN",sans-serif;color:#e8ecf1;overflow:hidden;-webkit-user-select:none;cursor:default}
+html,body{margin:0;background:transparent;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,"Nirmala UI","Noto Sans Devanagari",sans-serif;color:#e8ecf1;overflow:hidden;-webkit-user-select:none;cursor:default}
 #card{box-sizing:border-box;width:540px;height:300px;padding:16px;display:flex;gap:16px;align-items:center;
   background:rgba(8,10,16,.72);border:1px solid rgba(255,255,255,.10);border-radius:18px;backdrop-filter:blur(18px);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 20px 40px rgba(0,0,0,.35)}
@@ -53,7 +53,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
 #action{flex:0 0 auto;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
   border-radius:12px;padding:8px 10px;overflow:hidden}
 
-#tool.head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px}
+#tool.head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:11px}
 #tool .badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
 .badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}.badge.redirected{color:#ffb454}
 /* pre-approved by the request's own wording ("just do it"): gold, outlined — it was never asked */
@@ -86,7 +86,7 @@ html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"S
    palette as the tool card — amber for what is running, green for what is
    done, red for a decline — plus a muted grey for what hasn't started. ---- */
 #plan{margin-top:6px;display:flex;flex-direction:column;gap:1px;
-  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35}
+  font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:10.5px;line-height:1.35}
 #plan .more{opacity:.35;letter-spacing:.03em;padding-left:14px}
 #plan .step{display:flex;align-items:baseline;gap:5px;min-width:0}
 #plan .step .mark{flex:0 0 auto;width:9px;text-align:center}
@@ -123,7 +123,7 @@ body.mini #caption.hidden{display:none}
 /* the plan's running step, mini mode's one line of it ("2/4 Open Safari") */
 #caption .step{display:none}
 body.mini #caption .step{display:inline-block;flex:0 1 auto;min-width:0;max-width:150px;
-  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;color:#ffb454;opacity:.75;
+  font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:10.5px;color:#ffb454;opacity:.75;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 #caption[data-state="warming"] .dot{background:#a0a4ad}
@@ -139,3 +139,6 @@ body.icon-mode #card{width:100vw;height:100vh;padding:0;margin:0;display:flex;al
   background:transparent;border:none;border-radius:0;box-shadow:none;backdrop-filter:none}
 body.icon-mode #text,body.icon-mode #caption{display:none !important}
 body.icon-mode #orb{width:100vw;height:100vh;flex:0 0 auto}
+/* The window is hidden FADE_S (hud/__init__.py) after this starts. */
+body{transition:opacity .15s ease}
+body.faded{opacity:0}

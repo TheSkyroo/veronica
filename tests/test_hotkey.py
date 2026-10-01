@@ -1,242 +1,245 @@
 import asyncio
+import ctypes
+import threading
 
 import pytest
 
 from veronica.audio import hotkey
-from veronica.audio.hotkey import HotkeyMonitor
+from veronica.audio.hotkey import KBDLLHOOKSTRUCT, HotkeyMonitor
 
 
-class FakeEvent:
-    """A flags-changed event for `keycode`. `alt_down` is the *right*
-    Option key's own device bit (NX_DEVICERALTKEYMASK); `left_alt_down`
-    is the left Option key's. Either sets the generic Alternate bit, as
-    the real CGEventFlags does."""
-    def __init__(self, keycode: int, alt_down: bool, left_alt_down: bool = False):
-        self.keycode = keycode
-        self.alt_down = alt_down
-        self.left_alt_down = left_alt_down
+class FakeWin32:
+    """Minimal fake of the user32/kernel32 surface HotkeyMonitor touches.
+    GetMessageW blocks until PostThreadMessageW(WM_QUIT) arrives."""
 
-
-class FakeQuartz:
-    """Minimal fake of the Quartz surface HotkeyMonitor touches."""
-    kCGSessionEventTap = 0
-    kCGHeadInsertEventTap = 0
-    kCGEventTapOptionListenOnly = 0
-    kCGEventFlagsChanged = 12
-    kCGKeyboardEventKeycode = 9
-    kCGEventFlagMaskAlternate = 0x00080000
-    kCFRunLoopCommonModes = "common"
-
-    tap_result = object()
-    stopped = []
-    run_calls = 0
-    enable_calls = []
-
-    @classmethod
-    def reset(cls, tap_result=None):
-        cls.tap_result = tap_result if tap_result is not None else object()
-        cls.stopped = []
-        cls.run_calls = 0
-        cls.enable_calls = []
+    def __init__(self, hook_result=0xBEEF):
+        self.hook_result = hook_result
+        self.installed = []
+        self.unhooked = []
+        self.posted = []
+        self.next_calls = []
+        self.get_calls = 0
+        self._quit = threading.Event()
 
     @staticmethod
-    def CGEventMaskBit(bit):
-        return 1 << bit
+    def HOOKPROC(fn):
+        return fn
 
-    @classmethod
-    def CGEventTapCreate(cls, *a, **k):
-        return cls.tap_result
+    def SetWindowsHookExW(self, id_hook, proc, hmod, thread_id):
+        self.installed.append((id_hook, proc, hmod, thread_id))
+        return self.hook_result
 
-    @staticmethod
-    def CFMachPortCreateRunLoopSource(a, tap, b):
-        return object()
+    def CallNextHookEx(self, hook, n_code, w_param, l_param):
+        self.next_calls.append((n_code, w_param))
+        return 0
 
-    @staticmethod
-    def CFRunLoopGetCurrent():
-        return "the-run-loop"
+    def UnhookWindowsHookEx(self, hook):
+        self.unhooked.append(hook)
+        return 1
 
-    @staticmethod
-    def CFRunLoopAddSource(*a):
-        pass
+    def GetMessageW(self, msg_ref, hwnd, lo, hi):
+        self.get_calls += 1
+        self._quit.wait(5)
+        return 0
 
-    @classmethod
-    def CGEventTapEnable(cls, tap, enabled):
-        cls.enable_calls.append((tap, enabled))
-
-    @classmethod
-    def CFRunLoopRun(cls):
-        cls.run_calls += 1
-
-    @classmethod
-    def CFRunLoopStop(cls, rl):
-        cls.stopped.append(rl)
+    def PostThreadMessageW(self, tid, msg, w, l):
+        self.posted.append((tid, msg))
+        if msg == hotkey.WM_QUIT:
+            self._quit.set()
+        return 1
 
     @staticmethod
-    def CGEventGetIntegerValueField(event, field):
-        return event.keycode
+    def GetModuleHandleW(name):
+        return 0x400000
 
     @staticmethod
-    def CGEventGetFlags(event):
-        flags = 0
-        if event.alt_down:
-            flags |= FakeQuartz.kCGEventFlagMaskAlternate | hotkey.DEVICE_FLAG_MASKS[61]
-        if event.left_alt_down:
-            flags |= FakeQuartz.kCGEventFlagMaskAlternate | hotkey.DEVICE_FLAG_MASKS[58]
-        return flags
+    def GetCurrentThreadId():
+        return 4242
 
 
 @pytest.fixture
-def fake_quartz(monkeypatch):
-    FakeQuartz.reset()
-    monkeypatch.setattr(HotkeyMonitor, "_import_quartz", staticmethod(lambda: FakeQuartz))
-    return FakeQuartz
+def fake_win32(monkeypatch):
+    fake = FakeWin32()
+    monkeypatch.setattr(HotkeyMonitor, "_import_win32", staticmethod(lambda: fake))
+    return fake
 
 
-def test_setup_tap_success_sets_available_true(fake_quartz):
+def key(mon, message, vk, flags=0, n_code=hotkey.HC_ACTION):
+    """Drive the hook proc with a real KBDLLHOOKSTRUCT, as Windows would."""
+    kb = KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=flags, time=0, dwExtraInfo=0)
+    return mon._hook_proc(n_code, message, ctypes.addressof(kb))
+
+
+def down(mon, vk=hotkey.VK_RCONTROL, flags=0):
+    return key(mon, hotkey.WM_KEYDOWN, vk, flags)
+
+
+def up(mon, vk=hotkey.VK_RCONTROL, flags=0):
+    return key(mon, hotkey.WM_KEYUP, vk, flags)
+
+
+def test_default_key_is_right_ctrl():
+    assert HotkeyMonitor(lambda: None, lambda: None)._keycode == hotkey.VK_RCONTROL == 0xA3
+
+
+@pytest.mark.parametrize("value, vk", [
+    (0xA5, 0xA5), ("right_alt", hotkey.VK_RMENU), ("Right_Ctrl", hotkey.VK_RCONTROL),
+    (" f13 ", hotkey.VK_F13), ("fn", hotkey.VK_RCONTROL), ("bogus", hotkey.VK_RCONTROL),
+])
+def test_resolve_keycode(value, vk):
+    assert hotkey.resolve_keycode(value) == vk
+
+
+def test_install_hook_success_sets_available_true(fake_win32):
     mon = HotkeyMonitor(lambda: None, lambda: None)
-    assert mon._setup_tap() is True
+    assert mon._install_hook() is True
     assert mon.available is True
+    (id_hook, proc, hmod, tid), = fake_win32.installed
+    assert id_hook == hotkey.WH_KEYBOARD_LL and hmod == 0x400000 and tid == 0
+    assert mon._proc is proc                       # kept alive for the hook's lifetime
 
 
-def test_setup_tap_none_result_sets_available_false(fake_quartz):
-    fake_quartz.tap_result = None
+def test_install_hook_null_handle_sets_available_false(fake_win32):
+    fake_win32.hook_result = None
     mon = HotkeyMonitor(lambda: None, lambda: None)
-    assert mon._setup_tap() is False
+    assert mon._install_hook() is False
     assert mon.available is False
 
 
-def test_setup_tap_no_quartz_module_sets_available_false(monkeypatch):
+def test_install_hook_no_user32_sets_available_false(monkeypatch):
     def boom():
-        raise ImportError("no Quartz")
+        raise OSError("no user32")
 
-    monkeypatch.setattr(HotkeyMonitor, "_import_quartz", staticmethod(boom))
+    monkeypatch.setattr(HotkeyMonitor, "_import_win32", staticmethod(boom))
     mon = HotkeyMonitor(lambda: None, lambda: None)
-    assert mon._setup_tap() is False
+    assert mon._install_hook() is False
     assert mon.available is False
 
 
-async def test_callback_dispatches_press_and_release(fake_quartz):
-    events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
-    mon._loop = asyncio.get_running_loop()
-    assert mon._setup_tap() is True
+def test_real_win32_unavailable_off_windows():
+    # ctypes.WinDLL doesn't exist here: the real import fails, cleanly.
+    mon = HotkeyMonitor(lambda: None, lambda: None)
+    assert mon._install_hook() is False and mon.available is False
 
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True), None)
+
+async def test_hook_dispatches_press_and_release_and_chains(fake_win32):
+    events = []
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon._loop = asyncio.get_running_loop()
+    assert mon._install_hook() is True
+
+    down(mon)
     await asyncio.sleep(0)
     assert events == ["press"]
+    up(mon)
+    await asyncio.sleep(0)
+    assert events == ["press", "release"]
+    # every event is passed on to the next hook
+    assert fake_win32.next_calls == [(0, hotkey.WM_KEYDOWN), (0, hotkey.WM_KEYUP)]
 
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, False), None)
+
+async def test_syskey_messages_count_too(fake_win32):
+    """Alt combos arrive as WM_SYSKEYDOWN/UP."""
+    events = []
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode="right_alt")
+    mon._loop = asyncio.get_running_loop()
+    mon._install_hook()
+    key(mon, hotkey.WM_SYSKEYDOWN, hotkey.VK_RMENU)
+    key(mon, hotkey.WM_SYSKEYUP, hotkey.VK_RMENU)
     await asyncio.sleep(0)
     assert events == ["press", "release"]
 
 
-async def test_callback_ignores_other_keycodes(fake_quartz):
+async def test_hook_ignores_other_keys(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
     mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
-
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(60, True), None)
+    mon._install_hook()
+    down(mon, vk=hotkey.VK_LCONTROL)
+    up(mon, vk=hotkey.VK_LCONTROL)
     await asyncio.sleep(0)
     assert events == []
 
 
-async def test_callback_ignores_repeat_down_events(fake_quartz):
+async def test_left_ctrl_held_does_not_mask_right_ctrl_release(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
     mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
+    mon._install_hook()
+    down(mon, vk=hotkey.VK_LCONTROL)
+    down(mon)
+    up(mon)
+    await asyncio.sleep(0)
+    assert events == ["press", "release"]
 
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True), None)
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True), None)
+
+async def test_hook_ignores_autorepeat_down_events(fake_win32):
+    events = []
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon._loop = asyncio.get_running_loop()
+    mon._install_hook()
+    down(mon)
+    down(mon)
+    down(mon)
     await asyncio.sleep(0)
     assert events == ["press"]
 
 
-async def test_callback_ignores_other_event_types(fake_quartz):
+async def test_hook_ignores_injected_events(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
     mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
-
-    mon._callback(None, 99, FakeEvent(61, True), None)
+    mon._install_hook()
+    down(mon, flags=hotkey.LLKHF_INJECTED)
     await asyncio.sleep(0)
     assert events == []
 
 
-async def test_start_and_stop_real_thread(fake_quartz):
+async def test_hook_ignores_non_action_codes_but_still_chains(fake_win32):
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon._loop = asyncio.get_running_loop()
+    mon._install_hook()
+    key(mon, hotkey.WM_KEYDOWN, hotkey.VK_RCONTROL, n_code=-1)
+    await asyncio.sleep(0)
+    assert events == []
+    assert fake_win32.next_calls == [(-1, hotkey.WM_KEYDOWN)]
+
+
+def test_hook_survives_callback_errors(fake_win32):
+    def bad():
+        raise RuntimeError("orchestrator gone")
+
+    mon = HotkeyMonitor(bad, lambda: None)
+    mon._install_hook()
+    assert down(mon) == 0                            # no exception escapes into Windows
+    assert fake_win32.next_calls == [(0, hotkey.WM_KEYDOWN)]
+
+
+async def test_start_and_stop_real_thread(fake_win32):
+    mon = HotkeyMonitor(lambda: None, lambda: None)
     mon.start()
     assert mon.available is True
-    assert fake_quartz.run_calls == 1
+    assert mon._thread_id == 4242
     mon.stop()
-    assert fake_quartz.stopped == ["the-run-loop"]
+    assert not mon._thread.is_alive()
+    assert fake_win32.posted == [(4242, hotkey.WM_QUIT)]
+    assert fake_win32.unhooked == [0xBEEF]
+    assert fake_win32.get_calls == 1
 
 
 async def test_start_unavailable_does_not_hang(monkeypatch):
     def boom():
-        raise ImportError("no Quartz")
+        raise OSError("no user32")
 
-    monkeypatch.setattr(HotkeyMonitor, "_import_quartz", staticmethod(boom))
+    monkeypatch.setattr(HotkeyMonitor, "_import_win32", staticmethod(boom))
     mon = HotkeyMonitor(lambda: None, lambda: None)
     mon.start()
     assert mon.available is False
-    mon.stop()  # must not raise even though the tap was never set up
+    mon.stop()  # must not raise even though the hook was never installed
 
 
-async def test_left_option_held_does_not_mask_right_option_release(fake_quartz):
-    """With left-Option held, the generic Alternate flag stays set when
-    right-Option is released; the monitor must read right-Option's own
-    device-specific bit (NX_DEVICERALTKEYMASK) so the release is seen."""
-    events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
-    mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
-
-    # left option goes down first (keycode 58): not our key, ignored
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(58, False, left_alt_down=True), None)
-    # right option down while left is still held
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True, left_alt_down=True), None)
-    # right option up, left still held: Alternate still set, device bit clear
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, False, left_alt_down=True), None)
-    await asyncio.sleep(0)
-    assert events == ["press", "release"]
-
-
-async def test_left_option_events_never_toggle_state(fake_quartz):
-    events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
-    mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(58, False, left_alt_down=True), None)
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(58, False, left_alt_down=False), None)
-    await asyncio.sleep(0)
-    assert events == []
-
-
-def test_unknown_keycode_falls_back_to_generic_alternate_mask(fake_quartz):
-    events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=99)
-    mon._setup_tap()
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(99, False, left_alt_down=True), None)
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(99, False, left_alt_down=False), None)
-    assert events == ["press", "release"]
-
-
-def test_tap_disabled_by_os_is_reenabled_and_logged_once(fake_quartz, caplog):
-    mon = HotkeyMonitor(lambda: None, lambda: None)
-    mon._setup_tap()
-    assert fake_quartz.enable_calls == [(fake_quartz.tap_result, True)]  # initial enable
-    with caplog.at_level("WARNING", logger="veronica.audio.hotkey"):
-        mon._callback(None, hotkey.TAP_DISABLED_BY_TIMEOUT, None, None)
-        mon._callback(None, hotkey.TAP_DISABLED_BY_USER_INPUT, None, None)
-    assert fake_quartz.enable_calls == [(fake_quartz.tap_result, True)] * 3
-    assert mon.reenable_count == 2
-    assert sum("re-enabling" in r.message for r in caplog.records) == 1
-
-
-def test_start_without_running_loop_calls_back_directly(fake_quartz):
+def test_start_without_running_loop_calls_back_directly(fake_win32):
     events = []
     mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
     mon.start()  # no asyncio loop running in this (sync) test: must not raise
@@ -246,18 +249,13 @@ def test_start_without_running_loop_calls_back_directly(fake_quartz):
     mon.stop()
 
 
-async def test_reenable_tap_releases_a_held_key(fake_quartz):
-    """A key-up can be missed while the tap is disabled; re-enabling must
-    not leave the monitor (and push-to-talk) believing the key is down."""
+def test_stop_while_held_releases_the_key(fake_win32):
+    """The key-up can never arrive once the hook is gone: don't leave
+    push-to-talk believing the key is still down."""
     events = []
-    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"), keycode=61)
-    mon._loop = asyncio.get_running_loop()
-    mon._setup_tap()
-    mon._callback(None, fake_quartz.kCGEventFlagsChanged, FakeEvent(61, True), None)
-    mon._callback(None, hotkey.TAP_DISABLED_BY_TIMEOUT, None, None)
-    await asyncio.sleep(0)
+    mon = HotkeyMonitor(lambda: events.append("press"), lambda: events.append("release"))
+    mon.start()
+    down(mon)
+    mon.stop()
     assert events == ["press", "release"]
     assert mon._pressed is False
-    mon._callback(None, hotkey.TAP_DISABLED_BY_USER_INPUT, None, None)   # nothing held: no extra release
-    await asyncio.sleep(0)
-    assert events == ["press", "release"]

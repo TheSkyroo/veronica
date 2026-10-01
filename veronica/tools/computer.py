@@ -3,21 +3,25 @@ move/click/drag/scroll the mouse, type, press keys, and find text on
 screen via OCR — exposed as the in-process `computer` MCP server.
 
 Coordinates default to **pixels of latest.png** (what Claude reads off
-the screenshot); `space="screen"` accepts screen points instead. The
+the screenshot); `space="screen"` accepts physical virtual-screen pixels
+instead (negative on a monitor left of / above the primary). The
 geometry sidecar (`screen.load_geometry`) maps one to the other, and
 must be fresh (`GEOMETRY_MAX_AGE_S`) for anything positional — a stale
 view is not a safe basis for clicking. `computer_type`/`computer_key`
 need no geometry.
 
 Safety, in the tool (in addition to the confirm gate in the brain):
-Accessibility must be granted (the first call asks macOS to prompt),
-password fields are never typed into, and app-quit/lock combos are
-refused by `computer_events.key`. While a system permission dialog is
-frontmost (`computer_events.is_system_dialog`) this is the last line:
-blind clicks, drags, typing and the accept keys are refused outright,
-and `computer_click_text` may only press a label on `DIALOG_SAFE_LABELS`
-(Don't Allow / Cancel / Deny / ...) — never Allow, OK or an OCR misread
-of them.
+input to an elevated (administrator) window is refused with an honest
+message, since Windows would silently drop it
+(`computer_events.input_blocked`); password fields are never typed into,
+and app-close/lock/security-screen combos (alt+f4, win+l,
+ctrl+alt+delete, ...) are refused by `computer_events.key`. While a
+Windows security prompt is in front (`computer_events.is_system_dialog`:
+UAC, credential prompts, SmartScreen, Windows Security, Settings) this
+is the last line: blind clicks, drags, typing and the accept keys are
+refused outright, and `computer_click_text` may only press a label on
+`DIALOG_SAFE_LABELS` (Cancel / No / Don't run / ...) — never Allow, Yes,
+Run anyway or an OCR misread of them.
 
 Every action ends with a short settle, then reports the frontmost app so
 the brain can tell whether focus moved (it should still screenshot to
@@ -44,15 +48,16 @@ log = logging.getLogger("veronica.tools.computer")
 
 STALE_HINT = "Take a screenshot first — I need a fresh view of the screen to know where things are."
 SECURE_HINT = "That's a password field — I won't type into it."
-DIALOG_HINT = "I won't click through a system permission dialog — please do that one yourself."
+DIALOG_HINT = "I won't click through a Windows security prompt — please do that one yourself."
 # The only button labels computer_click_text will press while a system
 # dialog is frontmost (fuzzy-matched so an OCR near-miss of "Cancel" still
 # works, but "AIlow"/"0K" never do).
 DIALOG_SAFE_LABELS = frozenset({
     "don't allow", "dont allow", "deny", "cancel", "not now", "quit", "close", "later", "no",
+    "don't run", "dont run", "block",
 })
 DIALOG_SAFE_RATIO = 0.8
-DANGEROUS_HINT = "I won't press that — it would quit or lock the Mac."
+DANGEROUS_HINT = "I won't press that — it would close the app, lock the PC or open its security screen."
 FIND_MAX = 10
 SETTLE_S = 0.15          # let the app react before reporting the frontmost window
 SPACES = ("image", "screen")
@@ -60,13 +65,6 @@ SPACES = ("image", "screen")
 # permission prompt, so they're refused while a system dialog is frontmost.
 ACCEPT_KEYS = frozenset({"enter", "return", "space", "spacebar"})
 _sleep = asyncio.sleep   # module attr so tests can stub the settle
-_prompted = False        # Accessibility prompt shown once per process
-
-
-def reset_prompt() -> None:
-    """Allow the Accessibility prompt again (tests)."""
-    global _prompted
-    _prompted = False
 
 
 def _ok(text: str = "ok") -> dict:
@@ -96,14 +94,10 @@ def _guard(fn):
 # --- gates -------------------------------------------------------------------
 
 def _trusted() -> bool:
-    """Accessibility granted? The first refusal per process asks macOS to
-    show the grant prompt; later ones just return the hint (the prompt
-    would otherwise pop up on every attempt)."""
-    global _prompted
-    ok = events.accessibility_trusted(prompt=not _prompted)
-    if not ok:
-        _prompted = True
-    return ok
+    """Can input reach the foreground window? Windows needs no grant for
+    synthetic input, but drops it (silently) when the window belongs to
+    an elevated process and Veronica isn't elevated."""
+    return not events.input_blocked()
 
 
 def _on_system_dialog() -> bool:
@@ -165,17 +159,17 @@ def _num(args: dict, key: str) -> float:
 
 
 def _coords(args: dict, geometry: Geometry, xk: str = "x", yk: str = "y") -> tuple[float, float]:
-    """(x_pt, y_pt) for the `xk`/`yk` args: image pixels mapped through
-    `geometry` by default, or passed through when `space="screen"`. Either
-    way the point must lie on the captured area — nothing outside the last
-    screenshot ever reaches CGEvent."""
+    """(x, y) in screen pixels for the `xk`/`yk` args: image pixels mapped
+    through `geometry` by default, or passed through when
+    `space="screen"`. Either way the point must lie on the captured area —
+    nothing outside the last screenshot ever reaches SendInput."""
     x, y = _num(args, xk), _num(args, yk)
     space = str(args.get("space") or "image").lower()
     if space not in SPACES:
         raise ValueError(f"space must be one of {', '.join(SPACES)}")
     if space == "screen":
-        if not (geometry.origin_x <= x <= geometry.origin_x + geometry.width_pt
-                and geometry.origin_y <= y <= geometry.origin_y + geometry.height_pt):
+        if not (geometry.origin_x <= x <= geometry.origin_x + geometry.screen_w
+                and geometry.origin_y <= y <= geometry.origin_y + geometry.screen_h):
             raise ValueError(_outside(x, y))
         return (x, y)
     if not (0 <= x <= geometry.image_w and 0 <= y <= geometry.image_h):
@@ -211,7 +205,7 @@ def _find_words(geometry: Geometry, query: str) -> list[ocr.Word]:
 @tool(
     "computer_move",
     "Move the mouse pointer to (x, y). Coordinates are pixels of the last "
-    "screenshot by default; space='screen' means screen points. Needs a "
+    "screenshot by default; space='screen' means screen pixels. Needs a "
     "screenshot from the last two minutes.",
     {"x": float, "y": float, "space": str},
 )
@@ -232,7 +226,7 @@ async def computer_move(args: dict) -> dict:
     "Scroll at (x, y) by (dx, dy) pixels in content direction: positive dy "
     "scrolls DOWN (shows content further down the page), negative dy scrolls "
     "up; positive dx scrolls right. Coordinates are pixels of the last "
-    "screenshot by default; space='screen' means screen points.",
+    "screenshot by default; space='screen' means screen pixels.",
     {"x": float, "y": float, "dx": float, "dy": float, "space": str},
 )
 @_guard
@@ -247,9 +241,9 @@ async def computer_scroll(args: dict) -> dict:
     dy = float(args.get("dy") or 0)
     if dx == 0 and dy == 0:
         return _err("dx or dy is required (positive dy scrolls down)")
-    # CGEvent's sign is the opposite of content direction: positive dy
-    # scrolls up, positive dx scrolls left.
-    await _run(events.scroll, x, y, -dx, -dy)
+    # The wheel's sign: positive dy rotates it forward, which scrolls UP
+    # (the opposite of content direction); positive dx tilts right.
+    await _run(events.scroll, x, y, dx, -dy)
     return await _done()
 
 
@@ -265,8 +259,6 @@ async def computer_find(args: dict) -> dict:
     query = str(args.get("text", "")).strip()
     if not query:
         return _err("text is required")
-    if not _trusted():
-        return _err(PERMISSION_HINT)
     geometry = _fresh_geometry()
     if isinstance(geometry, str):
         return _err(geometry)
@@ -277,8 +269,7 @@ async def computer_find(args: dict) -> dict:
     for i, w in enumerate(matches[:FIND_MAX], start=1):
         cx, cy = w.center
         lines.append(
-            f"{i}. '{w.text}' at ({round(cx)}, {round(cy)}) size "
-            f"{round(w.w)}×{round(w.h)} (conf {w.confidence:.2f})"
+            f"{i}. '{w.text}' at ({round(cx)}, {round(cy)}) size {round(w.w)}×{round(w.h)}"
         )
     return _ok("\n".join(lines))
 
@@ -286,9 +277,9 @@ async def computer_find(args: dict) -> dict:
 @tool(
     "computer_click",
     "Click at (x, y): button 'left' (default), 'right' or 'middle'; "
-    "double=true for a double-click. Refused while a system permission "
-    "dialog is frontmost. Coordinates are pixels of the last "
-    "screenshot by default; space='screen' means screen points. Needs a "
+    "double=true for a double-click. Refused while a Windows security "
+    "prompt is in front. Coordinates are pixels of the last "
+    "screenshot by default; space='screen' means screen pixels. Needs a "
     "screenshot from the last two minutes; take another one afterwards to verify.",
     {"x": float, "y": float, "button": str, "double": bool, "space": str},
 )
@@ -341,7 +332,7 @@ async def computer_click_text(args: dict) -> dict:
         return _err(f"index {index} is out of range: {n} match{'es' if n != 1 else ''} for '{query}'")
     match = matches[index]
     # OCR matching is contains/fuzzy: "Allo" or "always" would resolve to
-    # the Allow button, and Vision can misread Allow as "AIlow" — so on a
+    # the Allow button, and OCR can misread Allow as "AIlow" — so on a
     # dialog the label actually being clicked must be on the allowlist.
     if on_dialog and not _dialog_safe(match.text):
         return _err(DIALOG_HINT)
@@ -353,9 +344,9 @@ async def computer_click_text(args: dict) -> dict:
 
 @tool(
     "computer_drag",
-    "Left-drag from (x1, y1) to (x2, y2). Refused while a system permission "
-    "dialog is frontmost. Coordinates are pixels of the last screenshot by "
-    "default; space='screen' means screen points. Needs a screenshot from "
+    "Left-drag from (x1, y1) to (x2, y2). Refused while a Windows security "
+    "prompt is in front. Coordinates are pixels of the last screenshot by "
+    "default; space='screen' means screen pixels. Needs a screenshot from "
     "the last two minutes.",
     {"x1": float, "y1": float, "x2": float, "y2": float, "space": str},
 )
@@ -379,7 +370,7 @@ async def computer_drag(args: dict) -> dict:
     "computer_type",
     "Type text into whatever has keyboard focus (click a field first); "
     "submit=true presses Enter afterwards. Refuses password fields and "
-    "system permission dialogs.",
+    "Windows security prompts.",
     {"text": str, "submit": bool},
 )
 @_guard
@@ -413,8 +404,10 @@ def _accepts_dialog(combo: str) -> bool:
 
 @tool(
     "computer_key",
-    "Press a key or combo, e.g. 'enter', 'esc', 'tab', 'cmd+s', "
-    "'cmd+shift+t', 'ctrl+alt+left'. Quit/lock combos are refused.",
+    "Press a key or combo, e.g. 'enter', 'esc', 'tab', 'ctrl+s', "
+    "'ctrl+shift+t', 'alt+tab', 'win+d', 'f5'. Modifiers: ctrl, alt, shift, "
+    "win ('cmd' means ctrl). Close/lock combos (alt+f4, win+l, "
+    "ctrl+alt+delete, ...) are refused.",
     {"combo": str},
 )
 @_guard

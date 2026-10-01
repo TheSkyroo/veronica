@@ -6,96 +6,136 @@ import pytest
 
 from veronica.audio import devices
 
+# -- default_input_id / default_input_name (MMDevice API, faked) -------------
 
-# -- default_input_id -------------------------------------------------------
+class FakePropVariant:
+    def __init__(self, value):
+        self.value = value
+        self.cleared = False
 
-def test_default_input_id_reads_coreaudio_property():
-    seen = {}
+    def GetValue(self):
+        return self.value
 
-    def fake_get(obj, addr_ref, qual_size, qual, size_ref, data_ref):
-        addr = addr_ref._obj
-        seen["obj"] = obj
-        seen["selector"] = addr.mSelector.to_bytes(4, "big")
-        seen["scope"] = addr.mScope.to_bytes(4, "big")
-        seen["element"] = addr.mElement
-        seen["size"] = size_ref._obj.value
-        data_ref._obj.value = 89
-        return 0
-
-    assert devices.default_input_id(get=fake_get) == 89
-    assert seen == {"obj": 1, "selector": b"dIn ", "scope": b"glob", "element": 0, "size": 4}
+    def clear(self):
+        self.cleared = True
 
 
-def test_default_input_id_none_on_nonzero_status():
-    assert devices.default_input_id(get=lambda *a: -1) is None
+class FakeKey:
+    def __init__(self, fmtid, pid):
+        self.fmtid, self.pid = fmtid, pid
 
 
-def test_default_input_id_none_on_exception():
-    def boom(*a):
-        raise OSError("no coreaudio")
-    assert devices.default_input_id(get=boom) is None
+class FakeStore:
+    def __init__(self, props):
+        self.props = props            # [(fmtid, pid, value)]
+        self.values = []
+
+    def GetCount(self):
+        return len(self.props)
+
+    def GetAt(self, i):
+        fmtid, pid, _ = self.props[i]
+        return FakeKey(fmtid, pid)
+
+    def GetValue(self, key):
+        for fmtid, pid, value in self.props:
+            if (fmtid, pid) == (key.fmtid, key.pid):
+                v = FakePropVariant(value)
+                self.values.append(v)
+                return v
+        raise KeyError(key)
 
 
-def test_default_input_id_none_when_library_missing(monkeypatch):
-    monkeypatch.setattr(devices, "_coreaudio_getter", lambda: None)
+FRIENDLY = "{a45c254e-df1c-4efd-8020-67d146a850e0}"
+
+
+class FakeDevice:
+    def __init__(self, dev_id="{0.0.1.00000000}.{abc}", props=None):
+        self.dev_id = dev_id
+        self.store = FakeStore(props if props is not None else [
+            ("{b3f8fa53-0004-438e-9003-51a46e139bfc}", 6, "Realtek(R) Audio"),   # not the name
+            (FRIENDLY, 2, "Microphone"),                                         # same fmtid, other pid
+            (FRIENDLY, 14, "Microphone (Realtek(R) Audio)"),
+        ])
+        self.store_modes = []
+
+    def GetId(self):
+        return self.dev_id
+
+    def OpenPropertyStore(self, mode):
+        self.store_modes.append(mode)
+        return self.store
+
+
+def test_default_input_id_reads_endpoint_id():
+    assert devices.default_input_id(device=lambda: FakeDevice("{0.0.1.00000000}.{xyz}")) == "{0.0.1.00000000}.{xyz}"
+
+
+def test_default_input_id_none_without_device_or_on_error():
+    assert devices.default_input_id(device=lambda: None) is None
+    assert devices.default_input_id(device=lambda: FakeDevice("")) is None
+
+    def boom():
+        raise OSError("E_NOTFOUND: no capture endpoint")
+    assert devices.default_input_id(device=boom) is None
+
+
+def test_default_input_id_none_when_com_unavailable(monkeypatch):
+    # On Linux pycaw/comtypes are missing: the real getter raises, we get None.
     assert devices.default_input_id() is None
 
 
-# -- default_input_name -----------------------------------------------------
-
-def test_default_input_name_reads_lnam_via_cfstring():
-    seen = {}
-
-    def fake_get(obj, addr_ref, qual_size, qual, size_ref, data_ref):
-        addr = addr_ref._obj
-        seen["obj"] = obj
-        seen["selector"] = addr.mSelector.to_bytes(4, "big")
-        seen["scope"] = addr.mScope.to_bytes(4, "big")
-        seen["element"] = addr.mElement
-        data_ref._obj.value = 0xC0FFEE
-        return 0
-
-    released = []
-
-    def fake_to_str(ref):
-        released.append(ref)
-        return "AirPods Pro" if ref == 0xC0FFEE else None
-
-    assert devices.default_input_name(get=fake_get, device_id=71, to_str=fake_to_str) == "AirPods Pro"
-    assert seen == {"obj": 71, "selector": b"lnam", "scope": b"glob", "element": 0}
-    assert released == [0xC0FFEE]
+def test_default_input_name_reads_friendly_name_key():
+    dev = FakeDevice()
+    assert devices.default_input_name(device=lambda: dev) == "Microphone (Realtek(R) Audio)"
+    assert dev.store_modes == [0]                         # STGM_READ
+    assert [v.cleared for v in dev.store.values] == [True]
 
 
-def test_default_input_name_none_when_no_default_device(monkeypatch):
-    monkeypatch.setattr(devices, "default_input_id", lambda: None)
-    assert devices.default_input_name(get=lambda *a: 0) is None
+def test_default_input_name_none_when_key_missing_or_empty():
+    assert devices.default_input_name(device=lambda: FakeDevice(props=[(FRIENDLY, 2, "x")])) is None
+    assert devices.default_input_name(device=lambda: FakeDevice(props=[(FRIENDLY, 14, "")])) is None
+    assert devices.default_input_name(device=lambda: FakeDevice(props=[(FRIENDLY, 14, None)])) is None
 
 
-def test_default_input_name_none_on_status_error_or_null_ref():
-    assert devices.default_input_name(get=lambda *a: -1, device_id=71, to_str=lambda r: "x") is None
+def test_default_input_name_none_on_error_or_no_device():
+    assert devices.default_input_name(device=lambda: None) is None
 
-    def null_ref(obj, addr_ref, qs, q, size_ref, data_ref):
-        data_ref._obj.value = 0
-        return 0
-    assert devices.default_input_name(get=null_ref, device_id=71, to_str=lambda r: "x") is None
-
-
-def test_default_input_name_none_on_exception():
-    def boom(*a):
-        raise OSError("no coreaudio")
-    assert devices.default_input_name(get=boom, device_id=71) is None
+    def boom():
+        raise OSError("no capture endpoint")
+    assert devices.default_input_name(device=boom) is None
+    assert devices.default_input_name() is None           # no COM on this platform
 
 
-def test_default_input_name_none_when_library_missing(monkeypatch):
-    monkeypatch.setattr(devices, "_coreaudio_getter", lambda: None)
-    assert devices.default_input_name(device_id=71) is None
+def test_com_init_once_per_thread(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    fake = types.SimpleNamespace(CoInitialize=lambda: calls.append(threading.current_thread().name))
+    monkeypatch.setitem(sys.modules, "comtypes", fake)
+
+    def worker():
+        devices.com_init()
+        devices.com_init()
+
+    for name in ("w1", "w2"):
+        t = threading.Thread(target=worker, name=name)
+        t.start()
+        t.join()
+    assert calls == ["w1", "w2"]
 
 
-def test_default_input_name_empty_string_is_none():
-    def ok(obj, addr_ref, qs, q, size_ref, data_ref):
-        data_ref._obj.value = 5
-        return 0
-    assert devices.default_input_name(get=ok, device_id=71, to_str=lambda r: "") is None
+def test_com_init_swallows_errors(monkeypatch):
+    import sys
+    import types
+
+    def boom():
+        raise OSError("RPC_E_CHANGED_MODE")
+    monkeypatch.setitem(sys.modules, "comtypes", types.SimpleNamespace(CoInitialize=boom))
+    t = threading.Thread(target=devices.com_init)
+    t.start()
+    t.join()                                              # did not raise in the thread
 
 
 # -- refresh_portaudio ------------------------------------------------------
@@ -201,7 +241,7 @@ def test_observe_none_after_valid_baseline_keeps_last():
 
 
 def test_observe_none_baseline_then_real_id_is_a_change():
-    # CoreAudio unavailable at first (None baseline): a later real id counts
+    # Core Audio unavailable at first (None baseline): a later real id counts
     assert devices.observe(None) is False
     assert devices.observe(5) is True and devices.pending is True
 
@@ -218,7 +258,7 @@ def test_snapshot_baseline_at_import(monkeypatch):
 
 def test_snapshot_baseline_is_guarded():
     def boom():
-        raise RuntimeError("no CoreAudio")
+        raise RuntimeError("no Core Audio")
 
     devices._snapshot_baseline(boom)          # must not raise
     assert devices._baselined is False        # nothing observed; first poll baselines instead
@@ -356,7 +396,7 @@ def _wait_for(pred, timeout=2.0):
 def test_subscribe_change_runs_off_the_lock_holding_thread(monkeypatch):
     """Real callers (mic.refresh_if_pending, play._ensure_stream) call
     refresh_portaudio() *inside* an outer `with refresh_lock:`. A subscriber
-    shells out (osascript, up to 2x5 s), so it must run on another thread
+    makes COM calls that can hang, so it must run on another thread
     and must not block the refresh, or every other refresh_lock waiter
     would stall behind it."""
     monkeypatch.setattr(devices, "sd", FakeSD())
