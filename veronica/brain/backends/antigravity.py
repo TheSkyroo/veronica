@@ -31,7 +31,6 @@ below are under %USERPROFILE% on Windows):
   `call_mcp_tool`.
 """
 import json
-import sys
 from pathlib import Path
 
 from veronica.brain import hook
@@ -94,7 +93,7 @@ class AntigravityBrain(CliBrain):
         # agy runs the command through a shell; the paths are made safe for
         # either Windows shell (8.3 short forms, else quoted).
         return " ".join([
-            winproc.neutral_arg(sys.executable), self.HOOK_MARKER,
+            winproc.neutral_arg(winproc.console_python()), self.HOOK_MARKER,
             winproc.neutral_command(["--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log),
                                      "--scope-file", str(self.scope_file)]),
         ])
@@ -163,7 +162,7 @@ class AntigravityBrain(CliBrain):
                            "--env", f"VERONICA_GATE={self.s.gate_endpoint}",
                            "--env", "VERONICA_BRAIN=antigravity",
                            "--env", f"VERONICA_HOOK_LOG={self.hook_log}",
-                           f"veronica-{server}", sys.executable, "-m", "veronica.tools.serve", server],
+                           f"veronica-{server}", winproc.console_python(), "-m", "veronica.tools.serve", server],
                           capture_output=True, timeout=30)
         self._mcp_registered = True
 

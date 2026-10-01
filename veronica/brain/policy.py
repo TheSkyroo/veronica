@@ -320,6 +320,7 @@ def _classify(tool_name: str, tool_input: dict) -> Decision:
 # what `Front.bundle_id` holds on Windows (see `is_terminal`).
 TRUST_EXCLUDED_BUNDLES = frozenset({
     "windowsterminal.exe",
+    "wt.exe",
     "openconsole.exe",
     "conhost.exe",
     "cmd.exe",
