@@ -256,7 +256,7 @@ class Orchestrator:
         no with at most a little padding ("yes please", "no thanks", "haan
         karo") is what it says. Anything carrying content beyond the answer
         — a question ("what will that do?"), a qualifier ("yes, but in
-        Chrome"), an instruction ("no, open it in Safari instead"), six or
+        Chrome"), an instruction ("no, open it in Edge instead"), six or
         more leftover words — is "other": not an answer, but the next
         request."""
         words = Orchestrator._answer_words(heard)
@@ -383,7 +383,7 @@ class Orchestrator:
         self._gate_server: GateServer | None = None
         # Self-update (D3): `updater_check()` -> UpdateStatus, `updater_update(
         # status)` -> log text, `relaunch()` restarts the app (and quits this
-        # process). All three are injected by the menu bar app; None (tests,
+        # process). All three are injected by the tray app; None (tests,
         # --text mode) means "update yourself" just says it can't here.
         # `can_relaunch()` says up front whether relaunch() will reopen a
         # bundle (vs. just quit a dev run) so the "restart me" hint can be
@@ -392,7 +392,7 @@ class Orchestrator:
         self.updater_update = updater_update
         self.relaunch = relaunch
         self.can_relaunch = can_relaunch
-        # "What version are you": the menu bar passes a cached describe();
+        # "What version are you": the tray passes a cached describe();
         # the default asks git, so it runs on a thread, off the loop.
         self.version_describe = version_describe
         # Optional veronica.proactive.Proactive: the briefing/nudge ticker.
@@ -400,7 +400,7 @@ class Orchestrator:
         # / "turn on nudges" intents edit. None in --text mode.
         self.proactive = proactive
         # Optional veronica.audio.input_level.InputLevelGuard: raises the
-        # Mac's input volume back to settings.input_volume_floor when a call
+        # PC's input volume back to settings.input_volume_floor when a call
         # app / device switch lowers it. run_forever starts its periodic
         # loop once and re-checks after every PortAudio refresh. None in
         # --text mode.
@@ -517,7 +517,7 @@ class Orchestrator:
             # Unmuting: wake run_forever's wait (if it's parked there) so any
             # announcement that queued up while muted is delivered right
             # away instead of waiting for the next wake word. `muted` can be
-            # set from a different thread (e.g. the menu bar's AppKit
+            # set from a different thread (e.g. the tray's UI
             # thread), so this must go through call_soon_threadsafe rather
             # than setting the asyncio.Event directly.
             loop = self._loop
@@ -567,7 +567,7 @@ class Orchestrator:
         return info.label if info else "Claude"
 
     def backend_changed(self, label: str, standing_in: bool) -> None:
-        """BrainSwitcher.on_backend: the HUD and menu bar show the label."""
+        """BrainSwitcher.on_backend: the HUD and tray show the label."""
         self._emit("hud", {"backend": label})
 
     def _set(self, state: str) -> None:
@@ -1145,7 +1145,7 @@ class Orchestrator:
         brain are you on": the switcher does the switch (or says why it
         can't — "go online" asks it which brain to go back to); a switch first
         interrupts whatever the current brain is doing and drops any
-        screen-control trust. Also run by the menu bar's Brain submenu and
+        screen-control trust. Also run by the tray's Brain submenu and
         the settings page."""
         kind, name = action
         sw = self.switcher
@@ -1231,8 +1231,8 @@ class Orchestrator:
         gate = self.gate
         if gate is not None and self._gate_server is None:
             # run_tool: an external brain's tools.serve child asks the gate
-            # to run our tools here, in the app — the process macOS granted
-            # Screen Recording, Accessibility and Apple Events to.
+            # to run our tools here, in the app process, so every tool runs
+            # with the app's own identity and state.
             self._gate_server = GateServer(gate, self.s.gate_socket, run_tool=registry.call_tool)
             await self._gate_server.start()
 
@@ -1283,7 +1283,7 @@ class Orchestrator:
         """Local fast path for "use a british voice" / "speak faster":
         mutate the running Synthesizer, persist to prefs.json, and confirm
         in the new voice/speed so the user hears the change immediately.
-        Also called by the menu bar's Voice/Speed items."""
+        Also called by the tray's Voice/Speed items."""
         kind, arg = action
         if kind == "voice":
             vid = voices.next_voice(self.tts.voice) if arg == "next" else voices.resolve_voice(arg)
@@ -1791,7 +1791,7 @@ class Orchestrator:
     # -- settings window / self-update (Batch D) ---------------------------------
     async def _settings_turn(self, tab: str, heard: str) -> None:
         """Local fast path for "open settings" / "show history": ask the
-        menu bar (which owns the window) to show it on the given tab, and
+        tray (which owns the window) to show it on the given tab, and
         confirm. A Hindi/Hinglish utterance gets the Hindi confirmation."""
         self._emit("settings", {"open": True, "tab": tab})
         hindi = self._utterance_lang == "hi" or has_devanagari(heard) or quick.is_hinglish_phrase(heard)
@@ -2370,7 +2370,7 @@ class Orchestrator:
                 self.player.reset()
                 await self.say("Okay.")
             elif intent == "hud_reset":
-                # "Where are you?": the menu bar forgets the saved HUD
+                # "Where are you?": the tray forgets the saved HUD
                 # position and shows the panel at its default spot.
                 self._emit("hud", {"mode": "reset"})
                 self.player.reset()
@@ -2581,7 +2581,7 @@ class Orchestrator:
         self._input_guard_task = asyncio.ensure_future(
             input_level.run_periodic(self.input_guard, self._input_guard_stop)
         )
-        # A device switch is exactly when macOS resets the input level:
+        # A device switch is exactly when Windows may reset the input level:
         # re-check right after the mic has followed it, ignoring the throttle.
         devices.subscribe_change(lambda: self.input_guard.check(force=True))
 
