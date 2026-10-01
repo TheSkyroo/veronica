@@ -112,6 +112,18 @@ def _venv_python(repo: Path) -> Path:
     return repo / ".venv" / "bin" / "python"
 
 
+def _pyinstaller_env() -> dict:
+    """Env for the PyInstaller subprocess: put scripts/pyinstaller_preload on
+    PYTHONPATH so its sitecustomize.py preloads onnxruntime in every interpreter
+    PyInstaller spawns. Without this, PyInstaller's binary-dependency scan imports
+    a winrt module before onnxruntime and segfaults; see that sitecustomize.py."""
+    preload = Path(__file__).resolve().parent / "pyinstaller_preload"
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(preload) + (os.pathsep + existing if existing else "")
+    return env
+
+
 def _write_build_json(path: Path, repo: Path, run) -> dict:
     info = dict(version_mod.build_info(run=run, env={}, repo=repo))
     info["repo"] = str(repo)
@@ -129,6 +141,9 @@ def pyinstaller_argv(python: Path, entry: Path, *, repo: Path, work: Path, stagi
         "--paths", str(repo),
         "--add-data", f"{build_json}{os.pathsep}.",
         "--collect-submodules", "veronica",
+        # Our hook-webrtcvad.py overrides the broken bundled one (it copies
+        # `webrtcvad-wheels` metadata, the dist we actually ship).
+        "--additional-hooks-dir", str(Path(__file__).resolve().parent / "pyinstaller_hooks"),
     ]
     for pkg in COLLECT_ALL:
         argv += ["--collect-all", pkg]
@@ -199,7 +214,7 @@ def build_app(
         icon = None
 
     argv = pyinstaller_argv(python, entry, repo=repo, work=work, staging=staging, build_json=build_json, icon=icon)
-    kwargs: dict = {"cwd": repo, "capture_output": True, "text": True, "check": False}
+    kwargs: dict = {"cwd": repo, "capture_output": True, "text": True, "check": False, "env": _pyinstaller_env()}
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x08000000   # CREATE_NO_WINDOW (run from the windowless app)
     done = run(argv, **kwargs)
