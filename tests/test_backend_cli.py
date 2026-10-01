@@ -1,11 +1,10 @@
 import asyncio
 import json
-import signal
 
 import pytest
 
 from tests.brains_fakes import FakeProc
-from veronica.brain.backends import cli
+from veronica.brain.backends import cli, winproc
 from veronica.brain.gate import ToolGate
 from veronica.config import Settings
 
@@ -75,7 +74,7 @@ async def test_sentences_stream_and_session_saved(tmp_path):
     assert b.s.session_file_for("echo").read_text() == "abc"
     argv, cwd, env = spawned[0]
     assert argv == ["echo-cli", "hi"] and cwd == str(b.workspace)
-    assert env["VERONICA_GATE_SOCK"] == str(b.s.gate_socket) and env["VERONICA_BRAIN"] == "echo"
+    assert env["VERONICA_GATE"] == str(b.s.gate_endpoint) and env["VERONICA_BRAIN"] == "echo"
     assert env["VERONICA_HOOK_LOG"] == str(b.hook_log) and env["ECHO_EXTRA"] == "1"
     assert (b.workspace / "prepared").read_text().startswith("You are Veronica")
     assert b._proc is None
@@ -137,14 +136,49 @@ async def test_timeout_kills_child(tmp_path):
     assert b._proc is None
 
 
-async def test_interrupt_sigint_then_kill(tmp_path):
+async def test_interrupt_ctrl_break_then_kill(tmp_path):
     b, _, _ = build(tmp_path, [], hang=True)
     b.s.interrupt_drain_s = 0.05
     task = asyncio.create_task(collect(b, "x"))
     await asyncio.sleep(0.01)
     proc = b._proc
     await b.interrupt()
-    assert proc.signals == [signal.SIGINT] and proc.killed and b._proc is None
+    assert proc.signals == [winproc.CTRL_BREAK_EVENT] and proc.killed and b._proc is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_interrupt_kills_at_once_when_ctrl_break_cant_be_sent(tmp_path):
+    """Veronica without a console can't send CTRL_BREAK: no drain wait."""
+    b, _, _ = build(tmp_path, [], hang=True)
+    b.s.interrupt_drain_s = 30
+    task = asyncio.create_task(collect(b, "x"))
+    await asyncio.sleep(0.01)
+    proc = b._proc
+
+    def no_console(sig):
+        raise OSError(6, "The handle is invalid")
+
+    proc.send_signal = no_console
+    async with asyncio.timeout(2):
+        await b.interrupt()
+    assert proc.killed and b._proc is None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_kill_takes_the_whole_process_tree(tmp_path):
+    b, _, _ = build(tmp_path, [], hang=True)
+    b.s.interrupt_drain_s = 0.05
+    trees = []
+    b._kill_tree = lambda proc: (trees.append(proc), proc.kill())
+    task = asyncio.create_task(collect(b, "x"))
+    await asyncio.sleep(0.01)
+    proc = b._proc
+    await b.interrupt()
+    assert trees == [proc] and proc.killed
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -301,7 +335,7 @@ async def test_persistent_kill_then_respawn_resumes(tmp_path):
 
     async def spawn(argv, cwd, env):
         spawned.append(argv)
-        # an idle persistent child blocks on stdin (hang) and ignores SIGINT
+        # an idle persistent child blocks on stdin (hang) and ignores CTRL_BREAK
         procs.append(FakeProc([ev("Session", id="conv-1"), ev("Done", final_text="ok" if len(spawned) == 1 else "back")],
                               hang=True))
         return procs[-1]
@@ -310,7 +344,7 @@ async def test_persistent_kill_then_respawn_resumes(tmp_path):
     assert await collect(b, "one") == ["ok"]
     first = b._proc
     await b.interrupt()
-    assert first.signals == [signal.SIGINT] and first.killed and b._proc is None
+    assert first.signals == [winproc.CTRL_BREAK_EVENT] and first.killed and b._proc is None
     assert await collect(b, "two") == ["back"]
     assert len(spawned) == 2 and spawned[1] == ["echo-cli", "", "--resume", "conv-1"]
     assert b.started == ["conv-1", "conv-1"]
@@ -372,6 +406,34 @@ async def test_spawn_raises_the_stream_line_limit(tmp_path, monkeypatch):
     b = EchoBrain(s, ToolGate(s, None))
     await b._subprocess_spawn(["echo-cli"], str(tmp_path), {})
     assert seen["limit"] == cli.STDOUT_LINE_LIMIT > 1024 * 1024 - 1
+
+
+async def test_spawn_runs_the_resolved_program_in_its_own_process_group(tmp_path, monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        return FakeProc([])
+
+    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(cli.winproc, "spawn_flags", lambda: 0x200)
+    s = Settings(home=tmp_path)
+    b = EchoBrain(s, ToolGate(s, None))
+    b._resolve = lambda argv: ["C:\\node\\node.exe", "C:\\npm\\echo.js", *argv[1:]]
+    await b._subprocess_spawn(["echo-cli", "a & b"], str(tmp_path), {})
+    assert seen["argv"] == ("C:\\node\\node.exe", "C:\\npm\\echo.js", "a & b")
+    assert seen["kw"]["creationflags"] == 0x200
+
+
+def test_run_cli_resolves_and_hides_the_console(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.winproc, "no_window_flags", lambda: 0x08000000)
+    s = Settings(home=tmp_path)
+    b = EchoBrain(s, ToolGate(s, None))
+    runs = []
+    b._run = lambda argv, **kw: runs.append((argv, kw))
+    b._resolve = lambda argv: ["C:\\bin\\echo-cli.exe", *argv[1:]]
+    b._run_cli(["echo-cli", "x"], timeout=5)
+    assert runs == [(["C:\\bin\\echo-cli.exe", "x"], {"creationflags": 0x08000000, "timeout": 5})]
 
 
 async def test_an_overlong_line_is_dropped_not_fatal(tmp_path):

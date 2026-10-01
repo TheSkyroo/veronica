@@ -93,11 +93,15 @@ class _Win32Panel:
     def __init__(self, window) -> None:
         self._window = window
         self._hwnd: int | None = None
+        self._failed = False
 
     def _handle(self) -> int:
         if self._hwnd is None:
-            hwnd = win32.hwnd_of(self._window)
+            # Wait for the GUI loop once; if the window never appeared, fail
+            # fast from then on instead of stalling the UI thread every call.
+            hwnd = None if self._failed else win32.hwnd_of(self._window)
             if hwnd is None:
+                self._failed = True
                 raise RuntimeError("HUD window has no native handle (GUI loop not running?)")
             win32.make_floating(hwnd)
             self._hwnd = hwnd

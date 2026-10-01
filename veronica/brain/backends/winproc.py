@@ -158,9 +158,10 @@ def _short_path_win(path: str) -> str:
     return buf.value if 0 < n < len(buf) else path
 
 
-def short_path(path: str | os.PathLike, shorten: Callable[[str], str] = _short_path_win) -> str:
+def short_path(path: str | os.PathLike, shorten: Callable[[str], str] | None = None) -> str:
     """`path` with every existing part in 8.3 form, the not-yet-existing
     tail (a log file not written yet) appended as is."""
+    shorten = shorten or _short_path_win
     p = Path(path)
     tail: list[str] = []
     while not p.exists() and p.parent != p:
@@ -170,7 +171,7 @@ def short_path(path: str | os.PathLike, shorten: Callable[[str], str] = _short_p
     return str(Path(head, *reversed(tail)))
 
 
-def neutral_arg(arg: str, shorten: Callable[[str], str] = _short_path_win) -> str:
+def neutral_arg(arg: str, shorten: Callable[[str], str] | None = None) -> str:
     """One hook-command token that reads the same to cmd.exe and
     PowerShell when at all possible (see above)."""
     if _PLAIN.match(arg):
@@ -183,7 +184,7 @@ def neutral_arg(arg: str, shorten: Callable[[str], str] = _short_path_win) -> st
     return subprocess.list2cmdline([arg])
 
 
-def neutral_command(argv: list[str], shorten: Callable[[str], str] = _short_path_win) -> str:
+def neutral_command(argv: list[str], shorten: Callable[[str], str] | None = None) -> str:
     return " ".join(neutral_arg(str(a), shorten) for a in argv)
 
 

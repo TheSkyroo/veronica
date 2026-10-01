@@ -1,10 +1,10 @@
 """The external-brain tool path end to end: a `tools.serve` proxy talking
 to a real GateServer whose runner is the real registry. Nothing here fakes
 the wire, so it is the test that the tool really runs in the app process
-— which is what macOS's TCC grants, and the timer service, depend on."""
+— which is what the screen, clipboard and Outlook access, and the timer
+service, depend on."""
 import asyncio
 import base64
-from pathlib import Path
 
 import pytest
 from claude_agent_sdk import create_sdk_mcp_server
@@ -19,11 +19,9 @@ from veronica.tools.timers import TimerService
 
 
 @pytest.fixture
-def sock(tmp_path, monkeypatch):
-    """AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path on macOS
-    is longer, so bind relative to it."""
-    monkeypatch.chdir(tmp_path)
-    return Path("gate.sock")
+def sock(tmp_path):
+    """The gate's endpoint file (name kept from the Unix-socket days)."""
+    return tmp_path / "run" / "gate.json"
 
 
 @pytest.fixture(autouse=True)
@@ -48,8 +46,8 @@ def _restore_handlers():
 
 
 async def proxy_call(sock, monkeypatch, server, tool, args, *, answers=(True,)):
-    """One `tools/call` through the real proxy -> socket -> gate -> registry."""
-    monkeypatch.setenv("VERONICA_GATE_SOCK", str(sock))
+    """One `tools/call` through the real proxy -> loopback -> gate -> registry."""
+    monkeypatch.setenv("VERONICA_GATE", str(sock))
     monkeypatch.setenv("VERONICA_BRAIN", "codex")
     pending = list(answers)
 
@@ -90,7 +88,7 @@ async def test_a_timer_set_through_an_external_brain_fires(sock, monkeypatch):
     assert said == ["Timer tea done"]
 
 
-async def test_a_screenshot_comes_back_as_an_image_over_the_socket(sock, monkeypatch):
+async def test_a_screenshot_comes_back_as_an_image_over_the_gate(sock, monkeypatch):
     png = b"\x89PNG not really"
     monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": (png, None, "image/png"))
     monkeypatch.setattr(screen, "load_geometry", lambda: None)
@@ -108,7 +106,7 @@ async def test_a_denied_call_never_reaches_the_tool(sock, monkeypatch):
 
 
 async def test_the_proxy_fails_closed_when_the_app_is_gone(sock, monkeypatch):
-    monkeypatch.setenv("VERONICA_GATE_SOCK", str(sock))       # never bound
+    monkeypatch.setenv("VERONICA_GATE", str(sock))       # never written
     ran = []
     monkeypatch.setattr(screen, "capture_screenshot", lambda region, display="auto": ran.append(region) or "no")
     inst = serve.gated_server("screen")

@@ -66,7 +66,7 @@ def test_is_per_turn_and_argv_first_turn(tmp_path):
     # our MCP servers, with the gate env, never written to ~/.codex/config.toml
     assert c["mcp_servers.veronica-system.command"] == sys.executable
     assert c["mcp_servers.veronica-system.args"] == ["-m", "veronica.tools.serve", "system"]
-    assert c["mcp_servers.veronica-system.env.VERONICA_GATE_SOCK"] == str(b.s.gate_socket)
+    assert c["mcp_servers.veronica-system.env.VERONICA_GATE"] == str(b.s.gate_endpoint)
     assert c["mcp_servers.veronica-system.env.VERONICA_BRAIN"] == "codex"
     assert c["mcp_servers.veronica-system.env.VERONICA_HOOK_LOG"] == str(b.hook_log)
     assert c["mcp_servers.veronica-system.default_tools_approval_mode"] == "approve"   # else codex refuses every MCP call
@@ -93,7 +93,7 @@ def test_workspace_hooks_json(tmp_path):
     assert entry["matcher"] == "*" and entry["hooks"][0]["type"] == "command"
     cmd = entry["hooks"][0]["command"]
     assert cmd == b.hook_command()
-    assert cmd == f"{sys.executable} -m veronica.brain.hook codex --sock {b.s.gate_socket} --log {b.hook_log}"
+    assert cmd == f"{sys.executable} -m veronica.brain.hook codex --gate {b.s.gate_endpoint} --log {b.hook_log}"
     # An explicit hook timeout, so the gate answer can't outlive it (codex 0.155
     # reads `timeout` on the handler and `timeoutSec` on the matcher group).
     assert entry["timeoutSec"] == entry["hooks"][0]["timeout"] == gateclient.HOOK_TIMEOUT_S
@@ -111,8 +111,27 @@ def test_toml_str_roundtrips(s):
     assert tomllib.loads(f"x = {toml_str(s)}")["x"] == s
 
 
+def test_hook_command_survives_a_space_in_the_path(tmp_path, monkeypatch):
+    """C:\\Users\\Mani Kumar\\...: every path is given in its 8.3 short form,
+    which reads the same in cmd.exe and PowerShell."""
+    from veronica.brain.backends import winproc
+
+    home = tmp_path / "Mani Kumar"
+    b, _ = make(home)
+    monkeypatch.setattr(winproc, "_short_path_win", lambda p: p.replace("Mani Kumar", "MANIKU~1"))
+    cmd = b.hook_command()
+    assert "Mani Kumar" not in cmd and '"' not in cmd and "'" not in cmd
+    assert f"--log {str(b.hook_log).replace('Mani Kumar', 'MANIKU~1')}" in cmd
+
+
 def test_unwrap_shell():
     assert unwrap_shell("/bin/zsh -lc 'echo canary-ok'") == "echo canary-ok"
+    assert unwrap_shell("powershell.exe -Command 'Get-Date'") == "Get-Date"
+    assert unwrap_shell('"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Get-ChildItem C:\\"') \
+        == "Get-ChildItem C:\\"
+    assert unwrap_shell("pwsh -Command 'it''s'") == "it's"
+    assert unwrap_shell("C:\\WINDOWS\\system32\\cmd.exe /c dir") == "dir"
+    assert unwrap_shell("git commit -c x") == "git commit -c x"
     assert unwrap_shell("/bin/bash -lc \"ls -la 'My Dir'\"") == "ls -la 'My Dir'"
     assert unwrap_shell("echo hi") == "echo hi"
     assert unwrap_shell("bad 'quote") == "bad 'quote"

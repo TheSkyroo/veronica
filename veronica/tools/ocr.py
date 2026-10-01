@@ -150,7 +150,7 @@ def recognize_text(
         result, (width, height) = _run_sync(lambda: _recognize(rt, data, languages))
     except RuntimeError:
         raise
-    except Exception as e:  # noqa: BLE001 — one error type for callers
+    except Exception as e:  # one error type for callers
         raise RuntimeError(f"text recognition failed: {e}") from e
     sx = sy = 1.0
     if image_size is not None and width and height:

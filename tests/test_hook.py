@@ -9,8 +9,15 @@ from veronica.brain.base import Decision
 @pytest.mark.parametrize("backend,tool,inp,expected", [
     ("antigravity", "run_command", {"command": "ls -la"}, ("Bash", {"command": "ls -la"})),
     ("qwen", "run_shell_command", {"command": "echo hi"}, ("Bash", {"command": "echo hi"})),
-    ("codex", "shell", {"command": ["bash", "-lc", "ls"]}, ("Bash", {"command": "bash -lc ls"})),
-    ("codex", "shell", {"command": ["bash", "-lc", "echo hi there"]}, ("Bash", {"command": "bash -lc 'echo hi there'"})),
+    ("codex", "shell", {"command": ["bash", "-lc", "ls"]}, ("Bash", {"command": "ls"})),
+    ("codex", "shell", {"command": ["bash", "-lc", "echo hi there"]}, ("Bash", {"command": "echo hi there"})),
+    ("codex", "shell", {"command": ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                                    "-NoProfile", "-Command", "Get-ChildItem 'C:\\Users\\Mani Kumar'"]},
+     ("Bash", {"command": "Get-ChildItem 'C:\\Users\\Mani Kumar'"})),
+    ("codex", "shell", {"command": ["cmd.exe", "/c", "dir"]}, ("Bash", {"command": "dir"})),
+    ("codex", "shell", {"command": ["git", "commit", "-m", "a b"]}, ("Bash", {"command": 'git commit -m "a b"'})),
+    ("codex", "shell", {"command": ["pwsh", "-File", "x.ps1", "-c", "y"]},
+     ("Bash", {"command": "pwsh -File x.ps1 -c y"})),
     ("copilot", "bash", {"command": "pwd"}, ("Bash", {"command": "pwd"})),
     ("antigravity", "write_file", {"file_path": "/tmp/x", "content": "y"}, ("Write", {"file_path": "/tmp/x", "content": "y"})),
     ("codex", "apply_patch", {"patch": "*** Begin Patch"}, ("Edit", {"patch": "*** Begin Patch"})),
@@ -213,21 +220,21 @@ def test_scope_cwd_limits_hook_to_our_workspace(tmp_path):
 
 
 def test_main_flags_override_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("VERONICA_GATE_SOCK", "/env/sock")
+    monkeypatch.setenv("VERONICA_GATE", "/env/gate.json")
     monkeypatch.setenv("VERONICA_HOOK_LOG", str(tmp_path / "env.log"))
     seen = {}
 
     def ask(tool, input, **kw):
-        seen["sock"] = hook.os.environ.get("VERONICA_GATE_SOCK")
+        seen["gate"] = hook.os.environ.get("VERONICA_GATE")
         return Decision(True, "approved")
 
     scope = tmp_path / "scope"
     scope.write_text("c9")
     stdin = json.dumps({"conversationId": "c9", "toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}})
-    out, code = hook.main(["antigravity", "--sock", "/flag/sock", "--log", str(tmp_path / "flag.log"),
+    out, code = hook.main(["antigravity", "--gate", "/flag/gate.json", "--log", str(tmp_path / "flag.log"),
                            "--scope-file", str(scope)], stdin, ask=ask)
     assert code == 0 and json.loads(out)["decision"] == "allow"
-    assert seen["sock"] == "/flag/sock"
+    assert seen["gate"] == "/flag/gate.json"
     assert (tmp_path / "flag.log").exists() and not (tmp_path / "env.log").exists()
     # env alone still works
     out, _ = hook.main(["antigravity"], stdin, ask=ask)
