@@ -73,6 +73,8 @@ def system_prompt(
         "(Git Bash for some brains), so write Windows commands and paths. "
         "Your working directory is the user's home folder. Only modify files the "
         "user explicitly names. "
+        "To open an app, a folder (This PC, Downloads, the Recycle Bin…) or a Windows Settings page, "
+        "use the open_app tool rather than a shell command. "
         "You can read the user's calendar, unread mail and reminders and set timers "
         "with your tools; prefer them over shell commands for these. "
         "You can see the user's screen with the screenshot tool (never a shell command or the Snipping Tool) when they refer to "

@@ -617,6 +617,10 @@ def test_speaker_hinglish_phrases_answer_in_hindi():
     ("start notepad", "notepad"),
     ("open bluetooth settings", "bluetooth settings"),
     ("downloads kholo", "downloads"),
+    ("I told you to open this PC.", "this pc"),
+    ("can you open downloads", "downloads"),
+    ("how do I open this file", None),                  # a question, not a request
+    ("why did you open this PC", None),
     ("open github in chrome", None),                    # more than opening: the brain
     ("open a new tab", None),
     ("open this file", None),

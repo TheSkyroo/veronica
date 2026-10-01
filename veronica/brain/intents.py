@@ -149,7 +149,10 @@ def match_language_intent(text: str) -> LanguageMode | None:
 # (system.open_locally) without a brain round trip. Whole utterance only, a
 # short target, and nothing that needs more than opening it ("open github
 # in chrome", "open a new tab" stay with the brain).
-_OPEN_LEADS = re.compile(r"^(?:please\s+)?(?:open|launch|start|run|show me|go to|take me to)\s+(.+)$")
+_OPEN_LEADS = re.compile(
+    r"^(?:(?:please|just|now|i told you to|i said|i asked you to|can you|could you|will you|would you"
+    r"|you can|go ahead and|i want you to|i need you to)\s+)*"
+    r"(?:open|launch|start|run|show me|go to|take me to)\s+(.+)$")
 _OPEN_HINGLISH = re.compile(r"^(.+?)\s+(?:kholo|khol do|kholiye|chalu karo|open karo)$")
 _OPEN_BLOCKERS = frozenset({"in", "on", "with", "and", "then", "for", "from", "to", "a", "an", "new", "tab",
                             "website", "site", "page", "link", "url", "file", "document", "it", "that", "this"})

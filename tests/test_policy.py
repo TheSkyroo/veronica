@@ -426,3 +426,18 @@ def test_auto_allow_entries_are_trimmed_and_blanks_ignored():
 def test_clipboard_write_is_auto_allowed_by_default():
     assert Settings().auto_allow_tools == ["mcp__system__clipboard_write"]
     assert classify("mcp__system__clipboard_write", {"text": "hi"}, Settings().auto_allow_tools) == ALLOW
+
+
+@pytest.mark.parametrize("command, safe", [
+    ("Start-Process explorer.exe 'shell:MyComputerFolder'", True),   # what Codex ran for "open this PC"
+    ("start ms-settings:bluetooth", True),
+    ("explorer shell:Downloads", True),
+    ("ii shell:RecycleBinFolder", True),
+    ("Start-Process notepad", False),
+    ("Start-Process explorer.exe 'C:\\evil.exe'", False),
+    ("Start-Process -Verb RunAs cmd", False),
+    ("explorer C:\\Windows\\System32", False),
+])
+def test_opening_windows_places_is_safe(command, safe):
+    from veronica.brain.policy import _bash_is_safe
+    assert _bash_is_safe(command) is safe

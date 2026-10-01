@@ -74,6 +74,7 @@ NOTICE_MARKERS = (
     "is ignored",
     "deprecated",
 )
+_NOTICES_LOGGED: set[str] = set()
 
 
 def toml_str(s: str) -> str:
@@ -202,7 +203,9 @@ class CodexBrain(CliBrain):
         """An `error` event: a warning to log and carry on past (see
         NOTICE_MARKERS), or the turn's failure."""
         if msg and any(m in msg for m in NOTICE_MARKERS):
-            if BYPASS_NOTICE not in msg:
+            if BYPASS_NOTICE not in msg and msg not in _NOTICES_LOGGED:
+                # once per run: Codex repeats it on every turn
+                _NOTICES_LOGGED.add(msg)
                 log.warning("codex: %s", msg.strip().replace("\n", " "))
             return []
         return [Error(msg or "error")]
