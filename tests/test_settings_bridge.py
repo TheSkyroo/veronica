@@ -1,4 +1,4 @@
-"""SettingsBridge: every command driven with fakes — no AppKit, no prefs.json,
+"""SettingsBridge: every command driven with fakes — no GUI, no prefs.json,
 no orchestrator loop. `run_on_loop` runs the coroutine to completion inline
 and `run_thread` runs its function inline so the update flow is synchronous."""
 from __future__ import annotations
@@ -163,7 +163,7 @@ def run_thread(fn):
 
 
 class Harness:
-    def __init__(self, *, orch: FakeOrch | None = None, warming=False, bundle=Path("/tmp/Veronica.app"),
+    def __init__(self, *, orch: FakeOrch | None = None, warming=False, exe=Path("/tmp/Veronica/Veronica.exe"),
                  updater=None, prefs=None, login=None):
         self.orch = orch if orch is not None else (None if warming else FakeOrch())
         self.prefs = prefs or FakePrefs()
@@ -177,7 +177,7 @@ class Harness:
 
         def relaunch():
             self.relaunches += 1
-            return bundle is not None
+            return exe is not None
 
         self.bridge = SettingsBridge(
             settings=self.settings,
@@ -189,7 +189,7 @@ class Harness:
             version=FAKE_VERSION,
             updater=self.updater,
             relaunch=relaunch,
-            bundle_path=bundle,
+            exe_path=exe,
             repo=Path("/repo"),
             run_thread=run_thread,
             open_path=self.opened.append,
@@ -215,7 +215,7 @@ def test_state_has_every_section_and_key(h):
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                                     "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                                     "unread_enabled", "unread_time"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
+    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "auto_allow_tools", "auto_allowable",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
@@ -287,7 +287,7 @@ def test_set_language_runs_language_turn(h):
 
 def _deferred_harness(**kw):
     """A harness whose run_on_loop only *schedules* (collects coroutines),
-    like the real menubar `_schedule` from the AppKit thread, and whose
+    like the real tray app's `_schedule` from the UI thread, and whose
     run_thread only collects thunks."""
     pending: list = []
     threads: list = []
@@ -342,14 +342,14 @@ def test_set_language_rejects_unknown_mode(h):
 
 def test_set_start_at_login_enables_and_disables(h):
     assert h.bridge.set("general", "start_at_login", True)["ok"]
-    assert h.login.calls == [("enable", Path("/tmp/Veronica.app"))]
+    assert h.login.calls == [("enable", Path("/tmp/Veronica/Veronica.exe"))]
     assert h.bridge.get_state()["general"]["start_at_login"] is True
     assert h.bridge.set("general", "start_at_login", False)["ok"]
     assert h.login.calls[-1] == ("disable",)
 
 
-def test_set_start_at_login_needs_bundle():
-    h = Harness(bundle=None)
+def test_set_start_at_login_needs_the_built_exe():
+    h = Harness(exe=None)
     res = h.bridge.set("general", "start_at_login", True)
     assert res["ok"] is False and res["message"] == "Build the app first."
     assert h.login.calls == []
@@ -680,8 +680,8 @@ def test_restart_relaunches(h):
     assert h.relaunches == 1
 
 
-def test_restart_without_bundle_says_so():
-    h = Harness(bundle=None)
+def test_restart_without_the_built_exe_says_so():
+    h = Harness(exe=None)
     res = h.bridge.restart()
     assert res["ok"] is True and res["message"] == "Restart me from the terminal."
     assert h.relaunches == 1
@@ -698,8 +698,8 @@ def test_restart_replies_before_relaunch_is_scheduled():
     assert h.relaunches == 1
 
 
-def test_restart_without_bundle_replies_before_quit():
-    h, _, threads = _deferred_harness(bundle=None)
+def test_restart_without_the_built_exe_replies_before_quit():
+    h, _, threads = _deferred_harness(exe=None)
     res = h.bridge.restart()
     assert res["message"] == "Restart me from the terminal."
     assert h.relaunches == 0
@@ -707,11 +707,22 @@ def test_restart_without_bundle_replies_before_quit():
     assert h.relaunches == 1
 
 
-def test_open_logs_and_login_items(h):
+def test_open_logs_startup_apps_and_mic_privacy(h):
     assert h.bridge.open_logs()["ok"]
     assert h.opened == [h.settings.log_file]
     assert h.bridge.open_login_items()["ok"]
-    assert h.opened[-1].startswith("x-apple.systempreferences:")
+    assert h.opened[-1] == "ms-settings:startupapps"
+    assert h.bridge.handle("open_mic_privacy", {})["ok"]
+    assert h.opened[-1] == "ms-settings:privacy-microphone"
+
+
+def test_default_open_path_uses_the_windows_shell(monkeypatch):
+    from veronica.ui.settings import bridge as bridge_mod
+
+    opened = []
+    monkeypatch.setattr(bridge_mod._win32, "open_target", opened.append)
+    bridge_mod._open_path("ms-settings:startupapps")
+    assert opened == ["ms-settings:startupapps"]
 
 
 # -- handle ---------------------------------------------------------------------------
@@ -729,7 +740,7 @@ def test_handle_dispatches_and_reports_errors(h):
     assert res == {"ok": False, "message": "boom"}
 
 
-def test_bridge_imports_no_appkit():
+def test_bridge_imports_no_gui_toolkit():
     import ast
 
     import veronica.ui.settings.bridge as mod
@@ -741,7 +752,7 @@ def test_bridge_imports_no_appkit():
             names |= {a.name for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             names.add(node.module or "")
-    assert not {n for n in names if n.split(".")[0] in ("AppKit", "WebKit", "objc", "Foundation", "rumps")}
+    assert not {n for n in names if n.split(".")[0] in ("webview", "pystray", "win32api", "win32gui", "winreg")}
 
 
 # -- fix round 1 ----------------------------------------------------------------------
@@ -780,7 +791,7 @@ def test_marshal_is_a_constructor_kwarg(h):
     b = SettingsBridge(
         settings=h.settings, get_orch=lambda: h.orch, store=h.store, run_on_loop=run_on_loop,
         prefs=h.prefs, login_item=h.login, version=FAKE_VERSION, updater=h.updater,
-        relaunch=lambda: True, bundle_path=None, repo=Path("/repo"), run_thread=run_thread,
+        relaunch=lambda: True, exe_path=None, repo=Path("/repo"), run_thread=run_thread,
         marshal=lambda fn: calls.append(fn),
     )
     b.on_state_changed = lambda st: None
@@ -990,16 +1001,16 @@ def test_set_brain_failover_fields_are_live(h):
     assert h.bridge.get_state()["brain"]["copilot_native_tools"] is False
 
 
-def test_shortcut_allowlist_is_editable_and_has_a_row(h):
-    # the list field takes a comma-separated string from the window
-    assert h.bridge.set("brain", "shortcut_allowlist", "Morning, Pay Rent")["ok"]
-    assert h.orch.s.shortcut_allowlist == ["Morning", "Pay Rent"]
-    assert ("shortcut_allowlist", ["Morning", "Pay Rent"]) in h.prefs.overrides
-    assert h.bridge.get_state()["brain"]["shortcut_allowlist"] == ["Morning", "Pay Rent"]
-    assert EDITABLE_SETTINGS["shortcut_allowlist"].kind == "list"
-    # ...and settings.js hand-lists a row for it, or the window can't reach it
-    js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
-    assert "settingRow('brain', 'shortcut_allowlist'" in js
+def test_sections_skip_fields_config_no_longer_offers(monkeypatch):
+    # A field dropped from config.EDITABLE_SETTINGS (shortcut_allowlist went
+    # with Shortcuts) must neither break get_state nor stay settable.
+    from veronica.ui.settings import bridge as bridge_mod
+
+    monkeypatch.setitem(bridge_mod.SETTING_SECTIONS, "brain", bridge_mod.SETTING_SECTIONS["brain"] + ("gone_field",))
+    h = Harness()
+    assert "gone_field" not in h.bridge.get_state()["brain"]
+    res = h.bridge.set("brain", "gone_field", 1)
+    assert res["ok"] is False and "unknown setting" in res["message"]
 
 
 # -- auto-allow tools ---------------------------------------------------------
@@ -1024,7 +1035,7 @@ def test_auto_allow_tools_is_editable_and_round_trips_through_prefs(h):
 def test_clearing_the_field_revokes_everything(h):
     assert h.bridge.set("brain", "auto_allow_tools", "")["ok"]
     assert h.orch.s.auto_allow_tools == []
-    assert classify("mcp__system__clipboard_write", {"text": "hi"}, (), h.orch.s.auto_allow_tools) == "confirm"
+    assert classify("mcp__system__clipboard_write", {"text": "hi"}, h.orch.s.auto_allow_tools) == "confirm"
 
 
 def test_the_default_ships_with_clipboard_write_ticked(h):

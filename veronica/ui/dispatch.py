@@ -9,8 +9,7 @@ thread-safe, but they *block* until the GUI thread has run them
 the orchestrator's asyncio loop, pywebview's js_api call threads, pystray's
 menu thread — never call them directly: they post here with `on_ui_thread`,
 the calls run in order on this one thread, and nobody but it ever waits on
-the GUI. It plays the part AppKit's main thread + `AppHelper.callAfter`
-played on macOS: code running here may touch window/tray state freely.
+the GUI. Code running here may touch window/tray state freely.
 """
 from __future__ import annotations
 

@@ -97,3 +97,17 @@ def test_describe_defaults_to_build_info(monkeypatch):
 
 def test_repo_constant_points_at_repo_root():
     assert version.REPO == Path(__file__).resolve().parents[1]
+
+
+def test_repo_follows_veronica_repo_env_in_the_frozen_app(monkeypatch, tmp_path):
+    # Inside Veronica.exe this file lives in the bundle, not the checkout:
+    # the entry script exports VERONICA_REPO (from build.json) instead.
+    import importlib
+
+    monkeypatch.setenv("VERONICA_REPO", str(tmp_path))
+    try:
+        assert importlib.reload(version).REPO == tmp_path
+    finally:
+        monkeypatch.delenv("VERONICA_REPO")
+        importlib.reload(version)
+    assert version.REPO == Path(__file__).resolve().parents[1]
