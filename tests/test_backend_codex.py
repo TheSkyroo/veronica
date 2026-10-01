@@ -86,6 +86,17 @@ def test_argv_resumed_native_off_images_effort(tmp_path):
     assert c["developer_instructions"].startswith("SYS\n\nDo not run shell commands")
 
 
+def test_full_access_drops_the_sandbox_only_for_its_own_shell(tmp_path):
+    """Codex's Windows sandbox can refuse to start programs ("Windows is
+    declining it"); codex_full_access lifts it. With its shell off it stays
+    read-only regardless."""
+    b, _ = make(tmp_path, codex_full_access=True)
+    b.prepare_workspace("SYS", native=True)
+    assert cfg(b.argv("hi", None, [], native=True))["sandbox_mode"] == "danger-full-access"
+    b.prepare_workspace("SYS", native=False)
+    assert cfg(b.argv("hi", None, [], native=False))["sandbox_mode"] == "read-only"
+
+
 def test_workspace_hooks_json(tmp_path):
     b, _ = make(tmp_path)
     b.prepare_workspace("SYS", native=True)
