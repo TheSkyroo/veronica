@@ -73,11 +73,11 @@ def test_is_per_turn_and_argv_first_turn(tmp_path):
     [cfg] = flag(a, "--additional-mcp-config")
     servers = json.loads(cfg)["mcpServers"]
     assert set(servers) == {f"veronica-{s}" for s in hook.OUR_SERVERS}
-    mac = servers["veronica-system"]
-    assert mac["type"] == "local" and mac["command"] == sys.executable and mac["tools"] == ["*"]
-    assert mac["args"] == ["-m", "veronica.tools.serve", "system"]
-    assert mac["env"] == {"VERONICA_GATE_SOCK": str(b.s.gate_socket), "VERONICA_BRAIN": "copilot",
-                          "VERONICA_HOOK_LOG": str(b.hook_log)}
+    system = servers["veronica-system"]
+    assert system["type"] == "local" and system["command"] == sys.executable and system["tools"] == ["*"]
+    assert system["args"] == ["-m", "veronica.tools.serve", "system"]
+    assert system["env"] == {"VERONICA_GATE": str(b.s.gate_endpoint), "VERONICA_BRAIN": "copilot",
+                             "VERONICA_HOOK_LOG": str(b.hook_log)}
     # a fresh id per first-turn spawn (a failed first turn never reuses one)
     assert flag(b.argv("hi", None, [], native=True), "--session-id") != [sid]
 
@@ -94,7 +94,7 @@ def test_argv_resumed_native_off_images(tmp_path):
     assert "--allow-all-tools" not in a and "--allow-all-paths" not in a
     assert flag(a, "--allow-tool") == [f"veronica-{s}" for s in hook.OUR_SERVERS]
     assert flag(a, "--excluded-tools") == list(NATIVE_ACTION_TOOLS)
-    assert {"bash", "apply_patch", "task"} <= set(NATIVE_ACTION_TOOLS)
+    assert {"powershell", "write_powershell", "bash", "apply_patch", "task"} <= set(NATIVE_ACTION_TOOLS)
     assert a[-2] == "--additional-mcp-config"      # variadic flags never swallow the config
 
 
@@ -108,13 +108,24 @@ def test_workspace_instructions_and_user_level_hook(tmp_path):
     # a timeout fails OPEN, so the gate answer budget stays well under it
     assert entry["type"] == "command" and entry["timeoutSec"] == gateclient.HOOK_TIMEOUT_S
     assert gateclient.GATE_ANSWER_BUDGET_S < gateclient.HOOK_TIMEOUT_S
-    assert entry["bash"] == b.hook_command()
-    assert entry["bash"] == (f"{sys.executable} -m veronica.brain.hook copilot --sock {b.s.gate_socket} "
-                             f"--log {b.hook_log} --scope-cwd {b.workspace}")
+    # Copilot runs the `powershell` entry on Windows: call operator, every token literal
+    assert "bash" not in entry
+    assert entry["powershell"] == b.hook_command()
+    assert entry["powershell"] == (f"& '{sys.executable}' '-m' 'veronica.brain.hook' 'copilot' "
+                                   f"'--gate' '{b.s.gate_endpoint}' '--log' '{b.hook_log}' "
+                                   f"'--scope-cwd' '{b.workspace}'")
     b.prepare_workspace("SYS2", native=False)     # rewritten every turn, still one entry
     assert len(json.loads(b.hooks_file.read_text())["hooks"]["preToolUse"]) == 1
     text = (b.workspace / ".github" / "copilot-instructions.md").read_text()
     assert text.startswith("SYS2\n\nDo not run shell commands")
+
+
+def test_hook_command_is_literal_powershell_for_any_path(tmp_path):
+    b, _ = make(tmp_path / "Mani's Kumar $HOME`")
+    cmd = b.hook_command()
+    assert cmd.startswith("& '")
+    # single quotes are doubled; $ and ` stay literal inside '...'
+    assert f"'--scope-cwd' '{str(b.workspace).replace(chr(39), chr(39) * 2)}'" in cmd
 
 
 async def test_close_removes_hook_file(tmp_path):

@@ -601,11 +601,14 @@ def _grab_rect(rect: tuple[int, int, int, int]):
 
 def _capture_one(
     region: str, display: Display | None, out_path: Path,
-    max_px: int = DOWNSCALE_MAX_PX, max_bytes: int = MAX_PNG_BYTES,
+    max_px: int | None = None, max_bytes: int | None = None,
 ) -> tuple[bytes, str, Geometry | None] | str:
-    """One capture into `out_path`, downscaled to `max_px` and re-encoded
-    as JPEG if still over `max_bytes`. Returns (image_bytes, mime,
-    geometry) or an error string."""
+    """One capture into `out_path`, downscaled to `max_px` (default
+    DOWNSCALE_MAX_PX) and re-encoded as JPEG if still over `max_bytes`
+    (default MAX_PNG_BYTES). Returns (image_bytes, mime, geometry) or an
+    error string."""
+    max_px = DOWNSCALE_MAX_PX if max_px is None else max_px
+    max_bytes = MAX_PNG_BYTES if max_bytes is None else max_bytes
     window = None
     rect = None
     if region == "selection":

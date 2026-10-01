@@ -84,6 +84,24 @@ def _agy_mcp(tool_input: dict) -> tuple[str, dict] | None:
     return (ours, dict(args) if isinstance(args, dict) else {}) if ours else None
 
 
+_WRAPPER_SHELLS = ("powershell", "pwsh", "cmd", "bash", "sh")
+_COMMAND_SWITCHES = ("-command", "-c", "-lc", "/c")
+
+
+def _shell_argv_command(argv: list[str]) -> str:
+    """The one command string an argv stands for. Codex runs a command as
+    `[<shell>, <switches...>, -Command|-c|-lc|/c, <command>]`; the gate
+    judges <command>, which is what that shell will run (and what the
+    stream's canary key unwraps to). Anything else is joined the way
+    Windows quotes a command line."""
+    if len(argv) >= 3:
+        shell = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+        if (shell in _WRAPPER_SHELLS and argv[-2].lower() in _COMMAND_SWITCHES
+                and all(a.startswith("-") for a in argv[1:-2])):
+            return argv[-1]
+    return subprocess.list2cmdline(argv)
+
+
 def canonical_tool(backend: str, tool_name: str, tool_input: dict) -> tuple[str, dict] | None:
     """None = read-only native tool, allow without the gate. Unknown tools
     pass through by name so the gate confirms them."""
@@ -99,8 +117,8 @@ def canonical_tool(backend: str, tool_name: str, tool_input: dict) -> tuple[str,
         return None
     if kind == "Bash":
         cmd = tool_input.get("command") or tool_input.get("CommandLine") or ""   # CommandLine: agy
-        if isinstance(cmd, list):    # codex: argv, joined the way Windows would quote it
-            cmd = subprocess.list2cmdline([str(c) for c in cmd])
+        if isinstance(cmd, list):    # codex: argv
+            cmd = _shell_argv_command([str(c) for c in cmd])
         return "Bash", {"command": str(cmd)}
     if kind in ("Write", "Edit"):
         inp = dict(tool_input)

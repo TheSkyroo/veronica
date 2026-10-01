@@ -126,7 +126,7 @@ def test_real_backend_is_unavailable_off_windows(monkeypatch):
     if sys.platform == "win32":
         pytest.skip("real Win32 here")
     monkeypatch.setattr(ce, "_backend", None)
-    with pytest.raises(Exception):
+    with pytest.raises((AttributeError, OSError)):
         ce._win32()
     assert ce._backend is None
 
