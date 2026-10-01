@@ -15,7 +15,7 @@ dependencies = [
   "faster-whisper>=1.1.0",
   "kokoro-onnx>=0.4.0",
   "pydantic-settings>=2.6",
-  "websockets>=12",
+  "websockets>=13",
   "Pillow>=10",
   "psutil>=5.9",
   # Windows integration (UI, audio endpoints, input, screen, OCR, Outlook).

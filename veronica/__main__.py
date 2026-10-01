@@ -263,6 +263,10 @@ def main(argv: list[str] | None = None) -> None:
     if lock is None:
         logging.getLogger("veronica").error("another Veronica is already running; exiting")
         return
+    # The browser extension reconnects on its own schedule; listening from
+    # startup means it is attached before the first browser tool call.
+    from veronica.tools.browser import start_bridge
+    start_bridge()
     from veronica.ui.tray import run_app
     run_app()
 

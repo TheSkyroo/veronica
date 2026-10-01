@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Veronica",
+  "version": "1.0.0",
+  "description": "Lets the Veronica voice assistant on this PC read and control your browser tabs.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1DtTypUaQQ0s1On999lbJ99iqw2wJdsT9j1a3JdZ6HoJYEy6FkD1tL+QhxFk9PS+HeoXOpbaRI7+lLmKsz46w1kFbiHvQGIP8abkJNss5nDHlRWtWoq7hjEqLYmzKAhkgYYB25cpyFVruycHHcn62SrlvQ3FVs8nuD27tzr0/vROBQaTppLlJcZpy0Qk3Sx19ChPYuIs+zLzCC8C68D43SzERDnMB4zNboSShbkdzztwzANVTgZhrinIMbZyettQzBsD9yg4WJnsf+NJlskga8CYwM0iB0D4y/ZuAXKwqkRldW3HeoeoaHoLS4mf9jV6QEjpwPox0+mrRAuSHNuXSQIDAQAB",
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}

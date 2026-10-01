@@ -1,33 +1,76 @@
-"""Browser control for Chrome and Safari via AppleScript + injected
-JavaScript. One-time user setup: Chrome -> View > Developer > Allow
-JavaScript from Apple Events; Safari -> Develop > Allow JavaScript from
-Apple Events. No remote debugging / CDP (Chrome >=136 refuses it on the
-default profile, which would lose the user's logins)."""
+"""Browser control for Chrome and Microsoft Edge on Windows through the
+Veronica browser extension (veronica/browser_extension, a Manifest V3
+extension the user loads unpacked once).
+
+The extension's service worker keeps a WebSocket open to a small server
+this module runs inside the app (`start_bridge()`: a daemon thread with its
+own asyncio loop, bound to 127.0.0.1:VERONICA_BROWSER_PORT, default 8765).
+Veronica sends {id, op, ...args}; the extension answers {id, ok, result} or
+{id, ok: false, error}. The ops are a fixed list implemented in the
+extension (tabs, open, ready_state, read, find, click, type, scroll, back),
+so Veronica never ships code into the page.
+
+Who may connect: the WebSocket Origin must be the extension's
+(chrome-extension://<EXTENSION_ID>, fixed by the "key" in manifest.json;
+VERONICA_BROWSER_EXTENSION_ID adds others), and the first message must
+carry the pairing token Veronica keeps in ~/.veronica/browser_token, which
+the user pastes once into the extension's options page. Anything else is
+closed with code 4401.
+
+With both Chrome and Edge connected, tools drive the one whose window was
+focused most recently (the extension reports focus changes); before any
+focus report, the one that connected last. Within that browser the target
+is the active tab of its last-focused normal window.
+
+Page text is untrusted: it comes back as data, whitespace-collapsed and
+capped (READ_MAX / FIND_MAX_LINES), never as instructions."""
 import asyncio
+import concurrent.futures
+import hmac
+import itertools
 import json
 import logging
-import subprocess
+import os
+import secrets
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 log = logging.getLogger("veronica.tools.browser")
 
-CHROME = "Google Chrome"
-SAFARI = "Safari"
-TIMEOUT_S = 20
+TIMEOUT_S = 20             # one request, end to end
+CONNECT_WAIT_S = 2.0       # grace for an extension that is mid-(re)connect
+AUTH_TIMEOUT_S = 5.0       # the hello must arrive this soon after connecting
+DEFAULT_PORT = 8765
+MAX_MESSAGE = 4 * 1024 * 1024
 READ_MIN = 50
 READ_DEFAULT = 6000
 READ_MAX = 20000
 FIND_MAX_LINES = 10
-# After a navigation (open/click/back/submit) wait for document.readyState
-# to reach 'complete' so a following browser_read sees the new page.
+FIND_LINE_MAX = 160
+# After a navigation (open/click/back/submit) wait for the tab to finish
+# loading so a following browser_read sees the new page.
 NAV_WAIT_S = 3.0
 NAV_POLL_S = 0.25
 _sleep = asyncio.sleep   # module attr so tests can stub the poll's delay
 
+# The extension's ID, derived from the public key in manifest.json, so it is
+# the same wherever the folder is loaded from, in Chrome and in Edge.
+EXTENSION_ID = "kbjjfiapkdanjhojndmgepdlnokoilhe"
+EXTENSION_DIR = Path(__file__).resolve().parent.parent / "browser_extension"
+AUTH_CLOSE_CODE = 4401
+
 
 class BrowserUnavailable(RuntimeError):
-    pass
+    """No usable browser connection (none connected, timed out, dropped)."""
+
+
+class BrowserError(RuntimeError):
+    """The extension ran the request and reported an error."""
 
 
 def _ok(text: str = "ok") -> dict:
@@ -38,126 +81,331 @@ def _err(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}], "is_error": True}
 
 
-def run(argv: list[str], stdin: str | None = None, ok_text: str | None = None) -> dict:
-    """Run argv (never a shell string) and map the result to MCP content."""
+# -- configuration ----------------------------------------------------------------
+def _home() -> Path:
+    return Path(os.environ.get("VERONICA_HOME") or Path.home() / ".veronica")
+
+
+def token_path() -> Path:
+    return _home() / "browser_token"
+
+
+def pairing_token() -> str:
+    """The pairing secret the extension must present; created on first use
+    (and recreated if the file is empty or unreadable)."""
+    p = token_path()
     try:
-        p = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=TIMEOUT_S, check=False)
-    except subprocess.TimeoutExpired:
-        return _err(f"{argv[0]} timed out after {TIMEOUT_S}s")
-    except OSError as e:
-        return _err(str(e))
-    if p.returncode != 0:
-        return _err(p.stderr.strip() or f"{argv[0]} failed")
-    return _ok(ok_text if ok_text is not None else p.stdout.strip())
+        tok = p.read_text(encoding="utf-8").strip()
+        if tok:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(24)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(tok + "\n", encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)       # best effort; on Windows the profile ACL protects it
+    except OSError:
+        pass
+    return tok
 
 
-async def _osascript(script: str) -> dict:
-    return await asyncio.to_thread(run, ["osascript", "-e", script])
+def bridge_port() -> int:
+    try:
+        port = int(os.environ.get("VERONICA_BROWSER_PORT", DEFAULT_PORT))
+    except ValueError:
+        return DEFAULT_PORT
+    return port if 0 < port < 65536 else DEFAULT_PORT
 
 
-def _q(s: str) -> str:
-    """Escape for inclusion inside an AppleScript double-quoted string."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+def allowed_origins() -> set[str]:
+    ids = {EXTENSION_ID}
+    ids |= {s.strip() for s in os.environ.get("VERONICA_BROWSER_EXTENSION_ID", "").split(",") if s.strip()}
+    return {f"chrome-extension://{i}" for i in ids}
 
 
-def _wrap_js(browser: str, js: str) -> str:
-    if browser == CHROME:
-        return f'tell application "{CHROME}" to execute active tab of front window javascript "{_q(js)}"'
-    return f'tell application "{SAFARI}" to do JavaScript "{_q(js)}" in current tab of front window'
+def origin_allowed(origin: str | None) -> bool:
+    return bool(origin) and origin in allowed_origins()
 
 
-async def target_browser() -> str:
-    """The frontmost supported browser, else whichever one is running
-    (Chrome preferred). Raises BrowserUnavailable if neither is open."""
-    res = await _osascript(
-        'tell application "System Events" to get name of first application process whose frontmost is true'
+def no_browser_message() -> str:
+    return (
+        "No browser is connected. Install the Veronica extension in Chrome or Edge: open "
+        "chrome://extensions (or edge://extensions), turn on Developer mode, choose Load unpacked "
+        f"and pick {EXTENSION_DIR}; then paste the pairing code from {token_path()} into the "
+        "extension's options page."
     )
-    if res.get("is_error"):
-        _raise_if_denied("System Events", res["content"][0]["text"])
-        front = ""
-    else:
-        front = res["content"][0]["text"].strip()
-    if front in (CHROME, SAFARI):
-        return front
-    for name in (CHROME, SAFARI):
-        r = await _osascript(f'tell application "System Events" to (exists process "{name}")')
-        if r.get("is_error"):
-            _raise_if_denied("System Events", r["content"][0]["text"])
-            continue
-        if r["content"][0]["text"].strip().lower() == "true":
-            return name
-    raise BrowserUnavailable("No supported browser is open (Chrome or Safari).")
 
 
-def _is_denied(text: str) -> bool:
-    return "-1743" in text or "not authorized" in text.lower()
+# -- the bridge -------------------------------------------------------------------
+@dataclass(eq=False)
+class _Client:
+    conn: Any                      # websockets ServerConnection, or a fake in tests
+    browser: str
+    connected_at: float
+    focused_at: float = 0.0
+    pending: dict[int, asyncio.Future] = field(default_factory=dict)
+
+    @property
+    def recency(self) -> float:
+        return max(self.focused_at, self.connected_at)
 
 
-def _raise_if_denied(app: str, text: str) -> None:
-    """An Automation-permission denial must not masquerade as 'no browser'."""
-    if _is_denied(text):
-        raise BrowserUnavailable(_map_error(app, text)["content"][0]["text"])
+class Bridge:
+    """Connected extensions plus request/response bookkeeping. Every
+    coroutine here runs on `self.loop`; `request()` may be awaited from any
+    loop (the tools run on the agent's)."""
+
+    def __init__(self, token: str, loop: asyncio.AbstractEventLoop | None = None):
+        self.token = token
+        self.loop = loop
+        self.clients: list[_Client] = []
+        self.error: str | None = None          # why the server isn't listening, if it isn't
+        self._ids = itertools.count(1)
+        self._changed: asyncio.Event | None = None
+        self._server = None
+
+    def _event(self) -> asyncio.Event:
+        if self._changed is None:
+            self._changed = asyncio.Event()
+        return self._changed
+
+    # connection side
+    async def handle(self, conn) -> None:
+        """Serve one extension connection: authenticate, then route replies
+        and focus events until it closes."""
+        client = await self._authenticate(conn)
+        if client is None:
+            return
+        self.clients.append(client)
+        self._event().set()
+        log.info("browser extension connected (%s)", client.browser)
+        try:
+            while True:
+                raw = await conn.recv()
+                self._on_message(client, raw)
+        except Exception as exc:  # noqa: BLE001 — ConnectionClosed (or a test fake's EOF) ends the session
+            log.debug("browser connection ended: %r", exc)
+        finally:
+            self.clients.remove(client)
+            for fut in client.pending.values():
+                if not fut.done():
+                    fut.set_exception(BrowserUnavailable(f"{client.browser} disconnected before answering."))
+            client.pending.clear()
+            log.info("browser extension disconnected (%s)", client.browser)
+
+    async def _authenticate(self, conn) -> _Client | None:
+        try:
+            raw = await asyncio.wait_for(conn.recv(), AUTH_TIMEOUT_S)
+            hello = json.loads(raw)
+        except Exception:  # noqa: BLE001 — silence, garbage or a drop all mean "not paired"
+            hello = None
+        tok = hello.get("token") if isinstance(hello, dict) and hello.get("type") == "hello" else None
+        if not isinstance(tok, str) or not hmac.compare_digest(tok.encode(), self.token.encode()):
+            log.warning("browser extension rejected: bad or missing pairing token")
+            try:
+                await conn.send(json.dumps({"type": "hello", "ok": False, "error": "bad pairing token"}))
+                await conn.close(AUTH_CLOSE_CODE, "bad pairing token")
+            except Exception:  # already gone; nothing to refuse
+                log.debug("closing a rejected browser connection failed", exc_info=True)
+            return None
+        await conn.send(json.dumps({"type": "hello", "ok": True}))
+        browser = str(hello.get("browser") or "browser")[:20]
+        return _Client(conn=conn, browser=browser, connected_at=time.monotonic())
+
+    def _on_message(self, client: _Client, raw) -> None:
+        try:
+            msg = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(msg, dict):
+            return
+        kind = msg.get("type")
+        if kind == "focus":
+            client.focused_at = time.monotonic()
+            return
+        if kind == "ping":
+            asyncio.ensure_future(self._send_quiet(client, {"type": "pong"}))
+            return
+        fut = client.pending.pop(msg.get("id"), None) if isinstance(msg.get("id"), int) else None
+        if fut is None or fut.done():
+            return
+        if msg.get("ok"):
+            fut.set_result(msg.get("result"))
+        else:
+            fut.set_exception(BrowserError(str(msg.get("error") or "the browser reported an error")))
+
+    @staticmethod
+    async def _send_quiet(client: _Client, obj: dict) -> None:
+        try:
+            await client.conn.send(json.dumps(obj))
+        except Exception:  # a dropped socket is noticed by handle()
+            log.debug("browser send failed", exc_info=True)
+
+    # request side
+    def target(self) -> _Client | None:
+        return max(self.clients, key=lambda c: c.recency, default=None)
+
+    async def _request(self, op: str, params: dict, timeout: float) -> Any:
+        if self.error:
+            raise BrowserUnavailable(self.error)
+        client = self.target()
+        if client is None:
+            ev = self._event()
+            ev.clear()
+            try:
+                await asyncio.wait_for(ev.wait(), CONNECT_WAIT_S)
+            except TimeoutError:
+                pass
+            client = self.target()
+            if client is None:
+                raise BrowserUnavailable(no_browser_message())
+        rid = next(self._ids)
+        fut = asyncio.get_running_loop().create_future()
+        client.pending[rid] = fut
+        try:
+            await client.conn.send(json.dumps({"id": rid, "op": op, **params}))
+            return await asyncio.wait_for(fut, timeout)
+        except TimeoutError:
+            raise BrowserUnavailable(f"{client.browser} didn't answer within {timeout:g}s.") from None
+        except (BrowserError, BrowserUnavailable):
+            raise
+        except Exception as exc:  # noqa: BLE001 — any send failure means the socket is gone
+            raise BrowserUnavailable(f"Lost the connection to {client.browser}: {exc}") from None
+        finally:
+            client.pending.pop(rid, None)
+
+    async def request(self, op: str, timeout: float | None = None, **params) -> Any:
+        """Send one op to the target browser and return its result. Raises
+        BrowserUnavailable (no browser / timeout / dropped) or BrowserError."""
+        timeout = timeout or TIMEOUT_S
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if self.loop is None or self.loop is running:
+            return await self._request(op, params, timeout)
+        cf = asyncio.run_coroutine_threadsafe(self._request(op, params, timeout), self.loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(cf), timeout + CONNECT_WAIT_S + 1)
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            cf.cancel()
+            raise BrowserUnavailable(f"The browser didn't answer within {timeout:g}s.") from None
 
 
-def _map_error(browser: str, text: str) -> dict:
-    low = text.lower()
-    if "allow javascript from apple events" in low or "turned off" in low:
-        menu = "View > Developer" if browser == CHROME else "Develop"
-        return _err(
-            f"JavaScript from Apple Events is off in {browser}. Turn it on under "
-            f"{menu} > Allow JavaScript from Apple Events and try again."
+_bridge: Bridge | None = None
+_bridge_lock = threading.Lock()
+
+
+def _process_request(connection, request):
+    """websockets hook: refuse any handshake not from our extension."""
+    if not origin_allowed(request.headers.get("Origin")):
+        log.warning("browser bridge refused origin %r", request.headers.get("Origin"))
+        return connection.respond(403, "Forbidden\n")
+    return None
+
+
+def _run_server(bridge: Bridge, port: int, ready: threading.Event) -> None:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    bridge.loop = loop
+
+    async def main():
+        from websockets.asyncio.server import (
+            serve,  # lazy: only the app process needs it
         )
-    if _is_denied(text):
-        return _err(
-            f"Veronica isn't allowed to control {browser} yet; allow it in "
-            "System Settings > Privacy & Security > Automation."
-        )
-    return _err(text)
+        try:
+            bridge._server = await serve(
+                bridge.handle, "127.0.0.1", port, process_request=_process_request,
+                max_size=MAX_MESSAGE, ping_interval=None,
+            )
+        except OSError as exc:
+            bridge.error = (f"Veronica couldn't listen for the browser extension on 127.0.0.1:{port} "
+                            f"({exc.strerror or exc}). Is another copy running? Set VERONICA_BROWSER_PORT "
+                            "to a free port here and in the extension's options.")
+            log.error(bridge.error)
+        finally:
+            ready.set()
 
-
-async def _js(js: str) -> dict:
-    """Run `js` in the target browser and return the MCP-shaped result."""
     try:
-        browser = await target_browser()
-    except BrowserUnavailable as e:
-        return _err(str(e))
-    res = await _osascript(_wrap_js(browser, js))
-    if res.get("is_error"):
-        return _map_error(browser, res["content"][0]["text"])
-    return res
+        loop.run_until_complete(main())
+        if bridge.error is None:
+            log.info("browser bridge listening on 127.0.0.1:%d", port)
+            loop.run_forever()
+    except Exception:
+        log.exception("browser bridge crashed")
+        bridge.error = bridge.error or "The browser bridge stopped unexpectedly; restart Veronica."
+        ready.set()
 
 
-def _json(res: dict) -> dict | None:
+def start_bridge(port: int | None = None) -> Bridge:
+    """Start the extension's WebSocket server (idempotent, thread-safe).
+    Call once at app startup; the tools also start it on first use."""
+    global _bridge
+    with _bridge_lock:
+        if _bridge is not None:
+            return _bridge
+        bridge = Bridge(pairing_token())
+        ready = threading.Event()
+        threading.Thread(target=_run_server, args=(bridge, port or bridge_port(), ready),
+                         name="veronica-browser-bridge", daemon=True).start()
+        ready.wait(5)
+        _bridge = bridge
+        return bridge
+
+
+def stop_bridge() -> None:
+    """Close the server and its loop (app shutdown, tests). A later
+    start_bridge() starts a fresh one."""
+    global _bridge
+    with _bridge_lock:
+        bridge, _bridge = _bridge, None
+    loop = bridge.loop if bridge else None
+    if loop is None or not loop.is_running():
+        return
+
+    async def close():
+        if bridge._server is not None:
+            bridge._server.close()
+            await bridge._server.wait_closed()
+
     try:
-        data = json.loads(res["content"][0]["text"])
-    except (ValueError, KeyError, IndexError):
-        return None
-    return data if isinstance(data, dict) else None
+        asyncio.run_coroutine_threadsafe(close(), loop).result(5)
+    except Exception:
+        log.debug("browser bridge close failed", exc_info=True)
+    loop.call_soon_threadsafe(loop.stop)
+
+
+async def _call(op: str, **params) -> Any:
+    bridge = _bridge or await asyncio.to_thread(start_bridge)
+    return await bridge.request(op, **params)
 
 
 async def _wait_for_load() -> None:
-    """Poll document.readyState until 'complete' or NAV_WAIT_S elapses.
-    Best effort: any error (page mid-unload, JS refused) just ends the wait;
+    """Poll the tab's load status until 'complete' or NAV_WAIT_S elapses.
+    Best effort: any error (tab closed, browser gone) just ends the wait;
     it never changes the calling tool's result."""
     polls = int(NAV_WAIT_S / NAV_POLL_S)
     for i in range(polls):
         try:
-            res = await _js("document.readyState")
+            state = await _call("ready_state", timeout=NAV_WAIT_S)
         except Exception:
             log.debug("readyState poll failed", exc_info=True)
             return
-        if res.get("is_error") or res["content"][0]["text"].strip() == "complete":
+        if state == "complete":
             return
         if i < polls - 1:
             await _sleep(NAV_POLL_S)
 
 
 def _guard(fn):
-    """Wrap a handler so malformed args/unexpected failures return
-    `_err(...)` instead of raising."""
+    """Wrap a handler so bridge failures, malformed args and unexpected
+    errors return `_err(...)` instead of raising."""
     async def wrapper(args: dict) -> dict:
         try:
             return await fn(args)
+        except (BrowserUnavailable, BrowserError) as exc:
+            return _err(str(exc))
         except Exception as exc:
             log.exception("browser tool failed")
             return _err(f"{type(exc).__name__}: {exc}")
@@ -165,123 +413,24 @@ def _guard(fn):
     return wrapper
 
 
-# -- JS snippets (each an IIFE returning a JSON string) -------------------------
-# Python-level `%` formatting is applied to _JS_FIND/_JS_CLICK/_JS_TYPE only;
-# keep literal `%` out of those bodies (or write `%%`).
-_JS_MATCH_HELPERS = """
-function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}
-function labelsOf(el){
-  var out=[el.innerText, el.getAttribute('aria-label'), el.value, el.title, el.alt,
-           el.placeholder, el.name, el.id];
-  if(el.labels){for(var i=0;i<el.labels.length;i++){out.push(el.labels[i].innerText);}}
-  return out.map(norm).filter(Boolean);
-}
-function visible(el){var r=el.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(el).visibility!=='hidden';}
-function innermost(cands){
-  var keep=cands.filter(function(a){return !cands.some(function(b){return a!==b&&a.contains(b);});});
-  return keep.length?keep[0]:null;
-}
-function findEl(sel, target){
-  var t=norm(target), els=Array.from(document.querySelectorAll(sel)).filter(visible);
-  var exact=els.filter(function(el){return labelsOf(el).indexOf(t)>=0;});
-  if(exact.length)return innermost(exact);
-  var partial=els.filter(function(el){return labelsOf(el).some(function(l){return l.indexOf(t)>=0;});});
-  return innermost(partial);
-}
-function describe(el){
-  var tag=el.tagName, s;
-  if(tag==='INPUT'||tag==='TEXTAREA'){s=el.getAttribute('aria-label')||el.placeholder||el.name||el.value||'';}
-  else{s=el.innerText||el.value||el.getAttribute('aria-label')||el.placeholder||'';}
-  return tag+' '+(s||'').replace(/\\s+/g,' ').trim().slice(0,60);
-}
-"""
+def _dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
 
-_JS_READ = """(function(){
-  var t=(document.body&&document.body.innerText||'').replace(/[ \\t]+/g,' ').replace(/\\n{3,}/g,'\\n\\n');
-  return JSON.stringify({title:document.title,url:location.href,text:t});
-})()"""
 
-_JS_FIND = """(function(){%s
-  var q=norm(%s), lines=(document.body&&document.body.innerText||'').split('\\n'), out=[];
-  for(var i=0;i<lines.length&&out.length<%d;i++){var l=lines[i].trim(); if(l&&norm(l).indexOf(q)>=0)out.push([i+1,l.slice(0,160)]);}
-  return JSON.stringify({lines:out});
-})()"""
-
-_JS_CLICK = """(function(){%s
-  var el=findEl('a,button,input[type=submit],input[type=button],[role=button],[role=link],[onclick],summary,label', %s);
-  if(!el)return JSON.stringify({clicked:null});
-  el.scrollIntoView({block:'center'}); el.click();
-  return JSON.stringify({clicked:describe(el)});
-})()"""
-
-_JS_TYPE = """(function(){%s
-  var el=findEl('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable]:not([contenteditable=false]),[role=textbox]', %s);
-  if(!el)return JSON.stringify({typed:null});
-  el.scrollIntoView({block:'center'}); el.focus();
-  var v=%s;
-  if(el.isContentEditable){el.textContent=v;}else{
-    var setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value');
-    if(setter&&setter.set){setter.set.call(el,v);}else{el.value=v;}
-  }
-  el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));
-  if(%s){
-    var opts={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
-    var ok=el.dispatchEvent(new KeyboardEvent('keydown',opts)); el.dispatchEvent(new KeyboardEvent('keypress',opts));
-    el.dispatchEvent(new KeyboardEvent('keyup',opts));
-    /* ok is false when a keydown handler called preventDefault, i.e. the page handled Enter itself: don't submit twice */
-    if(ok&&el.form&&document.activeElement===el){ if(el.form.requestSubmit){el.form.requestSubmit();} else {el.form.submit();} }
-  }
-  return JSON.stringify({typed:describe(el)});
-})()"""
-
-_JS_SCROLL = {
-    "down": "window.scrollBy(0, Math.round(window.innerHeight*0.8)); 'ok'",
-    "up": "window.scrollBy(0, -Math.round(window.innerHeight*0.8)); 'ok'",
-    "top": "window.scrollTo(0, 0); 'ok'",
-    "bottom": "window.scrollTo(0, document.body.scrollHeight); 'ok'",
-}
-_JS_BACK = "history.back(); 'ok'"
+def _clean(s, limit: int) -> str:
+    return " ".join(str(s or "").split())[:limit]
 
 
 # -- tools -----------------------------------------------------------------------
-@tool("browser_tabs", "List the open tabs of the front window of Chrome or Safari (current tab marked *)", {})
+@tool("browser_tabs", "List the open tabs of the front window of Chrome or Edge (current tab marked *)", {})
 @_guard
 async def browser_tabs(args: dict) -> dict:
-    try:
-        browser = await target_browser()
-    except BrowserUnavailable as e:
-        return _err(str(e))
-    if browser == CHROME:
-        script = (
-            f'tell application "{CHROME}"\n'
-            'set w to front window\nset out to (active tab index of w as text) & linefeed\n'
-            'repeat with t in tabs of w\nset out to out & (title of t) & tab & (URL of t) & linefeed\nend repeat\n'
-            'return out\nend tell'
-        )
-    else:
-        script = (
-            f'tell application "{SAFARI}"\n'
-            'set w to front window\nset out to (index of current tab of w as text) & linefeed\n'
-            'repeat with t in tabs of w\nset out to out & (name of t) & tab & (URL of t) & linefeed\nend repeat\n'
-            'return out\nend tell'
-        )
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return _map_error(browser, res["content"][0]["text"])
-    lines = res["content"][0]["text"].split("\n")
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines:
-        return _ok("No tabs.")
-    try:
-        current = int(lines[0].strip())
-    except ValueError:
-        current = -1
+    tabs = _dict(await _call("tabs")).get("tabs") or []
     out = []
-    for i, ln in enumerate(lines[1:], start=1):
-        title, _, url = ln.partition("\t")
-        mark = "* " if i == current else ""
-        out.append(f"{i}. {mark}{title.strip()} — {url.strip()}")
+    for i, t in enumerate(tabs, start=1):
+        t = _dict(t)
+        mark = "* " if t.get("active") else ""
+        out.append(f"{i}. {mark}{_clean(t.get('title'), 200)} — {_clean(t.get('url'), 500)}")
     return _ok("\n".join(out) if out else "No tabs.")
 
 
@@ -292,28 +441,7 @@ async def browser_open(args: dict) -> dict:
     if not url.startswith(("http://", "https://")):
         return _err("only http(s) URLs are allowed")
     new_tab = bool(args.get("new_tab", True))
-    try:
-        browser = await target_browser()
-    except BrowserUnavailable as e:
-        return _err(str(e))
-    u = _q(url)
-    if browser == CHROME:
-        script = (
-            f'tell application "{CHROME}"\nactivate\n'
-            + (f'tell front window to make new tab with properties {{URL:"{u}"}}\n' if new_tab
-               else f'set URL of active tab of front window to "{u}"\n')
-            + 'end tell'
-        )
-    else:
-        script = (
-            f'tell application "{SAFARI}"\nactivate\n'
-            + (f'tell front window to set current tab to (make new tab with properties {{URL:"{u}"}})\n' if new_tab
-               else f'set URL of current tab of front window to "{u}"\n')
-            + 'end tell'
-        )
-    res = await _osascript(script)
-    if res.get("is_error"):
-        return _map_error(browser, res["content"][0]["text"])
+    await _call("open", url=url, new_tab=new_tab)
     await _wait_for_load()
     return _ok(f"Opened {url}")
 
@@ -326,14 +454,11 @@ async def browser_read(args: dict) -> dict:
     except (TypeError, ValueError):
         max_chars = READ_DEFAULT
     max_chars = max(READ_MIN, min(READ_MAX, max_chars))
-    res = await _js(_JS_READ)
-    if res.get("is_error"):
-        return res
-    data = _json(res) or {}
+    data = _dict(await _call("read"))
     text = " ".join(str(data.get("text", "")).split())
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "…[truncated]"
-    return _ok(f"{data.get('title', '')}\n{data.get('url', '')}\n{text}")
+    return _ok(f"{_clean(data.get('title'), 300)}\n{_clean(data.get('url'), 1000)}\n{text}")
 
 
 @tool("browser_find", "Find lines on the current page containing text (case-insensitive)", {"text": str})
@@ -342,13 +467,12 @@ async def browser_find(args: dict) -> dict:
     needle = str(args.get("text", "")).strip()
     if not needle:
         return _err("text is required")
-    res = await _js(_JS_FIND % (_JS_MATCH_HELPERS, json.dumps(needle), FIND_MAX_LINES))
-    if res.get("is_error"):
-        return res
-    lines = (_json(res) or {}).get("lines") or []
-    if not lines:
-        return _ok("not found")
-    return _ok("\n".join(f"{n}: {t}" for n, t in lines))
+    lines = _dict(await _call("find", text=needle, max_lines=FIND_MAX_LINES)).get("lines") or []
+    out = []
+    for item in lines[:FIND_MAX_LINES]:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append(f"{item[0]}: {_clean(item[1], FIND_LINE_MAX)}")
+    return _ok("\n".join(out) if out else "not found")
 
 
 @tool("browser_click", "Click a link/button on the current page by its visible text or label", {"target": str})
@@ -357,14 +481,11 @@ async def browser_click(args: dict) -> dict:
     target = str(args.get("target", "")).strip()
     if not target:
         return _err("target is required")
-    res = await _js(_JS_CLICK % (_JS_MATCH_HELPERS, json.dumps(target)))
-    if res.get("is_error"):
-        return res
-    clicked = (_json(res) or {}).get("clicked")
+    clicked = _dict(await _call("click", target=target)).get("clicked")
     if not clicked:
         return _err(f"no element matching '{target}'")
     await _wait_for_load()
-    return _ok(f"Clicked {clicked}")
+    return _ok(f"Clicked {_clean(clicked, 80)}")
 
 
 @tool("browser_type", "Type text into a field on the current page (by placeholder/label/name), optionally pressing Enter", {"target": str, "text": str, "submit": bool})
@@ -375,33 +496,31 @@ async def browser_type(args: dict) -> dict:
     if not target:
         return _err("target is required")
     submit = bool(args.get("submit", False))
-    res = await _js(_JS_TYPE % (_JS_MATCH_HELPERS, json.dumps(target), json.dumps(text), "true" if submit else "false"))
-    if res.get("is_error"):
-        return res
-    typed = (_json(res) or {}).get("typed")
+    typed = _dict(await _call("type", target=target, text=text, submit=submit)).get("typed")
     if not typed:
         return _err(f"no field matching '{target}'")
     if submit:
         await _wait_for_load()
-    return _ok(f"Typed into {typed}")
+    return _ok(f"Typed into {_clean(typed, 80)}")
+
+
+_SCROLL_DIRECTIONS = ("up", "down", "top", "bottom")
 
 
 @tool("browser_scroll", "Scroll the current page: up, down, top or bottom", {"direction": str})
 @_guard
 async def browser_scroll(args: dict) -> dict:
     direction = str(args.get("direction", "down")).strip().lower()
-    if direction not in _JS_SCROLL:
+    if direction not in _SCROLL_DIRECTIONS:
         return _err("direction must be up, down, top or bottom")
-    res = await _js(_JS_SCROLL[direction])
-    return res if res.get("is_error") else _ok(f"Scrolled {direction}")
+    await _call("scroll", direction=direction)
+    return _ok(f"Scrolled {direction}")
 
 
 @tool("browser_back", "Go back one page in the current tab", {})
 @_guard
 async def browser_back(args: dict) -> dict:
-    res = await _js(_JS_BACK)
-    if res.get("is_error"):
-        return res
+    await _call("back")
     await _wait_for_load()
     return _ok("Went back")
 
