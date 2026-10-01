@@ -257,7 +257,7 @@ def test_state_has_every_section_and_key(h):
     assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "auto_allow_tools", "auto_allowable",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
-                                "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
+                                "codex_native_tools", "codex_full_access", "antigravity_native_tools", "copilot_native_tools",
                                 "brain_offline_fallback", "local_server_bin", "local_model",
                                 "local_ctx", "local_port", "local_models", "brain_session_max_age_h", "brain_label"}
     assert {"version", "build", "built_at", "dirty", "update", "log_path"} <= set(st["about"])
