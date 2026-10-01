@@ -159,6 +159,11 @@ class Settings(BaseSettings):
     # (push-to-talk works too); "ptt" = the mic stays closed until the
     # push-to-talk hotkey is held (no wake word, no follow-up window).
     listen_mode: str = "always"
+    # Talking to her while she's busy with something (wake word or
+    # push-to-talk): True = the new request waits its turn and runs after
+    # the current one (stop / hold on / "…instead" still interrupt);
+    # False = it interrupts and replaces the current one.
+    queue_requests: bool = True
 
     # push-to-talk: a held hotkey — modifiers + key ("win+space", "ctrl+alt+p")
     # or a single key ("right_ctrl"); see veronica.audio.hotkey.parse_hotkey.
@@ -325,6 +330,11 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         "always: she listens for the wake word whenever she's idle (push-to-talk works too). "
         "ptt: the microphone stays off until you hold the push-to-talk keys.",
         choices=LISTEN_MODES, restart=False),
+    "queue_requests": EditableField(
+        "bool", "Queue requests made while she's busy",
+        "On: a new request waits and runs after the current one (say stop, hold on, or "
+        "'…instead' to interrupt). Off: a new request replaces the current one.",
+        restart=False),
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold the push-to-talk keys)"),
     "ptt_hotkey": EditableField(
         "str", "Push-to-talk keys",

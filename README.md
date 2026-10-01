@@ -98,7 +98,16 @@ Optional, but recommended:
     hold Win+Space and say "unmute".
 - **Follow-ups:** after a reply she listens for 4 more seconds, so you can keep going without the wake word
   (always-listening mode only).
-- **Interrupt:** say the wake word, or press push-to-talk, while she's talking.
+- **Asking for more while she's busy:** say "Veronica, …" or hold Win+Space while she's working on something or
+  answering. She holds her voice for a moment, hears you, and **adds the request to a queue**, while the first task
+  keeps going. When it's finished she does the queued ones in order. The HUD shows what's **Up next**.
+  - To **replace** what she's doing instead, say so: "no, open Spotify instead", "actually …", "cancel that".
+  - **"Clear the queue"** drops the waiting requests but keeps the current task. "Stop" / "that's all" ends
+    everything, including the queue.
+  - To go back to the old behaviour, where a new request always replaces the current one, turn off *Queue requests
+    made while she's busy* in Settings → General.
+- **Interrupt:** say the wake word, or press push-to-talk, while she's talking, then "stop", "hold on" or a new
+  request ending in "instead".
   - **Pause:** "hold on" / "wait" / "ruko" stops her but keeps the rest of the answer. "Continue" / "go on" / "aage
     bolo" picks up where she stopped.
   - **Stop:** "stop" / "that's all" / "never mind" cancels the answer.
@@ -348,7 +357,7 @@ menu.
 
 | Tab | What's there |
 | --- | --- |
-| General | listening mode, push-to-talk keys, HUD, start at login, **Accounts** (Google, Spotify), microphone privacy shortcut |
+| General | listening mode, request queue, push-to-talk keys, HUD, start at login, **Accounts** (Google, Spotify), microphone privacy shortcut |
 | Voice | voice, Hindi voice, speed, language |
 | Listening | wake sensitivity, follow-up window, noise reduction, "learn my voice", input volume floor |
 | Briefings | daily briefing, meeting nudges, quiet hours, battery and mail alerts |

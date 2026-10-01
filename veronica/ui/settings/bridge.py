@@ -57,7 +57,7 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 # Which Settings fields each section exposes. Anything in EDITABLE_SETTINGS
 # not listed here is unreachable from the window (deliberately).
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
-    "general": ("listen_mode", "ptt_enabled", "ptt_hotkey", "hud_hide_after_s", "hud_particles", "hud_intensity", "spotify_client_id"),
+    "general": ("listen_mode", "queue_requests", "ptt_enabled", "ptt_hotkey", "hud_hide_after_s", "hud_particles", "hud_intensity", "spotify_client_id"),
     "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor",
                   "noise_suppression", "vad_min_rms", "speaker_verification", "speaker_threshold",

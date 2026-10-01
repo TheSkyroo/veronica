@@ -65,6 +65,26 @@ log = logging.getLogger("veronica.orchestrator")
 # caller should switch to a hold-mode (push-to-talk) capture instead.
 PTT = object()
 
+
+@dataclass(frozen=True)
+class QueuedRequest:
+    """A request heard while she was busy with another one: already
+    transcribed (and voice-checked), waiting its turn."""
+    text: str
+    lang: str
+
+
+# "Do that next" vs "do this instead": words that mean a request made
+# mid-task replaces the running one rather than queueing behind it.
+_REPLACE_WORDS = frozenset({"instead", "cancel", "stop", "abort", "scrap"})
+_REPLACE_LEADS = ("no ", "nah ", "actually ", "wait ")
+# Clear the queue without touching what she's doing right now.
+CLEAR_QUEUE_PHRASES = frozenset({
+    "clear the queue", "cancel the queue", "forget the queue", "empty the queue",
+    "cancel the rest", "skip the rest", "forget the rest", "never mind the rest",
+    "queue clear karo",
+})
+
 # What confirm()'s listen returns for an answer in a voice that isn't the
 # enrolled one: never an answer, only a reason to listen once more.
 _NOT_THE_USER = object()
@@ -491,6 +511,12 @@ class Orchestrator:
         self._listen_mode_event = asyncio.Event()
         # Push-to-talk-only stand-ins for the barge listener -> their stop flag.
         self._mic_off_listeners: dict[asyncio.Task, asyncio.Event] = {}
+        # Requests made while a turn was busy (queue_requests): run in order
+        # once it finishes. _prefetched hands an utterance heard mid-task
+        # that turned out to replace the turn to its re-listen (already
+        # transcribed, so it isn't heard or transcribed twice).
+        self._queued: deque[QueuedRequest] = deque()
+        self._prefetched: QueuedRequest | None = None
         # Bumped every time a partial-eligible capture() returns, before STT
         # runs on it: any partial transcription still in flight (or one that
         # races in from the recorder thread right at that boundary) belongs
@@ -1639,7 +1665,7 @@ class Orchestrator:
         if self._ptt_capturing:
             self.recorder.finish()
 
-    async def _listen_after_ptt(self) -> np.ndarray | None:
+    async def _listen_after_ptt(self, *, chime: bool = True) -> np.ndarray | None:
         """The push-to-talk capture: consume the PTT signal, then (unless
         the key is already back up) chime *concurrently* with a hold-mode
         capture that ends on key release (Recorder.finish()) or after
@@ -1651,7 +1677,9 @@ class Orchestrator:
         if not self._ptt_held:
             log.info("ptt: key released before capture started; ignoring tap")
             return None
-        chime_task = asyncio.ensure_future(self.chime(self.s.chime_wake_hz, 120))
+        chime_task = asyncio.ensure_future(
+            self.chime(self.s.chime_wake_hz, 120) if chime else asyncio.sleep(0)
+        )
         self._ptt_capturing = True
         try:
             pcm = await self._capture(max_s=self.s.ptt_max_s, hold=True, partial=True)
@@ -2098,6 +2126,90 @@ class Orchestrator:
     _DECISION_EVENT = {"approved": "allowed", "denied": "declined", "other": "redirected"}
 
     # -- barge-in ---------------------------------------------------------------
+    async def _mid_task_request(self, how: str, turn: asyncio.Future) -> str:
+        """The wake word or push-to-talk while a turn is busy. With
+        queue_requests on, hold her voice (the turn keeps working), hear the
+        request, and decide: "queued" — it waits for the turn to finish;
+        "none" — nothing usable was said; "barge" — it's meant for the
+        running turn (stop / hold on / "…instead", mute, quit), so the
+        caller interrupts it as before, re-using this capture. With the
+        setting off, or when the turn already has the mic (dictation), it's
+        always "barge"."""
+        if not self.s.queue_requests or self._capture_in_flight or turn.done():
+            return "barge"
+        prev = self.state
+        outcome = "none"
+        self.player.pause()
+        try:
+            pcm = await self._listen_mid_task(how)
+            if pcm is None:
+                return outcome
+            if not await self._speaker_ok(pcm, "request"):
+                self._ignored_voice("request")
+                return outcome
+            text, detected = await self._transcribe(pcm)
+            if not text.strip() or self._is_own_speech(text):
+                return outcome
+            if self._replaces_current(text):
+                log.info("mid-task request replaces the running one: %r", text)
+                self._prefetched = QueuedRequest(text, self._lang_for(text, detected))
+                outcome = "barge"
+                return outcome
+            if normalize(text) in CLEAR_QUEUE_PHRASES:
+                dropped = len(self._queued)
+                self._clear_queue("asked to")
+                self._emit("tool", {"summary": f"Cleared {dropped} queued request(s)", "decision": "auto"})
+                return outcome
+            hud = match_intent(text)
+            if hud in ("hud_mini", "hud_full", "hud_reset"):
+                self._emit("hud", {"mode": {"hud_mini": "mini", "hud_full": "full", "hud_reset": "reset"}[hud]})
+                return outcome
+            self._queued.append(QueuedRequest(text, self._lang_for(text, detected)))
+            log.info("queued request %d: %r", len(self._queued), text)
+            self._emit_queue()
+            outcome = "queued"
+            return outcome
+        finally:
+            if outcome != "barge":
+                self.player.resume()
+                if not turn.done() and self.state != prev:
+                    self._set(prev)
+
+    async def _listen_mid_task(self, how: str) -> np.ndarray | None:
+        """The capture for a mid-task request — no chime: a sentence of hers
+        is held mid-play under the speech lock, so a chime would wait on it
+        forever. The wake word's pre-roll is kept, as after any wake."""
+        if how == "ptt":
+            return await self._listen_after_ptt(chime=False)
+        self._set("listening")
+        pre = self.wake.take_preroll()
+        pcm = await self._capture_or_ptt(max_s=self.s.listen_wait_s, preroll=pre, partial=True)
+        self._end_partial_window()
+        if pcm is PTT:
+            pcm = await self._listen_after_ptt(chime=False)
+        return pcm
+
+    @staticmethod
+    def _replaces_current(text: str) -> bool:
+        """A mid-task utterance aimed at the running turn rather than a new
+        request: a local control intent (stop, mute, quit, listening mode…),
+        hold on / continue, or an explicit "…instead" / "no, …"."""
+        if match_intent(text) not in (None, "hud_mini", "hud_full", "hud_reset"):
+            return True
+        if is_pause_phrase(text) or is_resume_phrase(text):
+            return True
+        norm = normalize(text)
+        return bool(_REPLACE_WORDS & set(norm.split())) or norm.startswith(_REPLACE_LEADS)
+
+    def _emit_queue(self) -> None:
+        self._emit("queue", [q.text for q in self._queued])
+
+    def _clear_queue(self, why: str) -> None:
+        if self._queued:
+            log.info("dropping %d queued request(s): %s", len(self._queued), why)
+            self._queued.clear()
+            self._emit_queue()
+
     async def _barge_teardown(self, turn: asyncio.Future) -> None:
         """Common teardown for a wake-word barge and a push-to-talk press
         landing mid-turn: stop playback, unblock ANY capture the turn has
@@ -2186,10 +2298,15 @@ class Orchestrator:
                         pending.discard(ptt)
                         ptt = asyncio.ensure_future(self._ptt_event.wait())
                         pending.add(ptt)
-                    else:
+                    elif await self._mid_task_request("ptt", turn) == "barge":
                         log.info("turn ended early: reason=barge_ptt detail=state=%s", self.state)
                         await self._barge_teardown(turn)
                         return "ptt"
+                    else:
+                        # Queued (or nothing said): the turn keeps going.
+                        pending.discard(ptt)
+                        ptt = asyncio.ensure_future(self._ptt_event.wait())
+                        pending.add(ptt)
                 if listener in done:
                     pending.discard(listener)
                     if listener.exception() is not None:
@@ -2215,7 +2332,7 @@ class Orchestrator:
                             log.info("barge during confirm: routed to the answer")
                             listener = self._barge_listener()
                             pending.add(listener)
-                        else:
+                        elif await self._mid_task_request("wake", turn) == "barge":
                             # Whether it was her own voice is the first thing to
                             # rule out when a task "just stopped": say what she
                             # was saying.
@@ -2223,6 +2340,11 @@ class Orchestrator:
                                      self.state, self._suppress_text()[:80])
                             await self._barge_teardown(turn)
                             return "wake"
+                        else:
+                            # Queued (or nothing said): keep listening for the
+                            # next barge while the turn carries on.
+                            listener = self._barge_listener()
+                            pending.add(listener)
                     # listener resolved False (a stop() consumed), or its True
                     # was routed to a pending confirm — keep waiting on the
                     # turn (and PTT).
@@ -2274,6 +2396,10 @@ class Orchestrator:
         """The capture that follows a barge: a hold-mode capture if the
         push-to-talk key caused it, else the usual post-wake listen — and
         if PTT lands during that listen, a hold capture after all."""
+        if self._prefetched is not None:
+            # Already heard mid-task (see _mid_task_request): don't ask twice.
+            req, self._prefetched = self._prefetched, None
+            return req
         pcm = await self._listen_after_ptt() if how == "ptt" else await self._listen_after_wake()
         if pcm is PTT:
             pcm = await self._listen_after_ptt()
@@ -2281,16 +2407,36 @@ class Orchestrator:
 
     async def one_turn(self, ptt: bool = False) -> None:
         """Called after the wake word (or, with ptt=True, a push-to-talk
-        press while idle): listen, answer, then follow-up window."""
+        press while idle): listen, answer, then follow-up window — and then
+        whatever was asked for while she was busy, in order."""
         self._loop = asyncio.get_running_loop()
         pcm = await self._relisten("ptt" if ptt else None)
         if pcm is None:
             self._set("idle")
             return
+        await self._converse(pcm)
+        await self._run_queued()
+
+    async def _run_queued(self) -> None:
+        """Work through the requests queued mid-task, one conversation each
+        (a request queued during one of these joins the end of the line)."""
+        while self._queued and not self.muted:
+            req = self._queued.popleft()
+            self._emit_queue()
+            log.info("running queued request: %r (%d left)", req.text, len(self._queued))
+            await self._converse(req)
+
+    async def _converse(self, pcm: "np.ndarray | QueuedRequest") -> None:
+        """One request (captured audio, or a queued request's text) and its
+        follow-ups; ends idle."""
         is_followup = False
         while True:
-            other_voice = not await self._speaker_ok(pcm, "follow-up" if is_followup else "request")
-            text, detected = await self._transcribe(pcm)
+            if isinstance(pcm, QueuedRequest):
+                other_voice = False          # checked when it was queued
+                text, detected = pcm.text, pcm.lang
+            else:
+                other_voice = not await self._speaker_ok(pcm, "follow-up" if is_followup else "request")
+                text, detected = await self._transcribe(pcm)
             if other_voice and match_speaker_intent(text) != "forget":
                 # Someone else's voice: as if nothing was said, so the turn
                 # ends here (no "didn't catch that", no brain turn); a card
@@ -2345,6 +2491,8 @@ class Orchestrator:
                     self._turn_id + 1, until=time.monotonic() + self.PREAPPROVE_WINDOW_S,
                 )
             intent = match_intent(text)
+            if intent in ("end", "mute", "quit"):
+                self._clear_queue(f"{intent} intent")
             if intent == "end":
                 getattr(self.brain, "clear_trust", lambda: None)()
                 if normalize(text) in self._SPOKEN_END_PHRASES:
@@ -2567,6 +2715,8 @@ class Orchestrator:
                 if pcm is None:
                     break
                 continue
+            if self._queued:
+                break     # something was asked for meanwhile: that comes first
             if self.ptt_only:
                 break     # push-to-talk only: no open mic after the answer
             self._set("followup")
