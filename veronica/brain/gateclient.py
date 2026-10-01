@@ -1,18 +1,24 @@
-"""Sync client for the gate socket, used from processes Veronica spawns
-(tools.serve, brain.hook). Fails closed: no socket, no answer, bad JSON
--> deny.
+"""Sync client for the gate (GateServer), used from processes Veronica
+spawns (tools.serve, brain.hook). The gate listens on a loopback port;
+where, and the token it wants first, are in its endpoint file, named by
+`gate=` or $VERONICA_GATE. Fails closed: no endpoint file, a bad one, no
+connection, no answer, bad JSON -> deny.
 
 Two questions: `ask_gate` is "may I" (what brain.hook needs — the CLI runs
 its own tool itself), `call_gate` is "may I, and if so run it for me" (what
-tools.serve needs — our tools must run in the app process or macOS hands
-their TCC grants to the wrong binary)."""
+tools.serve needs — our tools must run in the app process, which owns the
+screen, the clipboard, the Outlook session and the timers)."""
 import json
 import os
 import socket
+from pathlib import Path
 
 from veronica.brain.base import Decision
 
 UNREACHABLE = "Veronica's gate isn't reachable"
+# The gate only ever listens here; an endpoint file naming anything else
+# is not ours to trust.
+LOOPBACK = "127.0.0.1"
 NO_ANSWER = "Veronica didn't get an answer in time"
 
 # The per-hook timeout we configure in every CLI that takes one, and the
@@ -29,20 +35,32 @@ GATE_ANSWER_BUDGET_S = 45.0
 GATE_CALL_BUDGET_S = GATE_ANSWER_BUDGET_S + 90.0
 
 
-def _exchange(req: dict, sock: str | None, timeout: float | None, budget: float) -> dict:
-    """One request line out, one response line back. Raises on anything the
-    caller should treat as a deny."""
-    path = sock or os.environ.get("VERONICA_GATE_SOCK", "")
+def read_endpoint(path: str | os.PathLike) -> tuple[int, str]:
+    """(port, token) from the gate's endpoint file. Raises on a missing,
+    unreadable or malformed one."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    port, token = data["port"], data["token"]
+    if not isinstance(port, int) or not 0 < port < 65536 or not isinstance(token, str) or not token:
+        raise ValueError("bad gate endpoint")
+    return port, token
+
+
+def _exchange(req: dict, gate: str | None, timeout: float | None, budget: float) -> dict:
+    """Token line, one request line out, one response line back. Raises on
+    anything the caller should treat as a deny."""
+    path = gate or os.environ.get("VERONICA_GATE", "")
+    if not path:
+        raise FileNotFoundError("no gate endpoint")
+    port, token = read_endpoint(path)
     if timeout is None:
         env = os.environ.get("VERONICA_GATE_TIMEOUT_S")
         timeout = float(env) if env else budget
     # The gate answers a little before this runs out (GateServer._decide),
     # so a slow answer is an explicit deny rather than our timeout.
     req = {**req, "budget": timeout}
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    with socket.create_connection((LOOPBACK, port), timeout=timeout) as s:
         s.settimeout(timeout)
-        s.connect(path)
-        s.sendall((json.dumps(req) + "\n").encode())
+        s.sendall((token + "\n" + json.dumps(req) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = s.recv(65536)
@@ -62,15 +80,15 @@ def ask_gate(
     *,
     origin: str,
     backend: str,
-    sock: str | None = None,
+    gate: str | None = None,
     timeout: float | None = None,
 ) -> Decision:
-    """Ask the gate (GateServer) about one tool call. `sock` defaults to
-    $VERONICA_GATE_SOCK, `timeout` to $VERONICA_GATE_TIMEOUT_S, else
-    GATE_ANSWER_BUDGET_S."""
+    """Ask the gate (GateServer) about one tool call. `gate` (the endpoint
+    file) defaults to $VERONICA_GATE, `timeout` to $VERONICA_GATE_TIMEOUT_S,
+    else GATE_ANSWER_BUDGET_S."""
     req = {"v": 1, "tool": tool, "input": input, "origin": origin, "backend": backend}
     try:
-        return _decision(_exchange(req, sock, timeout, GATE_ANSWER_BUDGET_S))
+        return _decision(_exchange(req, gate, timeout, GATE_ANSWER_BUDGET_S))
     except TimeoutError:
         return Decision(False, "denied", NO_ANSWER)
     except Exception:
@@ -83,7 +101,7 @@ def call_gate(
     *,
     origin: str,
     backend: str,
-    sock: str | None = None,
+    gate: str | None = None,
     timeout: float | None = None,
 ) -> tuple[Decision, list[dict], bool]:
     """Ask the gate to decide AND, if it allows, run the tool in the app
@@ -93,7 +111,7 @@ def call_gate(
     GATE_CALL_BUDGET_S."""
     req = {"v": 1, "op": "call", "tool": tool, "input": input, "origin": origin, "backend": backend}
     try:
-        resp = _exchange(req, sock, timeout, GATE_CALL_BUDGET_S)
+        resp = _exchange(req, gate, timeout, GATE_CALL_BUDGET_S)
         d = _decision(resp)
     except TimeoutError:
         return Decision(False, "denied", NO_ANSWER), [], True

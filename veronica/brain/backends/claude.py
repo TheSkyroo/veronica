@@ -105,7 +105,7 @@ class ClaudeBrain:
         f = self.s.session_file
         if not f.exists():
             return None
-        parts = f.read_text().split("\n")
+        parts = f.read_text(encoding="utf-8").split("\n")
         sid = parts[0].strip()
         if not sid:
             return None
@@ -129,13 +129,13 @@ class ClaudeBrain:
         self.s.session_file.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
         if self.s.session_file.exists():
-            old = self.s.session_file.read_text().split("\n")
+            old = self.s.session_file.read_text(encoding="utf-8").split("\n")
             if old and old[0].strip() == sid and len(old) > 1 and old[1].strip():
                 try:
                     started = float(old[1])   # same session: keep its start
                 except ValueError:
                     pass
-        self.s.session_file.write_text(f"{sid}\n{started:.0f}")
+        self.s.session_file.write_text(f"{sid}\n{started:.0f}", encoding="utf-8")
 
     def _clear_session(self) -> None:
         if self.s.session_file.exists():

@@ -1,11 +1,11 @@
-"""The settings window's command surface, kept free of AppKit/WebKit so it
+"""The settings window's command surface, kept free of pywebview/Win32 so it
 can be driven end-to-end in tests.
 
 `SettingsWindow` only marshals: JS posts `{id, cmd, args}`, the window calls
 `bridge.handle(cmd, args)` and replies with the dict. Everything that touches
-the orchestrator goes through `run_on_loop(coro)` (the menubar's `_schedule`)
-because the window runs on the AppKit main thread while the orchestrator lives
-on its own asyncio loop. Long-running work (the update) runs via `run_thread`.
+the orchestrator goes through `run_on_loop(coro)` (the tray app's `_schedule`)
+because the window runs on the UI thread (veronica.ui.dispatch) while the
+orchestrator lives on its own asyncio loop. Long-running work (the update) runs via `run_thread`.
 
 Two classes of setting:
 
@@ -20,7 +20,6 @@ are refused with a friendly message; restart-class ones still save.
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -35,6 +34,7 @@ from veronica.brain.backends import check_backend as _check_backend
 from veronica.brain.backends.local import list_models
 from veronica.speech import voices
 from veronica.ui import login_item as _login_item
+from veronica.ui import win32 as _win32
 
 log = logging.getLogger("veronica.ui.settings")
 
@@ -50,7 +50,8 @@ LEARN_VOICE = "Listen for her, then repeat each line."
 NO_VOICE = "No voice saved."
 LANGUAGE_MODES = ("en", "hi", "auto")
 HUD_MODES = ("full", "mini")
-LOGIN_ITEMS_URL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+LOGIN_ITEMS_URL = "ms-settings:startupapps"           # Settings > Apps > Startup
+MIC_PRIVACY_URL = "ms-settings:privacy-microphone"    # Settings > Privacy > Microphone
 _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before the window sees it
 
 # Which Settings fields each section exposes. Anything in EDITABLE_SETTINGS
@@ -61,7 +62,7 @@ SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor",
                   "noise_suppression", "vad_min_rms", "speaker_verification", "speaker_threshold",
                   "speaker_verification_wake"),
-    "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist", "auto_allow_tools",
+    "brain": ("effort", "memory_enabled", "memory_facts_max", "brain_cwd", "brain_session_max_age_h", "computer_trust_s", "preapprove_by_wording", "auto_allow_tools",
               "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
               "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
               "brain_offline_fallback", "local_server_bin", "local_model", "local_ctx", "local_port"),
@@ -94,7 +95,13 @@ def _thread(fn: Callable[[], None]) -> None:
 
 
 def _open_path(target: Path | str) -> None:
-    subprocess.Popen(["open", str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Open a file with its default app, or an ms-settings: page."""
+    _win32.open_target(target)
+
+
+def _section_fields(section: str) -> tuple[str, ...]:
+    """SETTING_SECTIONS[section], minus anything config no longer offers."""
+    return tuple(n for n in SETTING_SECTIONS.get(section, ()) if n in config.EDITABLE_SETTINGS)
 
 
 def _ok(**extra) -> dict:
@@ -118,7 +125,7 @@ class SettingsBridge:
         version=_version,
         updater=_updater,
         relaunch: Callable[[], bool],
-        bundle_path: Path | None,
+        exe_path: Path | None,
         repo: Path,
         run_thread: Callable[[Callable[[], None]], None] = _thread,
         open_path: Callable[[Path | str], None] = _open_path,
@@ -128,8 +135,8 @@ class SettingsBridge:
         self._settings = settings
         self._check_backend = check_backend
         self._get_orch = get_orch
-        #: A store, None, or a zero-arg callable returning either (the menu
-        #: bar passes a callable: its orchestrator — and so the MemoryStore
+        #: A store, None, or a zero-arg callable returning either (the tray
+        #: app passes a callable: its orchestrator — and so the MemoryStore
         #: — only exists once the background thread has built it).
         self._store = store
         self._run_on_loop = run_on_loop
@@ -138,7 +145,7 @@ class SettingsBridge:
         self._version = version
         self._updater = updater
         self._relaunch = relaunch
-        self._bundle_path = bundle_path
+        self._exe_path = exe_path
         self._repo = repo
         self._run_thread = run_thread
         #: Public for the window: long commands it dispatches run here too.
@@ -149,8 +156,8 @@ class SettingsBridge:
         #: Set by the window to push a fresh `get_state()` to JS after any
         #: change. It may fire from the update worker thread (a failed
         #: update) or from whichever thread ran `check_update`, so every call
-        #: is routed through `marshal` — the window passes something that
-        #: hops to the AppKit main thread; the default runs inline.
+        #: is routed through `marshal` — the app passes something that
+        #: hops to the UI thread; the default runs inline.
         self.on_state_changed: Callable[[dict], None] | None = None
         self._update_status = None          # last UpdateStatus from check_update
         self._update_error: str | None = None
@@ -173,6 +180,7 @@ class SettingsBridge:
             "restart": self.restart,
             "open_logs": self.open_logs,
             "open_login_items": self.open_login_items,
+            "open_mic_privacy": self.open_mic_privacy,
             "learn_voice": self.learn_voice,
             "forget_voice": self.forget_voice,
         }
@@ -262,7 +270,7 @@ class SettingsBridge:
                 "hud_hide_after_s": setting("hud_hide_after_s"),
                 "hud_particles": setting("hud_particles"),
                 "hud_intensity": setting("hud_intensity"),
-                "can_start_at_login": self._bundle_path is not None,
+                "can_start_at_login": self._exe_path is not None,
             },
             "voice": {
                 "voice": voice,
@@ -274,12 +282,12 @@ class SettingsBridge:
                 ],
             },
             "listening": {
-                **{name: setting(name) for name in SETTING_SECTIONS["listening"]},
+                **{name: setting(name) for name in _section_fields("listening")},
                 "voice_profile": self._voice_profile(orch),
             },
             "briefings": sched.to_prefs(),
             "brain": {
-                **{name: setting(name) for name in SETTING_SECTIONS["brain"]},
+                **{name: setting(name) for name in _section_fields("brain")},
                 # What's actually answering right now ("Codex", "Claude (for
                 # Codex)" while standing in); "" until the switcher exists.
                 "brain_label": self._brain_label(orch),
@@ -298,7 +306,7 @@ class SettingsBridge:
                 "update": update,
                 "updating": self._updating,
                 "log_path": str(self._settings.log_file),
-                "can_restart": self._bundle_path is not None,
+                "can_restart": self._exe_path is not None,
             },
             "meta": {
                 "restart_required": self.restart_required,
@@ -328,7 +336,7 @@ class SettingsBridge:
                 result = self._set_speed(value)
             elif section == "briefings" and key in BRIEFING_KEYS:
                 result = self._set_briefing(key, value)
-            elif key in SETTING_SECTIONS.get(section, ()):
+            elif key in _section_fields(section):
                 result = self._set_setting(key, value)
             else:
                 result = _fail(f"unknown setting {section}.{key}")
@@ -380,7 +388,7 @@ class SettingsBridge:
 
     async def _with_player_reset(self, orch, coro, *, push_after: bool = False) -> None:
         """The orchestrator's own dispatch resets the player before a turn
-        (the turns don't do it themselves); mirror that, as the menubar's
+        (the turns don't do it themselves); mirror that, as the tray's
         `_voice_action` does, so in-flight speech is cut before the reply.
         With `push_after`, push fresh state to the window once the turn has
         run (i.e. once orch.language / tts.voice actually changed)."""
@@ -407,10 +415,10 @@ class SettingsBridge:
 
     def _set_start_at_login(self, value) -> dict:
         want = _to_bool(value)
-        if self._bundle_path is None:
+        if self._exe_path is None:
             return _fail(BUILD_FIRST)
         if want:
-            self._login_item.enable(self._bundle_path)
+            self._login_item.enable(self._exe_path)
         else:
             self._login_item.disable()
         return _ok()
@@ -422,7 +430,7 @@ class SettingsBridge:
         orch = self._orch_or_none()
         if orch is None:
             return _fail(STARTING_UP)
-        # The menubar persists hud_mode when it handles the event, but that
+        # The tray app persists hud_mode when it handles the event, but that
         # happens on a later _drain tick — save first so the state we push
         # right after this already shows the new mode.
         self._prefs.save({"hud_mode": mode})
@@ -495,7 +503,7 @@ class SettingsBridge:
         setattr(orch.s, name, coerced)   # validate_assignment=True: raises ValueError on bad input
         self._prefs.save_settings_override(name, _jsonable(getattr(orch.s, name)))
         if name in HUD_CONFIG_KEYS:
-            # The orb applies these live: the menubar's _drain maps a "hud"
+            # The orb applies these live: the tray's _drain maps a "hud"
             # event carrying "config" to HudWindow.configure().
             orch._emit("hud", {"config": {"particles": int(orch.s.hud_particles),
                                           "intensity": float(orch.s.hud_intensity)}})
@@ -646,7 +654,7 @@ class SettingsBridge:
     def restart(self) -> dict:
         # Reply first, relaunch after: relaunch() schedules the quit, and the
         # window must get its answer before the app goes away.
-        can = self._bundle_path is not None
+        can = self._exe_path is not None
 
         def go() -> None:
             if not self._relaunch() and can:
@@ -661,6 +669,10 @@ class SettingsBridge:
 
     def open_login_items(self) -> dict:
         self._open_path(LOGIN_ITEMS_URL)
+        return _ok()
+
+    def open_mic_privacy(self) -> dict:
+        self._open_path(MIC_PRIVACY_URL)
         return _ok()
 
 

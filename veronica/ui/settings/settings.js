@@ -19,17 +19,34 @@
   let restartRequired = false;
   let nextId = 1;
   const pending = new Map();      // id → {resolve}
-  const sent = [];                // Playwright: messages that had no native handler
+  const sent = [];                // posted before pywebview was ready (Playwright: never delivered)
   const $ = sel => document.querySelector(sel);
   const tabsEl = $('#tabs');
   const paneEl = $('#pane');
   const bannerEl = $('#banner');
 
   // ---- transport -------------------------------------------------------------
+  // pywebview injects `window.pywebview.api` (the Python js_api object) and
+  // fires `pywebviewready` once it's usable. Anything posted before that —
+  // or with no pywebview at all, as under Playwright — waits in `sent`;
+  // the ready event delivers whatever is still unanswered.
   function native() {
     try {
-      return window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.veronica || null;
+      const api = window.pywebview && window.pywebview.api;
+      return api && typeof api.handle === 'function' ? api : null;
     } catch (e) { return null; }
+  }
+
+  function deliver(api, msg) {
+    const fail = e => {
+      const resolve = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (resolve) resolve({ok: false, message: String(e)});
+    };
+    try {
+      const p = api.handle(msg.id, msg.cmd, msg.args);
+      if (p && typeof p.catch === 'function') p.catch(fail);
+    } catch (e) { fail(e); }
   }
 
   function post(cmd, args) {
@@ -37,14 +54,17 @@
     const msg = {id, cmd, args: args || {}};
     return new Promise(resolve => {
       pending.set(id, resolve);
-      const h = native();
-      if (h) {
-        try { h.postMessage(msg); } catch (e) { pending.delete(id); resolve({ok: false, message: String(e)}); }
-      } else {
-        sent.push(msg);
-      }
+      const api = native();
+      if (api) deliver(api, msg);
+      else sent.push(msg);
     });
   }
+
+  window.addEventListener('pywebviewready', () => {
+    const api = native();
+    if (!api) return;
+    for (const msg of sent.splice(0)) if (pending.has(msg.id)) deliver(api, msg);
+  });
 
   window.settings = {
     state(json) {
@@ -192,7 +212,7 @@
     if (!models.length) return null;
     const options = models.map(m => [m.path, m.size ? m.name + ' (' + m.size + ')' : m.name]);
     const current = b.local_model == null ? '' : String(b.local_model);
-    if (current && !models.some(m => m.path === current)) options.unshift([current, current.split('/').pop()]);
+    if (current && !models.some(m => m.path === current)) options.unshift([current, current.split(/[\\/]/).pop()]);
     const f = fields().local_model || {};
     return row('brain', 'local_model_pick', {kind: 'choice', label: f.label || 'Local model', options, setKey: 'local_model',
                                              help: 'Models in the same folder. Applies on the next local turn.'}, current);
@@ -276,7 +296,7 @@
       frag.push(row('general', 'language', {kind: 'choice', label: 'Language', help: 'Auto detects Hindi or English per turn.', options: LANGUAGES}, g.language));
       frag.push(row('general', 'start_at_login', {
         kind: 'bool', label: 'Start at login', disabled: !g.can_start_at_login,
-        help: g.can_start_at_login ? 'Launch the app bundle when you log in.' : 'Build the app first (make app).',
+        help: g.can_start_at_login ? 'Start Veronica.exe when you sign in to Windows.' : 'Build the app first (make app), then run Veronica.exe.',
       }, g.start_at_login));
       frag.push(row('general', 'hud_mode', {kind: 'choice', label: 'HUD style', help: 'Full card with the conversation, or a small orb.', options: HUD_MODES}, g.hud_mode));
       frag.push(settingRow('general', 'hud_hide_after_s'));
@@ -284,7 +304,8 @@
       frag.push(settingRow('general', 'hud_intensity'));
       frag.push(settingRow('general', 'ptt_enabled'));
       frag.push(el('div', {class: 'actions'}, [
-        button('Open Login Items…', {attrs: {'data-cmd': 'open_login_items'}, onclick: () => post('open_login_items')}),
+        button('Open Startup Apps…', {attrs: {'data-cmd': 'open_login_items'}, onclick: () => post('open_login_items')}),
+        button('Microphone Privacy…', {attrs: {'data-cmd': 'open_mic_privacy'}, onclick: () => post('open_mic_privacy')}),
       ]));
       return frag;
     },
@@ -374,9 +395,8 @@
       frag.push(settingRow('brain', 'brain_session_max_age_h'));
       frag.push(settingRow('brain', 'computer_trust_s'));
       frag.push(settingRow('brain', 'preapprove_by_wording'));
-      frag.push(settingRow('brain', 'shortcut_allowlist', {wide: true}));
       frag.push(el('h3', {text: 'Auto-allow tools'}));
-      frag.push(el('p', {class: 'lead', text: "Ticked tools run without asking. Only these can be added — sending mail or messages, AppleScript, screen control, shortcuts and the shell always ask."}));
+      frag.push(el('p', {class: 'lead', text: "Ticked tools run without asking. Only these can be added — sending mail or messages, screen control, PowerShell and the shell always ask."}));
       const allowed = Array.isArray(b.auto_allow_tools) ? b.auto_allow_tools : [];
       for (const t of (b.auto_allowable || [])) frag.push(autoAllowRow(t.tool, t.label, allowed));
       frag.push(settingRow('brain', 'auto_allow_tools', {wide: true}));

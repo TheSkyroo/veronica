@@ -3,32 +3,42 @@ Claude as an image, exposed as an in-process MCP tool. Read-only and local
 (no network), so it's allow-class — see `veronica.brain.policy`.
 
 Privacy: nothing accumulates on disk. Each capture overwrites the single
-file ~/.veronica/screens/latest.png (directory 0700, file 0600), which is
-kept only so the brain's text-only fallback (if sending the image block
-fails) can point Claude's Read tool at it; a transient JPEG re-encode of
-an oversized capture is deleted as soon as its bytes are read.
+file ~/.veronica/screens/latest.png (directory 0700, file 0600 — on
+Windows the user profile's ACLs are what keep it private, the mode bits
+are best-effort), which is kept only so the brain's text-only fallback
+(if sending the image block fails) and OCR can read it; a JPEG re-encode
+of an oversized capture is made in memory and never written.
+
+Capture: `mss` grabs the pixels of a monitor, of the foreground window's
+rectangle, or of every monitor in turn; Pillow downscales and encodes.
+A `selection` capture opens Windows' own snipping overlay
+(ms-screenclip:) and picks the snip up from the clipboard. Windows needs
+no permission for any of this.
+
+Coordinates: the process is per-monitor DPI aware
+(`computer_events.ensure_dpi_awareness`), so every rectangle here is in
+physical pixels of the virtual screen — (0, 0) is the primary monitor's
+top-left and a monitor left of or above it has negative coordinates.
 
 Geometry: next to latest.png lives latest.json (0600), describing the
-captured area in screen points and the final PNG size, so the computer_*
-tools can turn a pixel Claude points at in the image back into a screen
-coordinate — see `Geometry`, `load_geometry`.
+captured area in screen pixels and the final (possibly downscaled) image
+size, so the computer_* tools can turn a pixel Claude points at in the
+image back into a screen coordinate — see `Geometry`, `load_geometry`.
 
-Displays: `screencapture` grabs the main display unless told otherwise,
-so a `screen` capture is pinned to a display with `-D <index>` — by
-default the one the frontmost window sits on, which is the monitor the
-user is working on. See `displays`, `pick_display`; the geometry's
-`origin_*` is that display's origin in the global point space, so a
-click mapped back out of the image lands on the right monitor.
+Displays: a `screen` capture grabs one monitor — by default the one the
+foreground window sits on, which is the one the user is working on. See
+`displays`, `pick_display`; the geometry's `origin_*` is that monitor's
+origin in the virtual screen, so a click mapped back out of the image
+lands on the right monitor.
 """
 import asyncio
 import base64
 import contextlib
+import io
 import json
 import logging
 import os
-import re
 import struct
-import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,11 +46,12 @@ from pathlib import Path
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from veronica.config import settings
+from veronica.tools import computer_events
 
-TIMEOUT_S = 15
 SELECTION_TIMEOUT_S = 60   # the user has to drag out a region first
+SELECTION_POLL_S = 0.25
 DOWNSCALE_MAX_PX = 1568
-# PNGs bigger than this get re-encoded as JPEG q80 (then q60 if still too
+# Images bigger than this get re-encoded as JPEG q80 (then q60 if still too
 # big). The Agent SDK's stream-json reader caps one JSON line at 1 MiB and
 # the base64 image travels inside it (~37% inflation plus the rest of the
 # message), so the raw image must stay well under that: a 407 KB PNG
@@ -63,7 +74,8 @@ GEOMETRY_PATH: Path = settings.home / "screens" / GEOMETRY_NAME
 GEOMETRY_MAX_AGE_S = 120
 
 log = logging.getLogger(__name__)
-_now = time.time   # swapped in tests
+_now = time.time          # swapped in tests
+_poll_sleep = time.sleep  # swapped in tests
 
 
 def _err(text: str) -> dict:
@@ -71,15 +83,15 @@ def _err(text: str) -> dict:
 
 
 def _display_phrase(geometry: "Geometry | None", count: int, with_size: bool = False) -> str | None:
-    """"display 2 of 2 (external)" for the display a capture came from, or
-    None when there's only one display (or no display info) \u2014 then the
-    wording stays as it always was, with no screen to disambiguate."""
+    """"display 2 of 2 (secondary)" for the display a capture came from,
+    or None when there's only one display (or no display info) — then
+    the wording stays as it always was, with no screen to disambiguate."""
     d = geometry.display if geometry is not None else None
     if not d or count <= 1:
         return None
-    kind = "main" if d.get("main") else "external"
+    kind = "primary" if d.get("main") else "secondary"
     if with_size and geometry is not None:
-        kind += f", {geometry.width_pt:.0f}\u00d7{geometry.height_pt:.0f} pt"
+        kind += f", {geometry.screen_w:.0f}×{geometry.screen_h:.0f} px"
     return f"display {d.get('index')} of {count} ({kind})"
 
 
@@ -92,13 +104,13 @@ def _image_result(
     if geometry is None:
         text = f"Screenshot of the {region}."
     elif region == "screen" and (phrase := _display_phrase(geometry, display_count, with_size=True)):
-        text = f"Screenshot of {phrase}: {geometry.image_w}\u00d7{geometry.image_h} px. {coords}"
+        text = f"Screenshot of {phrase}: {geometry.image_w}×{geometry.image_h} px. {coords}"
     else:
         phrase = _display_phrase(geometry, display_count)
         where = f"the {region} on {phrase}" if phrase else f"the {region}"
         text = (
-            f"Screenshot of {where}: {geometry.image_w}\u00d7{geometry.image_h} px "
-            f"(screen {geometry.width_pt:.0f}\u00d7{geometry.height_pt:.0f} pt). {coords}"
+            f"Screenshot of {where}: {geometry.image_w}×{geometry.image_h} px "
+            f"(screen {geometry.screen_w:.0f}×{geometry.screen_h:.0f} px). {coords}"
         )
     return {
         "content": [
@@ -114,7 +126,7 @@ def _all_result(
     geometry: "Geometry | None",
 ) -> dict:
     """One result carrying every display's image. Images go in display
-    order and share `MAX_ALL_BYTES`; the coordinates belong to `chosen` \u2014
+    order and share `MAX_ALL_BYTES`; the coordinates belong to `chosen` —
     the display the sidecar (and latest.png) describes."""
     content: list[dict] = []
     total, dropped = 0, []
@@ -127,14 +139,14 @@ def _all_result(
             "type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime,
         })
     listing = ", ".join(
-        f"display {d.index} ({d.label}, {d.w:.0f}\u00d7{d.h:.0f} pt)" if d else "the screen"
+        f"display {d.index} ({d.label}, {d.w:.0f}×{d.h:.0f} px)" if d else "the screen"
         for d, _data, _mime in shots
     )
     parts = [f"Screenshot of all {len(shots)} displays, in order: {listing}."]
     if dropped:
         names = ", ".join(f"display {d.index}" for d in dropped if d)
         parts.append(
-            f"{names} didn't fit in one message \u2014 ask for it on its own with display=<number>."
+            f"{names} didn't fit in one message — ask for it on its own with display=<number>."
         )
     if chosen is not None and geometry is not None:
         parts.append(
@@ -147,7 +159,7 @@ def _all_result(
 
 def _guard(fn):
     """Wrap a handler so malformed args or unexpected failures return
-    `_err(...)` instead of raising (same pattern as tools/mac.py)."""
+    `_err(...)` instead of raising."""
     async def wrapper(args: dict) -> dict:
         try:
             return await fn(args)
@@ -169,36 +181,54 @@ def latest_screenshot_path() -> Path:
     return settings.home / "screens" / LATEST_NAME
 
 
+# ---- framework seams --------------------------------------------------------
+
+def _win32():
+    """The Win32 backend shared with `computer_events` (tests swap it)."""
+    return computer_events._win32()
+
+
+def _mss():
+    import mss
+    return mss
+
+
+def _pil():
+    from PIL import Image
+    return Image
+
+
 # ---- geometry sidecar -----------------------------------------------------
 
 @dataclass
 class Geometry:
-    """What latest.png shows, in screen points, plus its pixel size.
+    """What latest.png shows, in screen pixels, plus the image's size.
 
-    `origin_*`/`width_pt`/`height_pt` are the captured area on screen (the
-    whole main display, or the front window's bounds for a window capture);
-    `image_w/h` the final — downscaled — PNG; `scale = image_w / width_pt`
-    (pixels per point). `window` is the captured window's
-    {id, app, title, x, y, w, h} or None; `display` the screen it came
-    from as {id, index, main}, or None when that isn't known.
+    `origin_*`/`screen_w`/`screen_h` are the captured area on screen (a
+    whole monitor, or the foreground window's bounds for a window
+    capture) in physical virtual-screen pixels; `image_w/h` the final —
+    possibly downscaled — image; `scale = image_w / screen_w` (image
+    pixels per screen pixel, 1.0 unless downscaled). `window` is the
+    captured window's {id, app, title, x, y, w, h} or None; `display` the
+    monitor it came from as {id, index, main}, or None when not known.
 
-    `origin_*` is in the *global* point space, so on a second monitor it
-    is that display's origin (e.g. (1470, 0)) and `to_screen` lands on
-    the right screen."""
+    `origin_*` is in the *virtual screen*, so on a second monitor it is
+    that monitor's origin (e.g. (1920, 0), or (-1920, 0) for one left of
+    the primary) and `to_screen` lands on the right monitor."""
     region: str
     image_w: int
     image_h: int
     origin_x: float
     origin_y: float
-    width_pt: float
-    height_pt: float
+    screen_w: float
+    screen_h: float
     scale: float
     captured_at: float
     window: dict | None
     display: dict | None = None
 
     def to_screen(self, x_img: float, y_img: float) -> tuple[float, float]:
-        """Image pixel (top-left origin) → global screen point."""
+        """Image pixel (top-left origin) → virtual-screen pixel."""
         return (self.origin_x + x_img / self.scale, self.origin_y + y_img / self.scale)
 
     @property
@@ -206,23 +236,12 @@ class Geometry:
         return _now() - self.captured_at
 
 
-def _quartz():
-    import Quartz
-    return Quartz
-
-
-def _display_bounds(quartz=None) -> tuple[float, float, float, float]:
-    """Main display bounds in points: (x, y, w, h)."""
-    q = quartz if quartz is not None else _quartz()
-    r = q.CGDisplayBounds(q.CGMainDisplayID())
-    return (float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height))
-
-
 @dataclass
 class Display:
-    """One active display: its CoreGraphics id, its 1-based place in the
-    active display list — which is what `screencapture -D <n>` counts —
-    and its bounds in the global point space."""
+    """One monitor: its HMONITOR, its 1-based number (primary first, then
+    the others left to right, top to bottom), and its bounds in the
+    virtual screen (physical pixels; negative left of / above the
+    primary)."""
     id: int
     index: int
     x: float
@@ -230,10 +249,11 @@ class Display:
     w: float
     h: float
     main: bool
+    name: str = ""
 
     @property
     def label(self) -> str:
-        return "main" if self.main else "external"
+        return "primary" if self.main else "secondary"
 
     def contains(self, x: float, y: float) -> bool:
         return self.x <= x < self.x + self.w and self.y <= y < self.y + self.h
@@ -242,42 +262,33 @@ class Display:
         return {"id": self.id, "index": self.index, "main": self.main}
 
 
-def _active_displays(quartz=None) -> list[Display]:
-    """Every active display in `CGGetActiveDisplayList` order."""
-    q = quartz if quartz is not None else _quartz()
-    err, ids, _count = q.CGGetActiveDisplayList(MAX_DISPLAYS, None, None)
-    if err:
-        return []
-    main = int(q.CGMainDisplayID())
+def _active_displays(win32=None) -> list[Display]:
+    """Every monitor via EnumDisplayMonitors/GetMonitorInfoW, numbered
+    primary first, then by position (x, then y)."""
+    w = win32 if win32 is not None else _win32()
+    mons = list(w.monitors() or ())[:MAX_DISPLAYS]
+    mons.sort(key=lambda m: (not m["primary"], m["rect"][0], m["rect"][1]))
     out = []
-    for i, did in enumerate(ids or (), start=1):
-        r = q.CGDisplayBounds(did)
+    for i, m in enumerate(mons, start=1):
+        left, top, right, bottom = m["rect"]
         out.append(Display(
-            id=int(did), index=i,
-            x=float(r.origin.x), y=float(r.origin.y),
-            w=float(r.size.width), h=float(r.size.height),
-            main=int(did) == main,
+            id=int(m.get("handle") or 0), index=i,
+            x=float(left), y=float(top), w=float(right - left), h=float(bottom - top),
+            main=bool(m["primary"]), name=str(m.get("name") or ""),
         ))
+    if out and not any(d.main for d in out):
+        out[0].main = True
     return out
 
 
 def displays() -> list[Display]:
-    """The active displays, or a single entry built from the main
-    display's bounds when the list can't be read. [] when Quartz isn't
-    reachable at all (non-macOS test environment) — callers then fall
-    back to screencapture's own default, the main display."""
+    """The monitors, or [] when Win32 isn't reachable (non-Windows test
+    environment) — callers then fall back to mss' own primary monitor."""
     try:
-        found = _active_displays()
+        return _active_displays()
     except Exception as exc:
-        log.warning("active display list unavailable: %s", exc)
-        found = []
-    if found:
-        return found
-    try:
-        x, y, w, h = _display_bounds()
-    except Exception:
+        log.warning("display list unavailable: %s", exc)
         return []
-    return [Display(id=0, index=1, x=x, y=y, w=w, h=h, main=True)]
 
 
 def main_display(found: list[Display] | None = None) -> Display | None:
@@ -286,9 +297,9 @@ def main_display(found: list[Display] | None = None) -> Display | None:
 
 
 def _front_window_display(found: list[Display]) -> Display | None:
-    """The display holding the centre of the frontmost window — the screen
-    the user is actually working on — or None if there's no front window
-    (or its centre isn't on any display)."""
+    """The display holding the centre of the foreground window — the
+    screen the user is actually working on — or None if there's no front
+    window (or its centre isn't on any display)."""
     try:
         wid = front_window_id()
         if wid is None:
@@ -305,9 +316,10 @@ def _front_window_display(found: list[Display]) -> Display | None:
 
 def pick_display(spec: str = "auto", found: list[Display] | None = None) -> Display | None:
     """Which display a region='screen' capture should grab: 'auto' (the
-    one the frontmost window is on, else the main one), 'main', 'all'
-    (same as auto — it picks the display the coordinates will belong to),
-    or a 1-based display number. None when no display is known."""
+    one the foreground window is on, else the primary one), 'main' /
+    'primary', 'all' (same as auto — it picks the display the coordinates
+    will belong to), or a 1-based display number. None when no display
+    is known."""
     found = displays() if found is None else found
     if not found:
         return None
@@ -316,50 +328,37 @@ def pick_display(spec: str = "auto", found: list[Display] | None = None) -> Disp
         index = int(spec)
         chosen = next((d for d in found if d.index == index), None)
         if chosen is None:
-            raise ValueError(f"there is no display {index} — this Mac has {len(found)}")
+            raise ValueError(f"there is no display {index} — this PC has {len(found)}")
         return chosen
-    if spec == "main":
+    if spec in ("main", "primary"):
         return main_display(found)
     if spec not in ("", "auto", "all"):
         raise ValueError(f"display must be 'auto', 'main', 'all' or a number, not {spec!r}")
     return _front_window_display(found) or main_display(found)
 
 
-def _window_bounds(window_id: int, quartz=None) -> dict | None:
-    """{"id","app","title","x","y","w","h"} for `window_id` (points), or
-    None if the window is gone."""
-    q = quartz if quartz is not None else _quartz()
-    info = q.CGWindowListCopyWindowInfo(q.kCGWindowListOptionIncludingWindow, window_id) or []
-    for w in info:
-        if w.get("kCGWindowNumber") != window_id:
-            continue
-        b = w.get("kCGWindowBounds") or {}
-        return {
-            "id": int(window_id),
-            "app": str(w.get("kCGWindowOwnerName") or ""),
-            "title": str(w.get("kCGWindowName") or ""),
-            "x": float(b.get("X", 0) or 0), "y": float(b.get("Y", 0) or 0),
-            "w": float(b.get("Width", 0) or 0), "h": float(b.get("Height", 0) or 0),
-        }
-    return None
-
-
-_SIPS_DIM = re.compile(r"pixel(Width|Height):\s*(\d+)")
+def _window_bounds(window_id: int, win32=None) -> dict | None:
+    """{"id","app","title","x","y","w","h"} for the window `window_id`
+    (an HWND), in screen pixels — DWM's visible frame, without the
+    invisible resize border — or None if the window is gone."""
+    w = win32 if win32 is not None else _win32()
+    rect = w.window_rect(window_id)
+    if not rect:
+        return None
+    left, top, right, bottom = rect
+    try:
+        app, _exe = computer_events.app_for_pid(w.window_pid(window_id), win32=w)
+    except Exception:
+        app = ""
+    return {
+        "id": int(window_id), "app": str(app or ""), "title": str(w.window_title(window_id) or ""),
+        "x": float(left), "y": float(top), "w": float(right - left), "h": float(bottom - top),
+    }
 
 
 def _png_size(path: Path) -> tuple[int, int] | None:
-    """(width, height) of `path`: `sips -g` first, then the PNG IHDR
-    header as a fallback. None if neither works."""
-    try:
-        done = subprocess.run(
-            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-            capture_output=True, text=True, timeout=TIMEOUT_S,
-        )
-        dims = dict(_SIPS_DIM.findall(done.stdout or ""))
-        if "Width" in dims and "Height" in dims:
-            return int(dims["Width"]), int(dims["Height"])
-    except Exception:
-        pass
+    """(width, height) of the PNG at `path`, read from its IHDR header.
+    None if it isn't a readable PNG."""
     try:
         with open(path, "rb") as f:
             head = f.read(24)
@@ -390,7 +389,7 @@ def load_geometry(path: Path | None = None) -> Geometry | None:
         return Geometry(
             region=str(raw["region"]), image_w=int(raw["image_w"]), image_h=int(raw["image_h"]),
             origin_x=float(raw["origin_x"]), origin_y=float(raw["origin_y"]),
-            width_pt=float(raw["width_pt"]), height_pt=float(raw["height_pt"]),
+            screen_w=float(raw["screen_w"]), screen_h=float(raw["screen_h"]),
             scale=float(raw["scale"]), captured_at=float(raw["captured_at"]),
             window=dict(raw["window"]) if raw.get("window") else None,
             display=dict(raw["display"]) if raw.get("display") else None,
@@ -400,172 +399,182 @@ def load_geometry(path: Path | None = None) -> Geometry | None:
 
 
 def _build_geometry(
-    region: str, png_path: Path, window_id: int | None, display: Display | None = None,
+    region: str, image_size: tuple[int, int] | None,
+    rect: tuple[float, float, float, float] | None,
+    window: dict | None = None, display: Display | None = None,
 ) -> Geometry | None:
-    """Compute the sidecar for the capture that just landed at `png_path`.
-    None (no sidecar) if the image size or the display bounds can't be
-    determined — the screenshot itself is still fine to show — and always
-    None for a `selection` capture: the dragged rectangle's screen origin
-    isn't known, so no geometry is the honest answer (the computer tools
-    then refuse with "take a screenshot first" instead of clicking the
-    wrong place)."""
-    if region == "selection":
+    """The sidecar for a capture of `rect` = (x, y, w, h) on screen that
+    ended up `image_size` pixels. None (no sidecar) when either is unknown
+    — the screenshot itself is still fine to show — and always None for a
+    `selection` capture: the snipped rectangle's screen origin isn't
+    known, so no geometry is the honest answer (the computer tools then
+    refuse with "take a screenshot first" instead of clicking the wrong
+    place)."""
+    if region == "selection" or image_size is None or rect is None:
         return None
-    size = _png_size(png_path)
-    if size is None:
-        return None
-    try:
-        window = _window_bounds(window_id) if region == "window" and window_id is not None else None
-        if window is not None and window["w"] > 0 and window["h"] > 0:
-            ox, oy, w_pt, h_pt = window["x"], window["y"], window["w"], window["h"]
-        elif display is not None:
-            # The captured display's own origin in the global space, so a
-            # click mapped back through `to_screen` lands on that monitor.
-            ox, oy, w_pt, h_pt = display.x, display.y, display.w, display.h
-            region, window = "screen", None
-        else:
-            ox, oy, w_pt, h_pt = _display_bounds()
-            region, window = "screen", None
-    except Exception as exc:
-        log.warning("screenshot geometry unavailable: %s", exc)
-        return None
-    if w_pt <= 0:
+    ox, oy, w, h = rect
+    if w <= 0 or h <= 0:
         return None
     return Geometry(
-        region=region, image_w=size[0], image_h=size[1],
-        origin_x=ox, origin_y=oy, width_pt=w_pt, height_pt=h_pt,
-        scale=size[0] / w_pt, captured_at=_now(), window=window,
+        region=region, image_w=int(image_size[0]), image_h=int(image_size[1]),
+        origin_x=float(ox), origin_y=float(oy), screen_w=float(w), screen_h=float(h),
+        scale=image_size[0] / w, captured_at=_now(), window=window,
         display=display.as_sidecar() if display is not None else None,
     )
 
 
-def _window_list() -> list[dict]:
-    """On-screen windows, front to back, via Quartz — [] if Quartz isn't
-    importable (e.g. non-macOS test environment)."""
-    try:
-        import Quartz
-    except Exception:
-        return []
-    options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
-    return list(Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or [])
-
-
-def _frontmost_pid() -> int | None:
-    """PID of the frontmost application, or None if AppKit isn't
-    available / nothing is frontmost."""
-    try:
-        from AppKit import NSWorkspace
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return int(app.processIdentifier()) if app is not None else None
-    except Exception:
-        return None
-
-
 MIN_WINDOW_PX = 50
-# A window whose shorter side is under this is a strip, not somewhere the
-# user works: Chrome publishes a 2560x115 untitled layer-0 window in front
-# of the real one.
-STRIP_PX = 200
-# Among the app's real windows, the frontmost one at least this share of the
-# largest one's area wins, so a size-alike window behind never beats the one
-# in front, but a popup or panel never beats the main window.
-MAIN_AREA_SHARE = 0.25
+# The desktop and the taskbar can be the foreground window; neither is a
+# window the user works in.
+SHELL_CLASSES = frozenset({"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
+
+
+def _real_window(w, hwnd: int) -> bool:
+    """Visible (not minimised/cloaked), not the shell, and bigger than a
+    helper sliver on both sides."""
+    if not hwnd or not w.window_visible(hwnd) or w.window_class(hwnd) in SHELL_CLASSES:
+        return False
+    rect = w.window_rect(hwnd)
+    if not rect:
+        return False
+    left, top, right, bottom = rect
+    return right - left > MIN_WINDOW_PX and bottom - top > MIN_WINDOW_PX
 
 
 def front_window_id() -> int | None:
-    """The window id (kCGWindowNumber) of the frontmost app's frontmost
-    *real* window: layer 0, visible (alpha > 0), bigger than a helper
-    sliver (> MIN_WINDOW_PX on both sides), and — when the frontmost app's
-    PID can be determined — owned by that app. Without those filters the
-    first layer-0 entry is often an invisible alpha-0 helper window (menu
-    bar extras, input-method panels, screen-recording overlays), whose
-    capture is a blank image.
-
-    Of those, strips (shorter side under STRIP_PX) are passed over and the
-    frontmost window with at least MAIN_AREA_SHARE of the largest one's
-    area wins; if only strips are left, the first as before. Returns None
-    if nothing qualifies."""
-    pid = _frontmost_pid()
-    found: list[tuple[int, float, float]] = []      # (id, w, h), z-order
-    for w in _window_list():
-        if w.get("kCGWindowLayer", 0) != 0:
-            continue
-        if float(w.get("kCGWindowAlpha", 1) or 0) <= 0:
-            continue
-        if pid is not None and w.get("kCGWindowOwnerPID") != pid:
-            continue
-        bounds = w.get("kCGWindowBounds") or {}
-        ww, hh = float(bounds.get("Width", 0) or 0), float(bounds.get("Height", 0) or 0)
-        if ww <= MIN_WINDOW_PX or hh <= MIN_WINDOW_PX:
-            continue
-        wid = w.get("kCGWindowNumber")
-        if wid is not None:
-            found.append((int(wid), ww, hh))
-    if not found:
-        return None
-    real = [(wid, ww * hh) for wid, ww, hh in found if min(ww, hh) >= STRIP_PX]
-    if not real:
-        return found[0][0]
-    largest = max(area for _, area in real)
-    return next(wid for wid, area in real if area >= largest * MAIN_AREA_SHARE)
-
-
-def _capture_argv(
-    region: str, out_path: Path, window_id: int | None = None, display: Display | None = None,
-) -> list[str] | None:
-    """Build the `screencapture` argv for `region`, or None if a window
-    capture was requested but no front window id could be found. Without
-    `-D` screencapture grabs the main display only, which is how the
-    external monitor used to be invisible."""
-    argv = ["screencapture", "-x", "-t", "png"]
-    if region == "screen" and display is not None:
-        argv += ["-D", str(display.index)]
-    if region == "window":
-        wid = window_id if window_id is not None else front_window_id()
-        if wid is None:
+    """The HWND of the foreground window when it's a real window (see
+    `_real_window`); when the foreground is a tiny helper or a hidden
+    owner window instead, the frontmost real top-level window of the same
+    process (EnumWindows z-order). None for the desktop/taskbar, when
+    nothing qualifies, or when Win32 isn't reachable."""
+    try:
+        w = _win32()
+        hwnd = w.foreground_window()
+        if not hwnd or w.window_class(hwnd) in SHELL_CLASSES:
             return None
-        # -o: no drop shadow, so the image edges are the window bounds
-        # and the geometry sidecar's scale is exact.
-        argv += ["-l", str(wid), "-o"]
-    elif region == "selection":
-        argv += ["-i"]
-    argv.append(str(out_path))
-    return argv
+        if _real_window(w, hwnd):
+            return int(hwnd)
+        pid = w.window_pid(hwnd)
+        for other in w.top_level_windows():
+            if other != hwnd and w.window_pid(other) == pid and _real_window(w, other):
+                return int(other)
+    except Exception as exc:
+        log.debug("front window unknown: %s", exc)
+    return None
 
 
-# screencapture's stderr when its notion of the displays is stale (a
-# monitor was just plugged/unplugged) — or when Screen Recording is denied.
-DISPLAY_CHANGE_MARKER = "could not create image"
 DISPLAY_CHANGE_ERROR = (
-    "Couldn't capture the screen — the display setup just changed (or Screen Recording "
-    "isn't granted to Veronica). Try again in a moment."
+    "Couldn't capture the screen — the display setup may have just changed. Try again in a moment."
 )
 
 
-def _main_display_argv(out_path: Path, index: int = 1) -> list[str]:
-    """Retry argv: the whole display at `index`, explicitly (-D n)."""
-    return ["screencapture", "-x", "-t", "png", "-D", str(index), str(out_path)]
+def _grab(left: int, top: int, width: int, height: int):
+    """The screen pixels of that virtual-screen rectangle as a Pillow RGB
+    image, via mss. A fresh mss instance per call: its device contexts
+    belong to the thread that made them, and captures run in a worker
+    thread."""
+    mss, Image = _mss(), _pil()
+    with mss.mss() as sct:
+        shot = sct.grab({"left": int(left), "top": int(top), "width": int(width), "height": int(height)})
+        return Image.frombytes("RGB", shot.size, shot.rgb)
 
 
-def _reencode_jpeg(png_path: Path, quality: int = JPEG_QUALITY) -> bytes | None:
-    """Re-encode `png_path` as JPEG q80 via sips into a sibling temp file,
-    return its bytes and delete it. None if anything fails (caller keeps
-    the PNG)."""
-    jpg_path = png_path.with_suffix(".jpg")
+def _primary_rect() -> tuple[int, int, int, int]:
+    """mss' idea of the primary monitor, when Win32 gave no display list."""
+    with _mss().mss() as sct:
+        m = sct.monitors[1]
+        return (m["left"], m["top"], m["width"], m["height"])
+
+
+def _virtual_rect() -> tuple[int, int, int, int] | None:
     try:
-        done = subprocess.run(
-            ["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(quality),
-             str(png_path), "--out", str(jpg_path)],
-            capture_output=True, text=True, timeout=TIMEOUT_S,
-        )
-        if done.returncode != 0 or not jpg_path.exists():
-            return None
-        return jpg_path.read_bytes()
+        return tuple(int(v) for v in _win32().virtual_screen())
     except Exception:
         return None
-    finally:
-        with contextlib.suppress(OSError):
-            jpg_path.unlink()
+
+
+def _clip(rect, bounds) -> tuple[int, int, int, int] | None:
+    """`rect` ∩ `bounds` (both (x, y, w, h)), or None if they don't meet."""
+    if bounds is None:
+        return rect
+    x1, y1 = max(rect[0], bounds[0]), max(rect[1], bounds[1])
+    x2 = min(rect[0] + rect[2], bounds[0] + bounds[2])
+    y2 = min(rect[1] + rect[3], bounds[1] + bounds[3])
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+# ---- selection (Windows' snipping overlay) ---------------------------------
+
+def _start_snip() -> None:
+    os.startfile("ms-screenclip:")   # type: ignore[attr-defined]  (Windows only)
+
+
+def _clipboard_image():
+    from PIL import Image, ImageGrab
+    img = ImageGrab.grabclipboard()
+    return img if isinstance(img, Image.Image) else None
+
+
+def _grab_selection(timeout: float = SELECTION_TIMEOUT_S):
+    """Open the snipping overlay and wait for the user's snip to land on
+    the clipboard (a new clipboard sequence number holding an image).
+    Returns the image, or an error string on timeout / cancel. The snip
+    stays on the clipboard afterwards — that's where Windows puts it."""
+    try:
+        before = _win32().clipboard_sequence()
+        _start_snip()
+    except Exception as exc:
+        return f"couldn't open the snipping overlay: {exc}"
+    deadline = _now() + timeout
+    while _now() < deadline:
+        _poll_sleep(SELECTION_POLL_S)
+        try:
+            if _win32().clipboard_sequence() == before:
+                continue
+            img = _clipboard_image()
+        except Exception as exc:
+            log.debug("clipboard read failed: %s", exc)
+            continue
+        if img is not None:
+            return img.convert("RGB")
+    return "no area was selected (the snip was cancelled or timed out)"
+
+
+# ---- encode -----------------------------------------------------------------
+
+def _downscale(img, max_px: int):
+    """`img` shrunk (never enlarged) so its longer side is at most `max_px`."""
+    if max(img.size) <= max_px:
+        return img
+    img = img.copy()
+    img.thumbnail((max_px, max_px), _pil().LANCZOS)
+    return img
+
+
+def _encode(img, fmt: str, **kw) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, fmt, **kw)
+    return buf.getvalue()
+
+
+def _reencode_jpeg(img, quality: int = JPEG_QUALITY) -> bytes | None:
+    """`img` as JPEG bytes, in memory. None if encoding fails (the caller
+    keeps the PNG)."""
+    try:
+        return _encode(img.convert("RGB"), "JPEG", quality=quality)
+    except Exception:
+        return None
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """Write `data` to `path`, created 0600 (not umask-wide, then chmod)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
 
 
 def _clear_latest(out_path: Path) -> None:
@@ -576,64 +585,65 @@ def _clear_latest(out_path: Path) -> None:
         _geometry_path().unlink()
 
 
+def _grab_rect(rect: tuple[int, int, int, int]):
+    """`_grab` with one retry: right after a monitor is (un)plugged the
+    first grab can fail on stale device contexts."""
+    try:
+        return _grab(*rect)
+    except Exception as exc:
+        log.info("screen grab failed, retrying once: %s", exc)
+    try:
+        return _grab(*rect)
+    except Exception as exc:
+        log.warning("screen grab failed: %s", exc)
+        return None
+
+
 def _capture_one(
     region: str, display: Display | None, out_path: Path,
     max_px: int = DOWNSCALE_MAX_PX, max_bytes: int = MAX_PNG_BYTES,
 ) -> tuple[bytes, str, Geometry | None] | str:
-    """One `screencapture` run into `out_path`, downscaled to `max_px` and
-    re-encoded as JPEG if still over `max_bytes`. Returns
-    (image_bytes, mime, geometry) or an error string."""
-    window_id = front_window_id() if region == "window" else None
-    argv = _capture_argv(region, out_path, window_id, display)
-    if argv is None:
-        return "could not determine the front window"
-    captured_region = region
-    timeout = SELECTION_TIMEOUT_S if region == "selection" else TIMEOUT_S
+    """One capture into `out_path`, downscaled to `max_px` and re-encoded
+    as JPEG if still over `max_bytes`. Returns (image_bytes, mime,
+    geometry) or an error string."""
+    window = None
+    rect = None
+    if region == "selection":
+        img = _grab_selection()
+        if isinstance(img, str):
+            return img
+    else:
+        if region == "window":
+            wid = front_window_id()
+            window = _window_bounds(wid) if wid is not None else None
+            if window is None or window["w"] <= 0 or window["h"] <= 0:
+                return "could not determine the front window"
+            rect = _clip((int(window["x"]), int(window["y"]), int(window["w"]), int(window["h"])),
+                         _virtual_rect())
+            if rect is None:
+                return "the front window is off screen"
+        elif display is not None:
+            rect = (int(display.x), int(display.y), int(display.w), int(display.h))
+        else:
+            try:
+                rect = _primary_rect()
+            except Exception as exc:
+                return f"couldn't find a screen to capture: {exc}"
+        img = _grab_rect(rect)
+        if img is None:
+            return DISPLAY_CHANGE_ERROR
+    img = _downscale(img, max_px)
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        if done.returncode != 0 and DISPLAY_CHANGE_MARKER in (done.stderr or "").lower():
-            # Right after a monitor is (un)plugged, the display list
-            # screencapture consults can be stale and it fails with "could
-            # not create image from display"; one retry pinned to the
-            # display (-D n) usually succeeds.
-            retry = _main_display_argv(out_path, display.index if display is not None else 1)
-            done = subprocess.run(retry, capture_output=True, text=True, timeout=timeout)
-            if done.returncode != 0:
-                return DISPLAY_CHANGE_ERROR
-            captured_region = "screen"   # the retry grabbed the whole display
-    except subprocess.TimeoutExpired:
-        return f"timed out after {timeout}s"
+        data = _encode(img, "PNG")
+        _write_private(out_path, data)
     except Exception as exc:
         return str(exc)
-    if done.returncode != 0:
-        return done.stderr.strip() or f"exit {done.returncode}"
-    if not out_path.exists():
-        return "screencapture produced no file (selection cancelled?)"
-    try:
-        subprocess.run(
-            ["sips", "--resampleHeightWidthMax", str(max_px), str(out_path)],
-            capture_output=True, text=True, timeout=TIMEOUT_S,
-        )
-    except Exception:
-        pass  # downscaling is best-effort; fall back to the original file
-    try:
-        geometry = _build_geometry(captured_region, out_path, window_id, display)
-    except Exception as exc:
-        log.warning("screenshot geometry unavailable: %s", exc)
-        geometry = None
-    # After sips: it rewrites the file (fresh inode, default umask mode), so
-    # a chmod before it would be undone.
-    with contextlib.suppress(OSError):
-        os.chmod(out_path, 0o600)
-    try:
-        data = out_path.read_bytes()
-    except Exception as exc:
-        return str(exc)
+    geometry = _build_geometry(region, img.size, rect, window, display)
     mime = "image/png"
     if len(data) > max_bytes:
-        jpeg = _reencode_jpeg(out_path)
+        jpeg = _reencode_jpeg(img)
         if jpeg is not None and len(jpeg) > max_bytes:
-            jpeg = _reencode_jpeg(out_path, quality=JPEG_QUALITY_LOW) or jpeg
+            jpeg = _reencode_jpeg(img, quality=JPEG_QUALITY_LOW) or jpeg
         if jpeg is not None:
             data, mime = jpeg, "image/jpeg"
     return data, mime, geometry
@@ -649,23 +659,30 @@ def _store_geometry(geometry: Geometry | None) -> None:
 
 
 def capture_screenshot(region: str = "screen", display: str = "auto") -> tuple[bytes, Path, str] | str:
-    """Take a screenshot via `screencapture` into the single latest.png
-    (0600, overwritten each time), downscale it via `sips`, and return
-    (image_bytes, path, mime) — mime is image/png, or image/jpeg if the
-    PNG was over MAX_PNG_BYTES and got re-encoded — or an error string on
-    failure. `display` picks the screen a region='screen' capture grabs
-    ('auto', 'main', or a 1-based number — see `pick_display`); a window
-    or selection capture spans whatever display it's on anyway.
-    Synchronous; run via asyncio.to_thread from the tool handler."""
+    """Take a screenshot into the single latest.png (0600, overwritten
+    each time), downscaled to `DOWNSCALE_MAX_PX`, and return (image_bytes,
+    path, mime) — mime is image/png, or image/jpeg if the PNG was over
+    MAX_PNG_BYTES and got re-encoded (latest.png stays the PNG) — or an
+    error string on failure. `display` picks the monitor a
+    region='screen' capture grabs ('auto', 'main', or a 1-based number —
+    see `pick_display`); a window capture is wherever its window is, and
+    a selection wherever the user snips. Synchronous; run via
+    asyncio.to_thread from the tool handler."""
     region = region if region in REGIONS else "screen"
+    computer_events.ensure_dpi_awareness()
     out_path = _screens_dir() / LATEST_NAME
     _clear_latest(out_path)
-    try:
-        # A dragged selection has no display to pin: not even asking keeps
-        # it geometry-free (see `_build_geometry`).
-        target = pick_display(display) if region != "selection" else None
-    except ValueError as exc:
-        return str(exc)
+    target = None
+    if region == "screen":
+        try:
+            target = pick_display(display)
+        except ValueError as exc:
+            return str(exc)
+    elif region == "window":
+        # recorded in the sidecar: the monitor the window is on
+        target = _front_window_display(displays())
+    # A snipped selection has no display to pin: not even asking keeps it
+    # geometry-free (see `_build_geometry`).
     result = _capture_one(region, target, out_path)
     if isinstance(result, str):
         return result
@@ -675,10 +692,11 @@ def capture_screenshot(region: str = "screen", display: str = "auto") -> tuple[b
 
 
 def capture_all_displays() -> tuple[list[tuple[Display | None, bytes, str]], Display | None] | str:
-    """Capture every active display. Returns the shots in display order
-    plus the display latest.png and the sidecar describe — the one holding
-    the frontmost window, captured last so it's the one left on disk and
-    the one the computer_* tools act on."""
+    """Capture every monitor. Returns the shots in display order plus the
+    display latest.png and the sidecar describe — the one holding the
+    foreground window, captured last so it's the one left on disk and the
+    one the computer_* tools act on."""
+    computer_events.ensure_dpi_awareness()
     found = displays()
     out_path = _screens_dir() / LATEST_NAME
     _clear_latest(out_path)
@@ -706,11 +724,12 @@ def capture_all_displays() -> tuple[list[tuple[Display | None, bytes, str]], Dis
 @tool(
     "screenshot",
     "Take a screenshot to see what's on the user's screen. region: "
-    "'screen' (default, a whole display), 'window' (frontmost window "
-    "only), or 'selection' (user drags to pick an area). With more than "
+    "'screen' (default, a whole display), 'window' (foreground window "
+    "only), or 'selection' (the user snips an area). With more than "
     "one monitor, display picks which screen region='screen' grabs: "
-    "'auto' (default, the one the frontmost window is on), 'main', 'all' "
-    "(every display, one image each) or a 1-based display number.",
+    "'auto' (default, the one the foreground window is on), 'main' (the "
+    "primary monitor), 'all' (every display, one image each) or a "
+    "1-based display number (1 = primary).",
     # Spelled out as JSON Schema (not {"region": str, ...}) so `display`
     # stays optional — the dict form makes every key required.
     {

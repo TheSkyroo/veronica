@@ -19,16 +19,34 @@ CASES = [
     ("SomethingNew", {}, CONFIRM),
     # bash safe
     ("Bash", {"command": "ls -la ~/Desktop"}, ALLOW),
-    ("Bash", {"command": "pbpaste"}, ALLOW),
     ("Bash", {"command": "date"}, ALLOW),
-    ("Bash", {"command": "open -a Safari"}, ALLOW),
-    ("Bash", {"command": "open -a 'Google Chrome'"}, ALLOW),
-    ("Bash", {"command": "open https://example.com"}, ALLOW),
     ("Bash", {"command": "cat /etc/hosts"}, ALLOW),
-    ("Bash", {"command": "open -a /tmp/evil.app"}, CONFIRM),
-    ("Bash", {"command": "open -a ../x"}, CONFIRM),
-    ("Bash", {"command": "open -a -x"}, CONFIRM),
-    ("Bash", {"command": "open -a 'Visual Studio Code'"}, ALLOW),
+    # PowerShell / cmd read-only, any case, .exe optional
+    ("Bash", {"command": "Get-ChildItem C:\\Users\\Mani"}, ALLOW),
+    ("Bash", {"command": "get-childitem -Recurse 'C:\\Users\\Mani Kumar\\Documents'"}, ALLOW),
+    ("Bash", {"command": "dir C:\\Windows"}, ALLOW),
+    ("Bash", {"command": "Get-Content notes.txt"}, ALLOW),
+    ("Bash", {"command": "type notes.txt"}, ALLOW),
+    ("Bash", {"command": "Get-Date"}, ALLOW),
+    ("Bash", {"command": "GET-LOCATION"}, ALLOW),
+    ("Bash", {"command": "pwd"}, ALLOW),
+    ("Bash", {"command": "whoami.exe"}, ALLOW),
+    ("Bash", {"command": "C:\\Windows\\System32\\HOSTNAME.EXE"}, ALLOW),
+    ("Bash", {"command": "Get-Clipboard"}, ALLOW),
+    ("Bash", {"command": "Get-Process -Name chrome"}, ALLOW),
+    ("Bash", {"command": "tasklist"}, ALLOW),
+    ("Bash", {"command": "Start-Process https://example.com"}, ALLOW),
+    ("Bash", {"command": "Start-Process notepad"}, CONFIRM),
+    ("Bash", {"command": "Start-Process file:///C:/x"}, CONFIRM),
+    ("Bash", {"command": "Get-Date; Remove-Item x"}, CONFIRM),
+    ("Bash", {"command": "Get-ChildItem (Remove-Item x)"}, CONFIRM),
+    ("Bash", {"command": "Get-Content $env:USERPROFILE\\x"}, CONFIRM),
+    ("Bash", {"command": "type %USERPROFILE%\\x"}, CONFIRM),
+    ("Bash", {"command": "dir ^& del x"}, CONFIRM),
+    ("Bash", {"command": "Get-Process | Stop-Process"}, CONFIRM),
+    ("Bash", {"command": "Get-ChildItem `\nRemove-Item x"}, CONFIRM),
+    ("Bash", {"command": "ipconfig /release"}, CONFIRM),
+    ("Bash", {"command": "Remove-Item x"}, CONFIRM),
     # bash confirm
     ("Bash", {"command": "rm -rf ~/x"}, CONFIRM),
     ("Bash", {"command": "sudo ls"}, CONFIRM),
@@ -39,10 +57,8 @@ CASES = [
     ("Bash", {"command": "ls $(rm x)"}, CONFIRM),
     ("Bash", {"command": "ls `rm x`"}, CONFIRM),
     ("Bash", {"command": "ls\nrm x"}, CONFIRM),
-    ("Bash", {"command": "open file:///etc/passwd"}, CONFIRM),
-    ("Bash", {"command": "open -a Safari --args x"}, CONFIRM),
-    ("Bash", {"command": "open /Applications"}, CONFIRM),
     ("Bash", {"command": "curl https://x"}, ALLOW),
+    ("Bash", {"command": "curl.exe -sS https://x"}, ALLOW),
     ("Bash", {"command": 'curl -s --max-time 5 "https://wttr.in/?format=3"'}, ALLOW),
     ("Bash", {"command": "curl -X POST https://x"}, CONFIRM),
     ("Bash", {"command": "curl -d a=b https://x"}, CONFIRM),
@@ -101,17 +117,18 @@ CASES = [
     ("Bash", {"command": ""}, CONFIRM),
     ("Bash", {"command": "ls 'unterminated"}, CONFIRM),
     ("Bash", {}, CONFIRM),
-    # mac tools
-    ("mcp__system__open_app", {"name": "Safari"}, ALLOW),
+    # system tools
+    ("mcp__system__open_app", {"name": "Edge"}, ALLOW),
     ("mcp__system__open_url", {"url": "https://x"}, ALLOW),
     ("mcp__system__clipboard_read", {}, ALLOW),
     ("mcp__system__clipboard_write", {"text": "x"}, CONFIRM),
     ("mcp__system__notify", {"title": "a", "message": "b"}, ALLOW),
     ("mcp__system__volume_get", {}, ALLOW),
     ("mcp__system__volume_set", {"level": 30}, ALLOW),
-    ("mcp__system__applescript", {"script": "beep"}, CONFIRM),
+    ("mcp__system__powershell", {"script": "Get-Date"}, CONFIRM),
     ("mcp__system__unknown", {}, CONFIRM),
-    # no allowlist passed: every shortcut is asked about
+    # removed with macOS: unknown now, so asked about
+    ("mcp__system__applescript", {"script": "beep"}, CONFIRM),
     ("mcp__system__run_shortcut", {"name": "Morning"}, CONFIRM),
     # pim tools
     ("mcp__pim__calendar_events", {"day": "today"}, ALLOW),
@@ -119,7 +136,6 @@ CASES = [
     ("mcp__pim__mail_unread", {}, ALLOW),
     ("mcp__pim__mail_search", {"query": "x"}, ALLOW),
     ("mcp__pim__mail_send", {"to": "a@b.com", "subject": "s", "body": "b"}, CONFIRM),
-    ("mcp__pim__message_send", {"to": "+1555", "body": "b"}, CONFIRM),
     ("mcp__pim__reminder_create", {"title": "x"}, CONFIRM),
     ("mcp__pim__reminders_due", {}, ALLOW),
     ("mcp__pim__timer_set", {"minutes": 1}, ALLOW),
@@ -176,13 +192,12 @@ def test_computer_tool_risk(short, expected):
 from veronica.brain.policy import TRUST_EXCLUDED_BUNDLES, always_confirm
 from veronica.tools.computer_events import Front
 
-_FINDER = Front(app="Finder", bundle_id="com.apple.finder", window_title="Desktop", pid=1)
-_TERMINAL = Front(app="Terminal", bundle_id="com.apple.Terminal", window_title="zsh", pid=2)
-_SECAGENT = Front(app="SecurityAgent", bundle_id="com.apple.SecurityAgent", window_title="", pid=3)
+_FINDER = Front(app="File Explorer", bundle_id="explorer.exe", window_title="Desktop", pid=1)
+_TERMINAL = Front(app="Windows Terminal", bundle_id="windowsterminal.exe", window_title="PowerShell", pid=2)
+_SECAGENT = Front(app="Consent UI", bundle_id="consent.exe", window_title="User Account Control", pid=3)
 
 ALWAYS_CASES = [
     ("mcp__pim__mail_send", {"to": "a@b.c"}, True),
-    ("mcp__pim__message_send", {"to": "+1555", "body": "on my way"}, True),
     ("mcp__pim__calendar_create", {"title": "x"}, False),
     ("mcp__system__clipboard_write", {"text": "x"}, False),
     ("mcp__memory__fact_add", {"text": "x"}, False),
@@ -209,50 +224,102 @@ ALWAYS_CASES = [
     ("Bash", {"command": "git push --force-with-lease"}, True),
     ("Bash", {"command": "git push origin main"}, False),
     ("Bash", {"command": "git commit -m 'rm -rf'"}, False),
-    ("Bash", {"command": "shutdown -h now"}, True),
-    ("Bash", {"command": "sudo shutdown -r now"}, True),
-    ("Bash", {"command": "reboot"}, True),
-    ("Bash", {"command": "halt"}, True),
-    ("Bash", {"command": "/sbin/reboot"}, True),
-    ("Bash", {"command": "pmset sleepnow"}, True),
-    ("Bash", {"command": "pmset restart"}, True),
-    ("Bash", {"command": "pmset -g"}, False),
-    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to shut down'"}, True),
-    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to restart'"}, True),
-    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to log out'"}, True),
-    ("Bash", {"command": "osascript -e 'tell app \"System Events\" to sleep'"}, True),
-    ("Bash", {"command": "osascript -e 'display notification \"hi\"'"}, False),
     ("Bash", {"command": "sudo ls"}, True),
-    ("Bash", {"command": "killall Finder"}, True),
-    ("Bash", {"command": "diskutil list"}, True),
-    ("Bash", {"command": "launchctl unload ~/Library/LaunchAgents/x.plist"}, True),
-    ("Bash", {"command": "launchctl bootout gui/501/x"}, True),
-    ("Bash", {"command": "launchctl list"}, False),
-    ("Bash", {"command": "defaults write com.apple.finder AppleShowAllFiles YES"}, True),
-    ("Bash", {"command": "defaults write com.example.app key 1"}, False),
-    ("Bash", {"command": "defaults read com.apple.finder"}, False),
-    ("Bash", {"command": "tccutil reset All"}, True),
+    # Windows: deleting trees (PowerShell, cmd; any case, any prefix of a switch)
+    ("Bash", {"command": "Remove-Item -Recurse -Force C:\\build"}, True),
+    ("Bash", {"command": "remove-item C:\\build -r"}, True),
+    ("Bash", {"command": "Remove-Item C:\\build -Force"}, True),
+    ("Bash", {"command": "Remove-Item C:\\build -Recurse:$true"}, True),
+    ("Bash", {"command": "ri -fo x"}, True),
+    ("Bash", {"command": "Remove-Item notes.txt"}, False),
+    ("Bash", {"command": "rm -Recurse C:\\x"}, True),
+    ("Bash", {"command": "del /s /q C:\\x"}, True),
+    ("Bash", {"command": "DEL /Q x.txt"}, True),
+    ("Bash", {"command": "del x.txt"}, False),
+    ("Bash", {"command": "rd /s /q C:\\x"}, True),
+    ("Bash", {"command": "RD /S C:\\x"}, True),
+    ("Bash", {"command": "rmdir empty"}, True),
+    ("Bash", {"command": "Clear-RecycleBin -Force"}, True),
+    ("Bash", {"command": "cipher /w:C:\\"}, True),
+    ("Bash", {"command": "cipher /?"}, False),
+    # Windows: power and session
+    ("Bash", {"command": "Stop-Computer"}, True),
+    ("Bash", {"command": "Restart-Computer -Force"}, True),
+    ("Bash", {"command": "shutdown /s /t 0"}, True),
+    ("Bash", {"command": "shutdown.exe /r"}, True),
+    ("Bash", {"command": "C:\\Windows\\System32\\SHUTDOWN.EXE /h"}, True),
+    ("Bash", {"command": "'C:\\Windows\\System32\\shutdown.exe' /s"}, True),
+    ("Bash", {"command": "& 'shutdown.exe' /s"}, True),
+    ("Bash", {"command": "logoff"}, True),
+    ("Bash", {"command": "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"}, True),
+    ("Bash", {"command": "rundll32 user32.dll,LockWorkStation"}, True),
+    # Windows: privilege
+    ("Bash", {"command": "Start-Process powershell -Verb RunAs"}, True),
+    ("Bash", {"command": "start-process notepad -verb runas"}, True),
+    ("Bash", {"command": "Start-Process notepad"}, False),
+    ("Bash", {"command": "runas /user:Administrator cmd"}, True),
+    ("Bash", {"command": "gsudo whoami"}, True),
+    ("Bash", {"command": "Set-ExecutionPolicy Unrestricted"}, True),
+    # Windows: registry and system configuration
+    ("Bash", {"command": "reg add HKCU\\Software\\X /v a /d 1"}, True),
+    ("Bash", {"command": "REG DELETE HKLM\\Software\\X /f"}, True),
+    ("Bash", {"command": "reg query HKCU\\Software\\X"}, False),
+    ("Bash", {"command": "Set-ItemProperty -Path HKCU:\\Software\\X -Name a -Value 1"}, True),
+    ("Bash", {"command": "New-ItemProperty -Path 'HKLM:\\SOFTWARE\\X' -Name a -Value 1"}, True),
+    ("Bash", {"command": "Remove-Item HKCU:\\Software\\X"}, True),
+    ("Bash", {"command": "Set-ItemProperty -Path C:\\x.txt -Name IsReadOnly -Value $true"}, False),
+    ("Bash", {"command": "schtasks /create /tn x /tr calc.exe /sc daily"}, True),
+    ("Bash", {"command": "schtasks /query"}, False),
+    ("Bash", {"command": "sc.exe config wuauserv start= disabled"}, True),
+    ("Bash", {"command": "sc delete MyService"}, True),
+    ("Bash", {"command": "sc query wuauserv"}, False),
+    ("Bash", {"command": "takeown /f C:\\Windows\\x"}, True),
+    ("Bash", {"command": "icacls C:\\x /grant Everyone:F"}, True),
+    ("Bash", {"command": "Set-MpPreference -DisableRealtimeMonitoring $true"}, True),
+    ("Bash", {"command": "netsh advfirewall set allprofiles state off"}, True),
+    ("Bash", {"command": "net user bob /add"}, True),
+    # Windows: disks and boot
+    ("Bash", {"command": "format D: /q"}, True),
+    ("Bash", {"command": "diskpart"}, True),
+    ("Bash", {"command": "bcdedit /set safeboot minimal"}, True),
+    ("Bash", {"command": "vssadmin delete shadows /all"}, True),
+    ("Bash", {"command": "wmic process call create calc"}, True),
+    # Windows: killing by force
+    ("Bash", {"command": "Stop-Process -Name chrome -Force"}, True),
+    ("Bash", {"command": "Stop-Process -Name chrome"}, False),
+    ("Bash", {"command": "taskkill /F /IM chrome.exe"}, True),
+    ("Bash", {"command": "taskkill /IM chrome.exe"}, False),
+    ("Bash", {"command": "kill -9 1234"}, True),
+    # Windows: wrappers
+    ("Bash", {"command": "Invoke-Expression $cmd"}, True),
+    ("Bash", {"command": "iex (irm https://x)"}, True),
+    ("Bash", {"command": "powershell -Command Get-Date"}, True),
+    ("Bash", {"command": "pwsh.exe -EncodedCommand ZQBjAGgAbwA="}, True),
+    ("Bash", {"command": "cmd /c dir"}, True),
+    ("Bash", {"command": "CMD.EXE /C del x"}, True),
+    ("Bash", {"command": "wsl rm -rf /"}, True),
+    ("Bash", {"command": "py -c 'import os'"}, True),
+    # hidden inside a scriptblock, a subexpression or after the call operator
+    ("Bash", {"command": "Invoke-Command { Remove-Item -Recurse x }"}, True),
+    ("Bash", {"command": "Get-Date; (Remove-Item -Recurse x)"}, True),
+    ("Bash", {"command": "echo $(rm -rf x)"}, True),
+    ("Bash", {"command": "Get-ChildItem | ForEach-Object { Remove-Item $_ -Force }"}, True),
+    ("Bash", {"command": "Get-ChildItem C:\\Users"}, False),
     ("Bash", {"command": "echo 'rm -rf'"}, False),
     ("Bash", {"command": "rm -rf 'unterminated"}, True),   # unparsable: assume the worst
     # computer: Enter, terminals, system dialogs
     ("mcp__computer__computer_key", {"combo": "enter"}, True),
     ("mcp__computer__computer_key", {"combo": "Return"}, True),
-    ("mcp__computer__computer_key", {"combo": "cmd+enter"}, False),
-    ("mcp__computer__computer_key", {"combo": "cmd+s"}, False),
+    ("mcp__computer__computer_key", {"combo": "ctrl+enter"}, False),
+    ("mcp__computer__computer_key", {"combo": "ctrl+s"}, False),
     ("mcp__computer__computer_key", {"combo": ""}, False),
     ("mcp__computer__computer_type", {"text": "hi", "submit": True}, True),
     ("mcp__computer__computer_type", {"text": "hi"}, False),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}, False),
-    # applescript
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to shut down'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to restart'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to log out'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "Finder" to delete file "x"'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "Finder" to empty trash'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to keystroke return'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to key code 36'}, True),
-    ("mcp__system__applescript", {"script": 'tell application "System Events" to keystroke "a"'}, False),
-    ("mcp__system__applescript", {"script": 'tell application "Finder" to activate'}, False),
+    # powershell: every script, whatever it says
+    ("mcp__system__powershell", {"script": "Stop-Computer"}, True),
+    ("mcp__system__powershell", {"script": "Get-Date"}, True),
+    ("mcp__system__powershell", {}, True),
 ]
 
 
@@ -268,6 +335,10 @@ def test_always_confirm_computer_type_in_terminal():
     for bundle in TRUST_EXCLUDED_BUNDLES:
         front = Front(app="t", bundle_id=bundle, window_title="", pid=9)
         assert always_confirm("mcp__computer__computer_type", {"text": "ls"}, front) is True
+    # case and the .exe suffix don't matter
+    for bundle in ("WindowsTerminal.exe", "pwsh", "C:\\Program Files\\Git\\usr\\bin\\mintty.exe"):
+        front = Front(app="t", bundle_id=bundle, window_title="", pid=9)
+        assert always_confirm("mcp__computer__computer_type", {"text": "ls"}, front) is True
     # a click in a terminal is not an always-confirm (the trust window
     # already never covers terminals)
     assert always_confirm("mcp__computer__computer_click", {"x": 1, "y": 1}, _TERMINAL) is False
@@ -275,7 +346,7 @@ def test_always_confirm_computer_type_in_terminal():
 
 @pytest.mark.parametrize("short,inp", [
     ("computer_click", {"x": 1, "y": 1}), ("computer_click_text", {"text": "Allow"}),
-    ("computer_drag", {}), ("computer_type", {"text": "x"}), ("computer_key", {"combo": "cmd+s"}),
+    ("computer_drag", {}), ("computer_type", {"text": "x"}), ("computer_key", {"combo": "ctrl+s"}),
     ("computer_move", {"x": 1, "y": 1}),
 ])
 def test_always_confirm_every_computer_tool_on_system_dialog(short, inp):
@@ -283,36 +354,18 @@ def test_always_confirm_every_computer_tool_on_system_dialog(short, inp):
     assert always_confirm(f"mcp__computer__{short}", inp, None) is False
 
 
-# --- run_shortcut: allow only what the user put on the allowlist -------------
-
-def test_run_shortcut_allowlisted_name_is_allowed():
-    assert classify("mcp__system__run_shortcut", {"name": "Morning"}, ["Morning"]) == ALLOW
-
-
-def test_run_shortcut_allowlist_ignores_case_and_padding():
-    assert classify("mcp__system__run_shortcut", {"name": " morning "}, [" Morning"]) == ALLOW
+def test_terminal_table_is_windows_executables():
+    assert {"windowsterminal.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "mintty.exe",
+            "conhost.exe"} <= TRUST_EXCLUDED_BUNDLES
+    assert all(b == b.lower() and b.endswith(".exe") for b in TRUST_EXCLUDED_BUNDLES)
 
 
-def test_run_shortcut_off_the_allowlist_confirms():
-    assert classify("mcp__system__run_shortcut", {"name": "Wipe Disk"}, ["Morning"]) == CONFIRM
-    assert classify("mcp__system__run_shortcut", {"name": ""}, ["Morning", ""]) == CONFIRM
-    assert classify("mcp__system__run_shortcut", {}, ["Morning"]) == CONFIRM
-
-
-def test_run_shortcut_empty_allowlist_allows_nothing():
-    assert classify("mcp__system__run_shortcut", {"name": "Morning"}, []) == CONFIRM
-
-
-def test_the_allowlist_does_not_leak_to_other_tools():
-    # the extra argument must not turn anything else into an auto-allow
-    assert classify("mcp__system__applescript", {"script": "Morning"}, ["Morning"]) == CONFIRM
-    assert classify("mcp__pim__message_send", {"to": "Morning"}, ["Morning"]) == CONFIRM
-
-
-def test_run_shortcut_is_not_always_confirm():
-    # allowlisted shortcuts are meant to be auto-allowed; only the classify
-    # gate decides, so this must stay False
-    assert always_confirm("mcp__system__run_shortcut", {"name": "Morning"}) is False
+def test_is_terminal():
+    from veronica.brain.policy import is_terminal
+    assert is_terminal(_TERMINAL)
+    assert is_terminal(Front(app="", bundle_id="PowerShell.EXE", window_title="", pid=1))
+    assert not is_terminal(_FINDER)
+    assert not is_terminal(Front(app="", bundle_id="", window_title="", pid=1))
 
 
 def test_always_confirm_future_send_tools():
@@ -339,38 +392,37 @@ def test_auto_allowable_is_exactly_the_eligible_set():
 @pytest.mark.parametrize("tool", sorted(AUTO_ALLOWABLE))
 def test_eligible_tool_confirms_until_it_is_on_the_list(tool):
     assert classify(tool, {}) == CONFIRM
-    assert classify(tool, {}, (), [tool]) == ALLOW
+    assert classify(tool, {}, [tool]) == ALLOW
 
 
 def test_auto_allow_only_covers_the_tool_that_is_listed():
-    assert classify("mcp__pim__reminder_create", {}, (), ["mcp__system__clipboard_write"]) == CONFIRM
+    assert classify("mcp__pim__reminder_create", {}, ["mcp__system__clipboard_write"]) == CONFIRM
 
 
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
-    ("mcp__pim__message_send", {"to": "a", "body": "y"}),
-    ("mcp__system__applescript", {"script": "delete everything"}),
+    ("mcp__system__powershell", {"script": "Get-Date"}),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}),
     ("mcp__computer__computer_type", {"text": "rm -rf /"}),
     ("mcp__computer__computer_key", {"combo": "return"}),
-    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
     ("Bash", {"command": "rm -rf /tmp/x"}),
+    ("Bash", {"command": "Remove-Item -Recurse C:\\x"}),
 ])
 def test_ineligible_tool_still_confirms_even_if_hand_typed_into_the_setting(tool, inp):
-    assert classify(tool, inp, (), [tool]) == CONFIRM
+    assert classify(tool, inp, [tool]) == CONFIRM
 
 
 def test_always_confirm_wins_over_the_auto_allow_list():
     # mail_send isn't eligible anyway; this pins the belt-and-braces check.
     assert always_confirm("mcp__pim__mail_send", {}) is True
-    assert classify("mcp__pim__mail_send", {}, (), ["mcp__pim__mail_send"]) == CONFIRM
+    assert classify("mcp__pim__mail_send", {}, ["mcp__pim__mail_send"]) == CONFIRM
 
 
 def test_auto_allow_entries_are_trimmed_and_blanks_ignored():
-    assert classify("mcp__system__clipboard_write", {}, (), [" mcp__system__clipboard_write "]) == ALLOW
-    assert classify("mcp__system__clipboard_write", {}, (), ["", None]) == CONFIRM
+    assert classify("mcp__system__clipboard_write", {}, [" mcp__system__clipboard_write "]) == ALLOW
+    assert classify("mcp__system__clipboard_write", {}, ["", None]) == CONFIRM
 
 
 def test_clipboard_write_is_auto_allowed_by_default():
     assert Settings().auto_allow_tools == ["mcp__system__clipboard_write"]
-    assert classify("mcp__system__clipboard_write", {"text": "hi"}, (), Settings().auto_allow_tools) == ALLOW
+    assert classify("mcp__system__clipboard_write", {"text": "hi"}, Settings().auto_allow_tools) == ALLOW

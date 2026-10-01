@@ -1,243 +1,262 @@
 import pytest
 
 from veronica.tools import computer_events as ce
-from veronica.tools.computer_events import Front
+from veronica.tools.computer_events import KEYEVENTF_EXTENDEDKEY as EXT
+from veronica.tools.computer_events import KEYEVENTF_KEYUP as UP
+from veronica.tools.computer_events import KEYEVENTF_UNICODE as UNI
+from veronica.tools.computer_events import Front, KeyInput, MouseInput
+
+ABS = ce.MOUSEEVENTF_MOVE | ce.MOUSEEVENTF_ABSOLUTE | ce.MOUSEEVENTF_VIRTUALDESK
+LDOWN, LUP = ce.MOUSEEVENTF_LEFTDOWN, ce.MOUSEEVENTF_LEFTUP
+RDOWN, RUP = ce.MOUSEEVENTF_RIGHTDOWN, ce.MOUSEEVENTF_RIGHTUP
+MDOWN, MUP = ce.MOUSEEVENTF_MIDDLEDOWN, ce.MOUSEEVENTF_MIDDLEUP
+CTRL, ALT, SHIFT, WIN = 0xA2, 0xA4, 0xA0, 0x5B
 
 # --- fakes -----------------------------------------------------------------
 
-class FakeEvent:
-    def __init__(self, kind, type_, x=None, y=None, button=None, keycode=None, keydown=None):
-        self.kind = kind          # "mouse" | "scroll" | "key"
-        self.type = type_
-        self.x, self.y = x, y
-        self.button = button
-        self.keycode, self.keydown = keycode, keydown
-        self.flags = 0
-        self.fields = {}
-        self.unicode = None
 
+class FakeWin32:
+    """Records SendInput batches; answers window/process questions from
+    plain dicts. Virtual screen: a 1920×1080 primary plus a 1920×1080
+    monitor to its left (x from -1920), like a real two-monitor desk."""
 
-class FakeQuartz:
-    kCGHIDEventTap = 0
-    kCGEventMouseMoved = 5
-    kCGEventLeftMouseDown = 1
-    kCGEventLeftMouseUp = 2
-    kCGEventRightMouseDown = 3
-    kCGEventRightMouseUp = 4
-    kCGEventOtherMouseDown = 25
-    kCGEventOtherMouseUp = 26
-    kCGEventLeftMouseDragged = 6
-    kCGMouseButtonLeft = 0
-    kCGMouseButtonRight = 1
-    kCGMouseButtonCenter = 2
-    kCGMouseEventClickState = 1
-    kCGScrollEventUnitPixel = 0
-    kCGEventFlagMaskCommand = 1 << 20
-    kCGEventFlagMaskShift = 1 << 17
-    kCGEventFlagMaskAlternate = 1 << 19
-    kCGEventFlagMaskControl = 1 << 18
-    kCGWindowListOptionOnScreenOnly = 1
-    kCGWindowOwnerPID = "kCGWindowOwnerPID"
-    kCGWindowLayer = "kCGWindowLayer"
-    kCGWindowName = "kCGWindowName"
-    kCGWindowBounds = "kCGWindowBounds"
+    def __init__(self, vscreen=(-1920, 0, 3840, 1080)):
+        self.batches: list[list] = []
+        self.vscreen = vscreen
+        self.fg = 0
+        self.titles: dict[int, str] = {}
+        self.classes: dict[int, str] = {}
+        self.pids: dict[int, int] = {}
+        self.paths: dict[int, str] = {}
+        self.names: dict[str, str] = {}
+        self.uwp_child: dict[int, int] = {}
+        self.elevated: dict[int, bool | None] = {}
+        self.me_elevated = False
+        self.short_by = 0
+        self.dpi_calls = 0
+        self.cursor: list[tuple[int, int]] = []
 
-    def __init__(self, windows=()):
-        self.posted: list[FakeEvent] = []
-        self.taps: list = []
-        self.windows = list(windows)
+    def set_dpi_awareness(self):
+        self.dpi_calls += 1
+        return "per-monitor-v2"
 
-    def CGEventCreateMouseEvent(self, src, type_, point, button):
-        assert src is None
-        return FakeEvent("mouse", type_, point[0], point[1], button)
+    def send_input(self, events):
+        self.batches.append(list(events))
+        return len(events) - self.short_by
 
-    def CGEventCreateScrollWheelEvent(self, src, unit, count, dy, dx):
-        assert src is None and unit == self.kCGScrollEventUnitPixel and count == 2
-        ev = FakeEvent("scroll", "wheel")
-        ev.dy, ev.dx = dy, dx
-        return ev
+    def set_cursor_pos(self, x, y):
+        self.cursor.append((x, y))
 
-    def CGEventCreateKeyboardEvent(self, src, keycode, keydown):
-        assert src is None
-        return FakeEvent("key", "keydown" if keydown else "keyup", keycode=keycode, keydown=keydown)
+    def virtual_screen(self):
+        return self.vscreen
 
-    def CGEventSetIntegerValueField(self, ev, field, value):
-        ev.fields[field] = value
+    def foreground_window(self):
+        return self.fg
 
-    def CGEventSetFlags(self, ev, flags):
-        ev.flags = flags
+    def window_title(self, hwnd):
+        return self.titles.get(hwnd, "")
 
-    def CGEventKeyboardSetUnicodeString(self, ev, length, text):
-        assert length == len(text.encode("utf-16-le")) // 2
-        ev.unicode = text
+    def window_class(self, hwnd):
+        return self.classes.get(hwnd, "")
 
-    def CGEventPost(self, tap, ev):
-        self.taps.append(tap)
-        self.posted.append(ev)
+    def window_pid(self, hwnd):
+        return self.pids.get(hwnd, 0)
 
-    def CGWindowListCopyWindowInfo(self, opts, relative):
-        assert opts == self.kCGWindowListOptionOnScreenOnly and relative == 0
-        return self.windows
+    def process_path(self, pid):
+        return self.paths.get(pid, "")
 
+    def app_name(self, path):
+        return self.names.get(path, "")
 
-class FakeAX:
-    kAXTrustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
-    kAXFocusedUIElementAttribute = "AXFocusedUIElement"
-    kAXRoleAttribute = "AXRole"
-    kAXSubroleAttribute = "AXSubrole"
+    def uwp_child_pid(self, hwnd):
+        return self.uwp_child.get(hwnd)
 
-    def __init__(self, trusted=True, role="AXTextField", subrole=None, focus_err=0, raise_on_role=False):
-        self.trusted = trusted
-        self.role, self.subrole = role, subrole
-        self.focus_err = focus_err
-        self.raise_on_role = raise_on_role
-        self.options = []
+    def self_elevated(self):
+        return self.me_elevated
 
-    def AXIsProcessTrustedWithOptions(self, options):
-        self.options.append(dict(options))
-        return self.trusted
+    def process_elevated(self, pid):
+        return self.elevated.get(pid)
 
-    def AXUIElementCreateSystemWide(self):
-        return "sys"
-
-    def AXUIElementCopyAttributeValue(self, elem, attr, out):
-        assert out is None
-        if elem == "sys" and attr == "AXFocusedUIElement":
-            return (self.focus_err, None if self.focus_err else "elem")
-        if elem == "elem" and attr == "AXRole":
-            if self.raise_on_role:
-                raise RuntimeError("boom")
-            return (0, self.role)
-        if elem == "elem" and attr == "AXSubrole":
-            return (0, self.subrole)
-        return (-25205, None)
-
-
-class _App:
-    def __init__(self, name, bundle, pid):
-        self._n, self._b, self._p = name, bundle, pid
-
-    def localizedName(self):
-        return self._n
-
-    def bundleIdentifier(self):
-        return self._b
-
-    def processIdentifier(self):
-        return self._p
-
-
-class FakeAppKit:
-    def __init__(self, app):
-        outer = self
-
-        class NSWorkspace:
-            @staticmethod
-            def sharedWorkspace():
-                return outer
-
-        self.NSWorkspace = NSWorkspace
-        self._app = app
-
-    def frontmostApplication(self):
-        return self._app
+    # helpers
+    @property
+    def posted(self):
+        return [e for b in self.batches for e in b]
 
 
 @pytest.fixture
-def quartz(monkeypatch):
-    q = FakeQuartz()
-    monkeypatch.setattr(ce, "_quartz", lambda: q)
+def win(monkeypatch):
+    w = FakeWin32()
+    monkeypatch.setattr(ce, "_win32", lambda: w)
     sleeps = []
     monkeypatch.setattr(ce, "_sleep", sleeps.append)
-    q.sleeps = sleeps
-    return q
+    w.sleeps = sleeps
+    return w
 
 
-def _mouse(q):
-    return [(e.type, e.x, e.y, e.button) for e in q.posted if e.kind == "mouse"]
+def _mouse(w):
+    return [(e.flags & ~ABS, e.x, e.y) for e in w.posted if isinstance(e, MouseInput)]
+
+
+def _keys(w):
+    return [(e.vk, e.flags) for e in w.posted if isinstance(e, KeyInput)]
+
+
+# --- DPI awareness ---------------------------------------------------------
+
+def test_ensure_dpi_awareness_is_idempotent(monkeypatch):
+    w = FakeWin32()
+    monkeypatch.setattr(ce, "_win32", lambda: w)
+    monkeypatch.setattr(ce, "_dpi_state", None)
+    assert ce.ensure_dpi_awareness() == "per-monitor-v2"
+    assert ce.ensure_dpi_awareness() == "per-monitor-v2"
+    assert w.dpi_calls == 1
+
+
+def test_ensure_dpi_awareness_never_raises(monkeypatch):
+    def boom():
+        raise AttributeError("no windll here")
+    monkeypatch.setattr(ce, "_win32", boom)
+    monkeypatch.setattr(ce, "_dpi_state", None)
+    assert ce.ensure_dpi_awareness() == "unavailable"
+
+
+def test_real_backend_is_unavailable_off_windows(monkeypatch):
+    """Nothing Windows-only at import time; the backend fails only when used."""
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("real Win32 here")
+    monkeypatch.setattr(ce, "_backend", None)
+    with pytest.raises(Exception):
+        ce._win32()
+    assert ce._backend is None
+
+
+# --- coordinates -------------------------------------------------------------
+
+def test_absolute_normalises_over_the_virtual_desktop(win):
+    # 3840 px wide from -1920: the primary's (0, 0) is half way across
+    nx, ny = ce._absolute(0, 0)
+    assert 32768 <= nx < 32768 + 17 and ny < 61
+    assert ce._absolute(-1920, 0)[0] < 17
+    assert ce._absolute(1919, 1079)[0] <= 65535
+
+
+@pytest.mark.parametrize("x", [-1920, -1, 0, 1, 777, 1919])
+def test_absolute_maps_back_onto_the_same_pixel(win, x):
+    """Windows maps n back to a pixel as n * width / 65536 (move() then
+    snaps with SetCursorPos anyway, in case it rounds the other way)."""
+    vx, _vy, vw, _vh = win.vscreen
+    nx, _ = ce._absolute(x, 0)
+    assert nx * vw // 65536 + vx == x
+
+
+def test_absolute_clamps_off_screen_points(win):
+    assert ce._absolute(-5000, -5) == (0, 0)
+    assert ce._absolute(99999, 99999) == (65535, 65535)
 
 
 # --- mouse -------------------------------------------------------------------
 
-def test_move_posts_mouse_moved_to_hid_tap(quartz):
-    ce.move(10.5, 20)
-    assert _mouse(quartz) == [(5, 10.5, 20, 0)]
-    assert quartz.taps == [0]
+def test_move_sends_an_absolute_virtual_desk_move_then_snaps_the_cursor(win):
+    ce.move(-100.4, 20)
+    assert len(win.batches) == 1
+    (e,) = win.batches[0]
+    assert e.flags == ABS and (e.x, e.y) == (-100.4, 20)
+    assert (e.dx, e.dy) == ce._absolute(-100, 20)
+    assert win.cursor == [(-100, 20)]
 
 
-def test_click_posts_move_down_up(quartz):
+def test_click_moves_then_down_up_at_the_point(win):
     ce.click(100, 200)
-    assert _mouse(quartz) == [(5, 100, 200, 0), (1, 100, 200, 0), (2, 100, 200, 0)]
-    assert all(e.fields.get(1, 1) == 1 for e in quartz.posted)
+    assert _mouse(win) == [(0, 100, 200), (LDOWN, 100, 200), (LUP, 100, 200)]
+    # the buttons press wherever the cursor was snapped to
+    assert [e.flags for e in win.posted] == [ABS, LDOWN, LUP]
+    assert win.cursor == [(100, 200)]
 
 
-def test_click_right_and_middle_buttons(quartz):
+def test_click_right_and_middle_buttons(win):
     ce.click(1, 2, button="right")
     ce.click(3, 4, button="middle")
-    assert _mouse(quartz) == [
-        (5, 1, 2, 0), (3, 1, 2, 1), (4, 1, 2, 1),
-        (5, 3, 4, 0), (25, 3, 4, 2), (26, 3, 4, 2),
+    assert _mouse(win) == [
+        (0, 1, 2), (RDOWN, 1, 2), (RUP, 1, 2),
+        (0, 3, 4), (MDOWN, 3, 4), (MUP, 3, 4),
     ]
 
 
-def test_click_unknown_button(quartz):
+def test_click_unknown_button(win):
     with pytest.raises(ValueError):
         ce.click(1, 2, button="thumb")
+    assert win.posted == []
 
 
-def test_double_click_posts_two_pairs_with_click_state_2(quartz):
+def test_double_click_sends_two_pairs_with_a_short_gap(win):
     ce.click(5, 6, double=True)
-    types = [e.type for e in quartz.posted]
-    assert types == [5, 1, 2, 1, 2]
-    states = [e.fields.get(1) for e in quartz.posted]
-    assert states == [None, None, None, 2, 2]
+    assert [f for f, *_ in _mouse(win)] == [0, LDOWN, LUP, LDOWN, LUP]
+    assert win.sleeps == [ce.CLICK_GAP_S]
 
 
-def test_drag_posts_down_eight_dragged_moves_up(quartz):
+def test_drag_posts_down_eight_moves_up(win):
     ce.drag(0, 0, 80, 40)
-    ev = _mouse(quartz)
-    assert ev[0] == (5, 0, 0, 0)
-    assert ev[1] == (1, 0, 0, 0)
-    dragged = ev[2:-1]
-    assert len(dragged) == 8
-    assert all(t == 6 for t, *_ in dragged)
-    xs = [x for _, x, _, _ in dragged]
-    ys = [y for _, _, y, _ in dragged]
-    assert xs == pytest.approx([10, 20, 30, 40, 50, 60, 70, 80])
-    assert ys == pytest.approx([5, 10, 15, 20, 25, 30, 35, 40])
-    assert ev[-1] == (2, 80, 40, 0)
-    # ~200 ms spread over the intermediate moves
-    assert sum(quartz.sleeps) == pytest.approx(0.2, abs=0.05)
+    ev = _mouse(win)
+    assert ev[0] == (0, 0, 0)
+    assert ev[1] == (LDOWN, 0, 0)
+    moves = ev[2:-2]
+    assert len(moves) == 8 and all(f == 0 for f, *_ in moves)
+    assert [x for _, x, _ in moves] == pytest.approx([10, 20, 30, 40, 50, 60, 70, 80])
+    assert [y for _, _, y in moves] == pytest.approx([5, 10, 15, 20, 25, 30, 35, 40])
+    assert ev[-2:] == [(0, 80, 40), (LUP, 80, 40)]   # released on the end point
+    assert win.cursor[-1] == (80, 40)
+    assert sum(win.sleeps) == pytest.approx(0.2, abs=0.05)
 
 
-def test_scroll_moves_then_posts_wheel(quartz):
-    ce.scroll(50, 60, dx=-3.7, dy=12.2)
-    assert _mouse(quartz) == [(5, 50, 60, 0)]
-    wheel = [e for e in quartz.posted if e.kind == "scroll"]
-    assert len(wheel) == 1
-    assert (wheel[0].dy, wheel[0].dx) == (12, -3)
-    assert isinstance(wheel[0].dy, int) and isinstance(wheel[0].dx, int)
+def test_scroll_moves_then_turns_the_wheel_in_whole_notches(win):
+    ce.scroll(50, 60, dx=-30, dy=250)
+    assert _mouse(win)[0] == (0, 50, 60)
+    wheel = win.batches[-1]
+    assert [(e.flags, e.data) for e in wheel] == [
+        (ce.MOUSEEVENTF_WHEEL, 2 * ce.WHEEL_DELTA),      # 250 px forward → 2 notches up
+        (ce.MOUSEEVENTF_HWHEEL, -ce.WHEEL_DELTA),        # a small tilt is still one notch
+    ]
+
+
+def test_scroll_zero_only_moves(win):
+    ce.scroll(1, 2)
+    assert len(win.batches) == 1
+
+
+def test_post_raises_when_windows_inserts_fewer_events(win):
+    win.short_by = 1
+    with pytest.raises(OSError, match="inserted 0 of 1"):
+        ce.move(1, 1)
 
 
 # --- keyboard ----------------------------------------------------------------
 
-def test_type_text_chunks_utf16_and_posts_down_up_per_chunk(quartz):
+def _typed(w) -> str:
+    units = [e.scan for e in w.posted if isinstance(e, KeyInput) and e.flags == UNI]
+    return b"".join(u.to_bytes(2, "little") for u in units).decode("utf-16-le")
+
+
+def test_type_text_sends_unicode_units_down_up_in_chunk_batches(win):
     text = "hello world, नमस्ते — आप कैसे हैं? all good here"
     ce.type_text(text)
-    keys = [e for e in quartz.posted if e.kind == "key"]
-    assert len(keys) == 2 * len(ce._chunks(text))
-    downs = keys[0::2]
-    ups = keys[1::2]
-    assert all(e.type == "keydown" and e.keycode == 0 for e in downs)
-    assert all(e.type == "keyup" and e.keycode == 0 for e in ups)
-    assert "".join(e.unicode for e in downs) == text
-    assert [e.unicode for e in ups] == [e.unicode for e in downs]
-    assert all(len(e.unicode.encode("utf-16-le")) // 2 <= 20 for e in downs)
-    assert len(downs) >= 2
-    assert quartz.sleeps == [ce.TYPE_CHUNK_GAP_S] * (len(downs) - 1)
+    assert len(win.batches) == len(ce._chunks(text)) >= 2
+    keys = win.posted
+    assert all(e.vk == 0 for e in keys)
+    assert [e.flags for e in keys[0::2]] == [UNI] * (len(keys) // 2)
+    assert [e.flags for e in keys[1::2]] == [UNI | UP] * (len(keys) // 2)
+    assert _typed(win) == text
+    assert all(len(b) <= 2 * ce.TYPE_CHUNK_UTF16 for b in win.batches)
+    assert win.sleeps == [ce.TYPE_CHUNK_GAP_S] * (len(win.batches) - 1)
 
 
-def test_type_text_chunks_never_split_surrogate_pairs(quartz):
+def test_type_text_astral_characters_are_two_units(win):
+    ce.type_text("😀")
+    assert [e.scan for e in win.posted] == [0xD83D, 0xD83D, 0xDE00, 0xDE00]
+    assert _typed(win) == "😀"
+
+
+def test_type_text_chunks_never_split_surrogate_pairs():
     text = "a" * 19 + "😀" + "b"
     chunks = ce._chunks(text)
     assert "".join(chunks) == text
@@ -245,310 +264,342 @@ def test_type_text_chunks_never_split_surrogate_pairs(quartz):
     assert chunks[0] == "a" * 19  # the emoji (2 units) would not fit
 
 
-def test_type_text_empty_posts_nothing(quartz):
+def test_type_text_newlines_and_tabs_are_real_key_presses(win):
+    ce.type_text("a\r\nb\tc\n")
+    vk = [(e.vk, e.flags) for e in win.posted if e.vk]
+    assert vk == [(0x0D, 0), (0x0D, UP), (0x09, 0), (0x09, UP), (0x0D, 0), (0x0D, UP)]
+    assert _typed(win) == "abc"
+
+
+def test_type_text_empty_posts_nothing(win):
     ce.type_text("")
-    assert quartz.posted == []
+    assert win.posted == []
 
 
-def test_key_combo_sets_keycode_and_flags_on_down_and_up(quartz):
-    ce.key("cmd+shift+s")
-    keys = [(e.type, e.keycode, e.flags) for e in quartz.posted]
-    want = FakeQuartz.kCGEventFlagMaskCommand | FakeQuartz.kCGEventFlagMaskShift
-    assert keys == [("keydown", 1, want), ("keyup", 1, want)]
-
-
-def test_key_enter_and_aliases(quartz):
-    ce.key("enter")
-    ce.key("Return")
-    ce.key(" ESC ")
-    assert [(e.type, e.keycode, e.flags) for e in quartz.posted] == [
-        ("keydown", 36, 0), ("keyup", 36, 0),
-        ("keydown", 36, 0), ("keyup", 36, 0),
-        ("keydown", 53, 0), ("keyup", 53, 0),
+def test_key_combo_downs_then_ups_in_reverse(win):
+    ce.key("ctrl+shift+s")
+    assert win.batches == [
+        [KeyInput(CTRL), KeyInput(SHIFT), KeyInput(ord("S"))],
+        [KeyInput(ord("S"), UP), KeyInput(SHIFT, UP), KeyInput(CTRL, UP)],
     ]
 
 
-def test_key_modifier_aliases(quartz):
-    ce.key("option+ctrl+command+a")
-    q = FakeQuartz
-    want = q.kCGEventFlagMaskAlternate | q.kCGEventFlagMaskControl | q.kCGEventFlagMaskCommand
-    assert [e.flags for e in quartz.posted] == [want, want]
+def test_cmd_means_ctrl(win):
+    ce.key("cmd+c")
+    ce.key("command+v")
+    assert [vk for vk, f in _keys(win) if not f & UP] == [CTRL, ord("C"), CTRL, ord("V")]
 
 
-def test_key_unknown_raises(quartz):
+def test_win_combos_and_extended_keys(win):
+    ce.key("win+d")
+    ce.key("ctrl+alt+left")
+    assert win.batches[0] == [KeyInput(WIN, EXT), KeyInput(ord("D"))]
+    assert win.batches[2] == [KeyInput(CTRL), KeyInput(ALT), KeyInput(0x25, EXT)]
+
+
+def test_lone_modifier_presses_that_key(win):
+    ce.key("win")
+    assert _keys(win) == [(WIN, EXT), (WIN, EXT | UP)]
+
+
+def test_key_enter_and_aliases(win):
+    ce.key("enter")
+    ce.key("Return")
+    ce.key(" ESC ")
+    ce.key("escape")
+    assert [vk for vk, f in _keys(win) if not f & UP] == [0x0D, 0x0D, 0x1B, 0x1B]
+
+
+def test_key_unknown_raises(win):
     with pytest.raises(ValueError):
         ce.key("hyper+s")
     with pytest.raises(ValueError):
-        ce.key("cmd+")
+        ce.key("ctrl+")
     with pytest.raises(ValueError):
         ce.key("")
     with pytest.raises(ValueError):
-        ce.key("cmd+shift")  # modifiers only, nothing to press
-    assert quartz.posted == []
+        ce.key("ctrl+shift")  # modifiers only, nothing to press
+    with pytest.raises(ValueError):
+        ce.key("ctrl+nosuchkey")
+    assert win.posted == []
 
 
 def test_keycode_table_spot_checks():
     k = ce.KEYCODES
-    assert k["a"] == 0 and k["s"] == 1 and k["z"] == 6
-    assert k["0"] == 29 and k["1"] == 18 and k["9"] == 25
-    assert k["enter"] == 36 == k["return"]
-    assert k["esc"] == 53 == k["escape"]
-    assert k["tab"] == 48 and k["space"] == 49
-    assert k["backspace"] == 51 == k["delete"] and k["forwarddelete"] == 117
-    assert (k["up"], k["down"], k["left"], k["right"]) == (126, 125, 123, 124)
-    assert (k["home"], k["end"], k["pageup"], k["pagedown"]) == (115, 119, 116, 121)
-    assert k["f1"] == 122 and k["f12"] == 111
-    assert k["minus"] == 27 and k["equal"] == 24 and k["grave"] == 50
-    assert k["-"] == 27 and k["."] == 47 and k["/"] == 44
+    assert k["a"] == 0x41 and k["z"] == 0x5A
+    assert k["0"] == 0x30 and k["9"] == 0x39
+    assert k["enter"] == 0x0D == k["return"]
+    assert k["esc"] == 0x1B and k["tab"] == 0x09 and k["space"] == 0x20
+    assert k["backspace"] == 0x08 and k["delete"] == 0x2E == k["forwarddelete"]
+    assert (k["left"], k["up"], k["right"], k["down"]) == (0x25, 0x26, 0x27, 0x28)
+    assert (k["home"], k["end"], k["pageup"], k["pagedown"]) == (0x24, 0x23, 0x21, 0x22)
+    assert k["f1"] == 0x70 and k["f12"] == 0x7B and k["f24"] == 0x87
+    assert k["-"] == k["minus"] == 0xBD and k["/"] == 0xBF and k["`"] == 0xC0
     assert len({name for name in k if len(name) == 1 and name.isalpha()}) == 26
-    assert set(ce.MODIFIERS) == {"cmd", "command", "shift", "alt", "option", "ctrl", "control"}
+    assert set(ce.MODIFIERS) == {"ctrl", "alt", "shift", "win"}
 
 
-# --- accessibility ---------------------------------------------------------
+# --- permissions -------------------------------------------------------------
 
-def test_accessibility_trusted_passes_prompt_option(monkeypatch):
-    ax = FakeAX(trusted=False)
-    monkeypatch.setattr(ce, "_ax", lambda: ax)
-    assert ce.accessibility_trusted() is False
-    assert ce.accessibility_trusted(prompt=True) is False
-    assert ax.options == [
-        {"AXTrustedCheckOptionPrompt": False},
-        {"AXTrustedCheckOptionPrompt": True},
-    ]
-    ax.trusted = True
+def test_accessibility_trusted_is_always_true_on_windows():
     assert ce.accessibility_trusted() is True
+    assert ce.accessibility_trusted(prompt=True) is True
 
 
-def test_accessibility_trusted_false_when_framework_missing(monkeypatch):
+def test_input_blocked_only_for_an_elevated_foreground(win):
+    win.fg, win.pids[10] = 10, 500
+    assert ce.input_blocked() is False
+    win.elevated[500] = True
+    assert ce.input_blocked() is True
+    win.me_elevated = True                 # an elevated Veronica may drive it
+    assert ce.input_blocked() is False
+
+
+def test_input_blocked_false_when_unknown(win, monkeypatch):
+    assert ce.input_blocked() is False     # no foreground window
+    win.fg, win.pids[10] = 10, 500
+    win.elevated[500] = None
+    assert ce.input_blocked() is False
+
     def boom():
-        raise ImportError("no ApplicationServices")
-    monkeypatch.setattr(ce, "_ax", boom)
-    assert ce.accessibility_trusted() is False
+        raise OSError("no win32")
+    monkeypatch.setattr(ce, "_win32", boom)
+    assert ce.input_blocked() is False
 
 
-def test_permission_hint_mentions_accessibility():
-    assert "Accessibility" in ce.PERMISSION_HINT
-    assert "Privacy & Security" in ce.PERMISSION_HINT
+def test_permission_hint_mentions_administrator():
+    assert "administrator" in ce.PERMISSION_HINT
 
 
-def test_focused_is_secure_role(monkeypatch):
-    monkeypatch.setattr(ce, "_ax", lambda: FakeAX(role="AXSecureTextField"))
+class _Elem:
+    def __init__(self, password):
+        self.CurrentIsPassword = password
+
+
+class _Control:
+    def __init__(self, password):
+        self.Element = _Elem(password)
+
+
+class FakeUIA:
+    def __init__(self, control=None, raise_on_focus=False):
+        self.control, self.raise_on_focus = control, raise_on_focus
+        self.inits = 0
+
+    def UIAutomationInitializerInThread(self):
+        outer = self
+
+        class Ctx:
+            def __enter__(self):
+                outer.inits += 1
+
+            def __exit__(self, *a):
+                return False
+        return Ctx()
+
+    def GetFocusedControl(self):
+        if self.raise_on_focus:
+            raise RuntimeError("COM error")
+        return self.control
+
+
+def test_focused_is_secure_reads_is_password(monkeypatch):
+    uia = FakeUIA(_Control(True))
+    monkeypatch.setattr(ce, "_uia", lambda: uia)
     assert ce.focused_is_secure() is True
-    monkeypatch.setattr(ce, "_ax", lambda: FakeAX(role="AXTextField"))
+    assert uia.inits == 1
+    monkeypatch.setattr(ce, "_uia", lambda: FakeUIA(_Control(False)))
     assert ce.focused_is_secure() is False
-
-
-def test_focused_is_secure_subrole(monkeypatch):
-    monkeypatch.setattr(ce, "_ax", lambda: FakeAX(role="AXTextField", subrole="AXSecureTextField"))
-    assert ce.focused_is_secure() is True
 
 
 def test_focused_is_secure_false_on_errors(monkeypatch):
-    monkeypatch.setattr(ce, "_ax", lambda: FakeAX(focus_err=-25204))
+    monkeypatch.setattr(ce, "_uia", lambda: FakeUIA(None))
     assert ce.focused_is_secure() is False
-    monkeypatch.setattr(ce, "_ax", lambda: FakeAX(raise_on_role=True))
+    monkeypatch.setattr(ce, "_uia", lambda: FakeUIA(raise_on_focus=True))
     assert ce.focused_is_secure() is False
 
     def boom():
-        raise ImportError("nope")
-    monkeypatch.setattr(ce, "_ax", boom)
+        raise ImportError("no uiautomation")
+    monkeypatch.setattr(ce, "_uia", boom)
     assert ce.focused_is_secure() is False
 
 
 # --- frontmost -------------------------------------------------------------
 
-def _win(pid, layer, name, y=100):
-    return {
-        "kCGWindowOwnerPID": pid,
-        "kCGWindowLayer": layer,
-        "kCGWindowName": name,
-        "kCGWindowBounds": {"X": 10, "Y": y, "Width": 800, "Height": 600},
-    }
+def test_frontmost_reports_app_exe_title_and_class(win):
+    win.fg = 0x1234
+    win.titles[0x1234], win.classes[0x1234], win.pids[0x1234] = "Untitled - Notepad", "Notepad", 42
+    win.paths[42] = r"C:\Windows\System32\Notepad.exe"
+    win.names[win.paths[42]] = "Notepad"
+    assert ce.frontmost() == Front(
+        app="Notepad", bundle_id="notepad.exe", window_title="Untitled - Notepad", pid=42,
+        window_class="Notepad",
+    )
 
 
-def test_frontmost_uses_first_layer0_window_of_front_pid(monkeypatch):
-    q = FakeQuartz(windows=[
-        _win(999, 0, "Other app"),
-        _win(42, 25, "Menu bar thing"),
-        _win(42, 0, "Untitled — TextEdit"),
-        _win(42, 0, "Second window"),
-    ])
-    monkeypatch.setattr(ce, "_quartz", lambda: q)
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(_App("TextEdit", "com.apple.TextEdit", 42)))
+def test_frontmost_name_falls_back_to_the_exe_stem(win):
+    win.fg, win.pids[1] = 1, 7
+    win.paths[7] = r"C:\Tools\MyTool.EXE"
     front = ce.frontmost()
-    assert front == Front(app="TextEdit", bundle_id="com.apple.TextEdit",
-                          window_title="Untitled — TextEdit", pid=42)
+    assert (front.app, front.bundle_id) == ("MyTool", "mytool.exe")
 
 
-def test_frontmost_prefers_on_screen_window(monkeypatch):
-    q = FakeQuartz(windows=[
-        _win(42, 0, "Parked offscreen", y=-5000),
-        _win(42, 0, "Visible one", y=50),
-    ])
-    monkeypatch.setattr(ce, "_quartz", lambda: q)
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(_App("X", "com.x", 42)))
-    assert ce.frontmost().window_title == "Visible one"
-
-
-def test_frontmost_falls_back_to_offscreen_window_when_nothing_else(monkeypatch):
-    q = FakeQuartz(windows=[_win(42, 0, "Parked offscreen", y=-5000)])
-    monkeypatch.setattr(ce, "_quartz", lambda: q)
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(_App("X", "com.x", 42)))
-    assert ce.frontmost().window_title == "Parked offscreen"
-
-
-def test_frontmost_without_window_or_app(monkeypatch):
-    q = FakeQuartz(windows=[_win(1, 0, "Something else")])
-    monkeypatch.setattr(ce, "_quartz", lambda: q)
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(_App("Finder", None, 42)))
+def test_frontmost_uwp_reports_the_hosted_app(win):
+    win.fg, win.pids[1], win.titles[1] = 1, 7, "Settings"
+    win.paths[7] = r"C:\Windows\System32\ApplicationFrameHost.exe"
+    win.uwp_child[1] = 9
+    win.paths[9] = r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe"
+    win.names[win.paths[9]] = "Settings"
     front = ce.frontmost()
-    assert front == Front(app="Finder", bundle_id="", window_title="", pid=42)
+    assert (front.app, front.bundle_id, front.pid) == ("Settings", "systemsettings.exe", 9)
+    assert ce.is_system_dialog(front)
 
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(None))
+
+def test_frontmost_without_a_foreground_window(win):
     assert ce.frontmost() == Front(app="", bundle_id="", window_title="", pid=0)
 
 
-def test_frontmost_survives_window_list_failure(monkeypatch):
-    class Broken(FakeQuartz):
-        def CGWindowListCopyWindowInfo(self, *a):
-            raise RuntimeError("cg down")
-    monkeypatch.setattr(ce, "_quartz", lambda: Broken())
-    monkeypatch.setattr(ce, "_appkit", lambda: FakeAppKit(_App("X", "com.x", 7)))
-    assert ce.frontmost() == Front(app="X", bundle_id="com.x", window_title="", pid=7)
+def test_frontmost_survives_failures(win, monkeypatch):
+    win.fg, win.titles[1], win.pids[1] = 1, "Doc", 3
+
+    def broken(pid):
+        raise OSError("access denied")
+    monkeypatch.setattr(win, "process_path", broken)
+    front = ce.frontmost()
+    assert front.window_title == "Doc" and front.bundle_id == ""
+
+    def boom():
+        raise OSError("no win32")
+    monkeypatch.setattr(ce, "_win32", boom)
+    assert ce.frontmost() == Front(app="", bundle_id="", window_title="", pid=0)
 
 
 # --- system dialogs ----------------------------------------------------------
 
-@pytest.mark.parametrize("bundle, title, expected", [
-    ("com.apple.SecurityAgent", "", True),
-    ("com.apple.UserNotificationCenter", "", True),
-    ("com.apple.coreservices.uiagent", "Open?", True),
-    ("com.apple.systempreferences", "Privacy & Security", True),
-    ("com.apple.systempreferences", "Accessibility — privacy", True),
-    ("com.apple.systempreferences", "Login Security", True),
-    ("com.apple.systempreferences", "Displays", True),      # any pane: unconditionally sensitive
-    ("com.apple.systempreferences", "", True),
-    ("com.apple.accessibility.universalAccessAuthWarn", "", True),
-    ("com.apple.TextEdit", "Privacy & Security", False),
-    ("", "", False),
+@pytest.mark.parametrize("exe, title, cls, expected", [
+    ("consent.exe", "", "", True),
+    ("credentialuibroker.exe", "Windows Security", "Credential Dialog Xaml Host", True),
+    ("CredentialUIBroker.exe", "", "", True),
+    ("smartscreen.exe", "", "", True),
+    ("sechealthui.exe", "Windows Security", "", True),
+    ("systemsettings.exe", "Settings", "", True),        # any page: unconditionally sensitive
+    ("logonui.exe", "", "", True),
+    ("explorer.exe", "Open File - Security Warning", "#32770", True),
+    ("chrome.exe", "Windows  Security", "", True),       # the title alone is enough
+    ("foo.exe", "", "Credential Dialog Xaml Host", True),
+    ("notepad.exe", "Privacy settings.txt - Notepad", "Notepad", False),
+    ("", "", "", False),
 ])
-def test_is_system_dialog(bundle, title, expected):
-    assert ce.is_system_dialog(Front(app="x", bundle_id=bundle, window_title=title, pid=1)) is expected
-
-
-def test_system_dialog_bundles_table():
-    assert {"com.apple.SecurityAgent", "com.apple.UserNotificationCenter", "com.apple.coreservices.uiagent",
-            "com.apple.accessibility.universalAccessAuthWarn"} <= ce.SYSTEM_DIALOG_BUNDLES
+def test_is_system_dialog(exe, title, cls, expected):
+    front = Front(app="x", bundle_id=exe, window_title=title, pid=1, window_class=cls)
+    assert ce.is_system_dialog(front) is expected
 
 
 def test_disallowed_dialog_targets_table():
-    assert {"allow", "always allow", "ok", "open system settings", "continue", "install", "trust"} <= ce.DISALLOWED_DIALOG_TARGETS
+    assert {"allow", "always allow", "ok", "yes", "continue", "install", "run anyway"} <= ce.DISALLOWED_DIALOG_TARGETS
     assert all(t == t.lower() for t in ce.DISALLOWED_DIALOG_TARGETS)
-    assert "com.apple.SecurityAgent" in ce.SYSTEM_DIALOG_BUNDLES
+    assert all(t == t.lower() for t in ce.SYSTEM_DIALOG_APPS | ce.SYSTEM_DIALOG_CLASSES | ce.SYSTEM_DIALOG_TITLES)
 
 
 # --- release on failure ------------------------------------------------------
 
-class _PostFailsOnFirstDown:
-    """Wraps the fake so the first *down* event raises after being recorded."""
+class _FailOn:
+    """Records every batch on the fake; raises (after recording) on the
+    first batch `pred` matches."""
 
-    def __init__(self, q, down_types):
-        self.q, self.down_types, self.tripped = q, set(down_types), False
+    def __init__(self, w, pred):
+        self.w, self.pred, self.tripped = w, pred, False
 
-    def __call__(self, ev):
-        self.q.posted.append(ev)
-        if not self.tripped and ev.type in self.down_types:
+    def __call__(self, *events):
+        self.w.batches.append(list(events))
+        if not self.tripped and self.pred(events):
             self.tripped = True
-            raise RuntimeError("tap gone")
+            raise OSError("input gone")
 
 
-def test_key_releases_with_same_flags_when_down_post_fails(quartz, monkeypatch):
-    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {"keydown"}))
-    with pytest.raises(RuntimeError, match="tap gone"):
-        ce.key("cmd+shift+s")
-    want = FakeQuartz.kCGEventFlagMaskCommand | FakeQuartz.kCGEventFlagMaskShift
-    assert [(e.type, e.keycode, e.flags) for e in quartz.posted] == [
-        ("keydown", 1, want), ("keyup", 1, want),
-    ]
+def test_key_releases_everything_when_downs_fail(win, monkeypatch):
+    monkeypatch.setattr(ce, "post", _FailOn(win, lambda evs: not evs[0].flags & UP))
+    with pytest.raises(OSError, match="input gone"):
+        ce.key("ctrl+shift+s")
+    assert win.batches[1] == [KeyInput(ord("S"), UP), KeyInput(SHIFT, UP), KeyInput(CTRL, UP)]
 
 
-def test_click_releases_button_when_down_post_fails(quartz, monkeypatch):
-    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {3}))
-    with pytest.raises(RuntimeError):
+def test_click_releases_button_when_down_fails(win, monkeypatch):
+    monkeypatch.setattr(ce, "post", _FailOn(win, lambda evs: evs[0].flags & RDOWN))
+    with pytest.raises(OSError):
         ce.click(1, 2, button="right")
-    assert _mouse(quartz) == [(5, 1, 2, 0), (3, 1, 2, 1), (4, 1, 2, 1)]
+    assert _mouse(win) == [(0, 1, 2), (RDOWN, 1, 2), (RUP, 1, 2)]
 
 
-def test_double_click_second_pair_releases_when_down_post_fails(quartz, monkeypatch):
-    class FailSecondDown:
-        def __init__(self):
-            self.downs = 0
+def test_double_click_second_pair_releases_when_down_fails(win, monkeypatch):
+    downs = []
 
-        def __call__(self, ev):
-            quartz.posted.append(ev)
-            if ev.type == 1:
-                self.downs += 1
-                if self.downs == 2:
-                    raise RuntimeError("tap gone")
-    monkeypatch.setattr(ce, "post", FailSecondDown())
-    with pytest.raises(RuntimeError):
+    def post(*events):
+        win.batches.append(list(events))
+        if events[0].flags & LDOWN:
+            downs.append(1)
+            if len(downs) == 2:
+                raise OSError("input gone")
+    monkeypatch.setattr(ce, "post", post)
+    with pytest.raises(OSError):
         ce.click(5, 6, double=True)
-    assert [e.type for e in quartz.posted] == [5, 1, 2, 1, 2]
-    assert quartz.posted[-1].fields.get(1) == 2
+    assert [f for f, *_ in _mouse(win)] == [0, LDOWN, LUP, LDOWN, LUP]
 
 
-def test_drag_releases_at_end_point_when_a_dragged_move_fails(quartz, monkeypatch):
-    monkeypatch.setattr(ce, "post", _PostFailsOnFirstDown(quartz, {6}))
-    with pytest.raises(RuntimeError):
+def test_drag_releases_at_end_point_when_a_move_fails(win, monkeypatch):
+    monkeypatch.setattr(ce, "post", _FailOn(win, lambda evs: evs[0].flags == ABS and evs[0].x != 0))
+    with pytest.raises(OSError):
         ce.drag(0, 0, 80, 40)
-    ev = _mouse(quartz)
-    assert [t for t, *_ in ev] == [5, 1, 6, 2]
-    assert ev[-1] == (2, 80, 40, 0)
+    ev = _mouse(win)
+    assert [f for f, *_ in ev] == [0, LDOWN, 0, 0, LUP]
+    assert ev[-2:] == [(0, 80, 40), (LUP, 80, 40)]
 
 
-def test_release_failure_is_logged_not_raised_over_original(quartz, monkeypatch, caplog):
-    def always_fail(ev):
-        quartz.posted.append(ev)
-        raise RuntimeError("down failed" if ev.type == "keydown" else "up failed")
+def test_release_failure_is_logged_not_raised_over_original(win, monkeypatch, caplog):
+    def always_fail(*events):
+        win.batches.append(list(events))
+        raise OSError("up failed" if events[0].flags & UP else "down failed")
     monkeypatch.setattr(ce, "post", always_fail)
-    with pytest.raises(RuntimeError, match="down failed"):
+    with pytest.raises(OSError, match="down failed"):
         ce.key("a")
-    assert [e.type for e in quartz.posted] == ["keydown", "keyup"]
+    assert len(win.batches) == 2
     assert "up failed" in caplog.text
 
 
 # --- dangerous combos --------------------------------------------------------
 
 @pytest.mark.parametrize("combo, expected", [
-    ("cmd+q", "cmd+q"),
-    ("Command+Q", "cmd+q"),
-    ("shift+option+control+command+s", "cmd+ctrl+alt+shift+s"),
-    ("option+cmd+esc", "cmd+alt+esc"),
-    ("cmd+option+escape", "cmd+alt+esc"),
-    (" alt + cmd + Escape ", "cmd+alt+esc"),
-    ("cmd+cmd+s", "cmd+s"),
+    ("ctrl+q", "ctrl+q"),
+    ("Command+Q", "ctrl+q"),
+    ("shift+option+control+windows+s", "ctrl+alt+shift+win+s"),
+    ("Alt+F4", "alt+f4"),
+    ("control+alt+del", "ctrl+alt+delete"),
+    (" shift + ctrl + Escape ", "ctrl+shift+esc"),
+    ("super+L", "win+l"),
+    ("ctrl+ctrl+s", "ctrl+s"),
+    ("cmd+ctrl+s", "ctrl+s"),
     ("enter", "enter"),
-    ("ctrl+cmd+power", "cmd+ctrl+power"),
+    ("WIN", "win"),
 ])
 def test_normalize_combo(combo, expected):
     assert ce.normalize_combo(combo) == expected
 
 
 def test_normalize_combo_rejects_malformed():
-    for bad in ("", "cmd+", "+s", "cmd+shift", "hyper+s"):
+    for bad in ("", "ctrl+", "+s", "ctrl+shift", "hyper+s"):
         with pytest.raises(ValueError):
             ce.normalize_combo(bad)
 
 
 @pytest.mark.parametrize("combo", [
-    "cmd+q", "Cmd+Q", "command+q", "option+cmd+esc", "cmd+alt+escape", "alt+cmd+esc",
-    "ctrl+cmd+q", "cmd+ctrl+q", "shift+cmd+q", "cmd+option+shift+esc",
-    "ctrl+cmd+power", "control+command+power",
+    "alt+f4", "Alt+F4", "option+f4", "win+l", "Windows+L", "ctrl+alt+delete", "ctrl+alt+del",
+    "control+alt+Delete", "ctrl+alt+end", "ctrl+shift+esc", "shift+ctrl+escape", "win+x",
+    "ctrl+q", "cmd+q", "ctrl+shift+q",
 ])
-def test_key_refuses_dangerous_combos(quartz, combo):
+def test_key_refuses_dangerous_combos(win, combo):
     with pytest.raises(ce.DangerousCombo):
         ce.key(combo)
-    assert quartz.posted == []
+    assert win.posted == []
 
 
 def test_dangerous_combo_is_a_value_error_and_table_is_normalised():
@@ -557,7 +608,9 @@ def test_dangerous_combo_is_a_value_error_and_table_is_normalised():
         assert ce.normalize_combo(c) == c, c
 
 
-def test_key_still_allows_safe_combos_with_cmd(quartz):
-    ce.key("cmd+s")
-    ce.key("cmd+shift+z")
-    assert [e.keycode for e in quartz.posted] == [1, 1, 6, 6]
+def test_key_still_allows_safe_combos(win):
+    ce.key("ctrl+s")
+    ce.key("ctrl+shift+z")
+    ce.key("alt+tab")
+    ce.key("win+d")
+    assert len(win.batches) == 8

@@ -1,6 +1,7 @@
 """Antigravity (`agy` 1.2.7) as a Veronica brain.
 
-How it runs (verified on this Mac, 2026-09-19):
+How it runs (verified against agy 1.2.7 on macOS, 2026-09-19; the paths
+below are under %USERPROFILE% on Windows):
 - One long-lived child in persistent stream mode: `agy --output-format
   stream-json --input-format stream-json --print= ...` (`--print=` with
   an EMPTY value; a bare `-p` swallows the next flag). It emits
@@ -14,24 +15,27 @@ How it runs (verified on this Mac, 2026-09-19):
   the gate (the base's canary checks the hook really fires). With native
   tools OFF the flag is dropped: headless agy then auto-denies every
   shell/file tool itself.
-- Only the USER-level `~/.gemini/config/hooks.json` is loaded (workspace
+- Only the USER-level `%USERPROFILE%\.gemini\config\hooks.json` is loaded (workspace
   `.agy/` and `.agents/` hooks are not), so our PreToolUse entry is merged
   into that file and scoped with `--scope-file <backend_dir>/active-conversation`,
   written right after `init` and before the first prompt. The user's own
-  interactive `agy` sessions are never gated.
+  interactive `agy` sessions are never gated. agy hands the hook command
+  to a shell, so it is written to read the same in cmd.exe and PowerShell
+  (winproc.neutral_command).
 - No system-prompt flag: the prompt goes in `AGENTS.md` in the workspace
   (cwd). Images: only "text" content blocks exist on stdin, so screenshots
-  are referenced as `@/path/img-1.png` in the text (whether agy attaches
+  are referenced as `@C:\path\img-1.png` in the text (whether agy attaches
   them this way is unverified; the paths are real files it can view_file).
 - MCP servers are registered once per process with `agy mcp add` (into
-  `~/.gemini/config/mcp_config.json`) and called through `call_mcp_tool`.
+  `%USERPROFILE%\.gemini\config\mcp_config.json`) and called through
+  `call_mcp_tool`.
 """
 import json
-import shlex
 import sys
 from pathlib import Path
 
 from veronica.brain import hook
+from veronica.brain.backends import winproc
 from veronica.brain.gateclient import HOOK_TIMEOUT_S
 from veronica.brain.backends.cli import (
     CliBrain,
@@ -78,7 +82,7 @@ class AntigravityBrain(CliBrain):
 
     def session_started(self, session_id: str) -> None:
         self._conversation_id = session_id
-        self.scope_file.write_text(session_id)
+        self.scope_file.write_text(session_id, encoding="utf-8")
 
     # -- workspace ----------------------------------------------------------------
     # What identifies OUR entry in the user's hooks file, whatever the paths in
@@ -87,21 +91,25 @@ class AntigravityBrain(CliBrain):
     HOOK_MARKER = "-m veronica.brain.hook antigravity"
 
     def hook_command(self) -> str:
-        # agy runs the command through `sh -c`, so the paths are quoted.
-        return (f"{shlex.quote(sys.executable)} {self.HOOK_MARKER} --sock {shlex.quote(str(self.s.gate_socket))} "
-                f"--log {shlex.quote(str(self.hook_log))} --scope-file {shlex.quote(str(self.scope_file))}")
+        # agy runs the command through a shell; the paths are made safe for
+        # either Windows shell (8.3 short forms, else quoted).
+        return " ".join([
+            winproc.neutral_arg(sys.executable), self.HOOK_MARKER,
+            winproc.neutral_command(["--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log),
+                                     "--scope-file", str(self.scope_file)]),
+        ])
 
     def prepare_workspace(self, prompt_text: str, native: bool) -> None:
         if not native:
             prompt_text += ("\n\nDo not run shell commands or edit files yourself in this session; "
                             "use Veronica's tools only.")
-        (self.workspace / "AGENTS.md").write_text(prompt_text)
+        (self.workspace / "AGENTS.md").write_text(prompt_text, encoding="utf-8")
         self._merge_hook()
         self._register_mcp()
 
     def _read_hooks(self) -> dict:
         try:
-            data = json.loads(self.hooks_file.read_text()) if self.hooks_file.exists() else {}
+            data = json.loads(self.hooks_file.read_text(encoding="utf-8")) if self.hooks_file.exists() else {}
         except ValueError:
             data = {}
         return data if isinstance(data, dict) else {}
@@ -119,7 +127,7 @@ class AntigravityBrain(CliBrain):
         else:
             hooks.pop("PreToolUse", None)
         self.hooks_file.parent.mkdir(parents=True, exist_ok=True)
-        self.hooks_file.write_text(json.dumps(data, indent=2) + "\n")
+        self.hooks_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def _merge_hook(self) -> None:
         """Ensure our PreToolUse entry is in the user-level hooks file,
@@ -151,12 +159,12 @@ class AntigravityBrain(CliBrain):
         if self._mcp_registered:
             return
         for server in hook.OUR_SERVERS:
-            self._run(["agy", "mcp", "add",
-                       "--env", f"VERONICA_GATE_SOCK={self.s.gate_socket}",
-                       "--env", "VERONICA_BRAIN=antigravity",
-                       "--env", f"VERONICA_HOOK_LOG={self.hook_log}",
-                       f"veronica-{server}", sys.executable, "-m", "veronica.tools.serve", server],
-                      capture_output=True, timeout=30)
+            self._run_cli(["agy", "mcp", "add",
+                           "--env", f"VERONICA_GATE={self.s.gate_endpoint}",
+                           "--env", "VERONICA_BRAIN=antigravity",
+                           "--env", f"VERONICA_HOOK_LOG={self.hook_log}",
+                           f"veronica-{server}", sys.executable, "-m", "veronica.tools.serve", server],
+                          capture_output=True, timeout=30)
         self._mcp_registered = True
 
     # -- stream -------------------------------------------------------------------

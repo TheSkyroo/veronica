@@ -9,7 +9,7 @@ from veronica.config import Settings
 from veronica.orchestrator import ConfirmResult
 from veronica.tools.computer_events import Front
 
-FINDER = Front(app="Finder", bundle_id="com.apple.finder", window_title="Desktop", pid=1)
+FINDER = Front(app="File Explorer", bundle_id="explorer.exe", window_title="Desktop", pid=1)
 
 
 def make(answers, *, front=FINDER, now=None, said=None, **settings):
@@ -59,10 +59,22 @@ async def test_other_answer_becomes_redirect():
     assert g.pending_redirect == "open it in the other profile"
 
 
-async def test_screencapture_bash_is_redirected():
+@pytest.mark.parametrize("command", [
+    "Add-Type -AssemblyName System.Drawing; $g.CopyFromScreen(0, 0, 0, 0, $b.Size)",
+    "snippingtool /clip",
+    "SnippingTool.exe",
+    "Start-Process ms-screenclip:",
+    "nircmd.exe savescreenshot C:\\x.png",
+])
+async def test_a_shell_screen_capture_is_redirected(command):
     g, calls, _ = make([])
-    d = await g.decide("Bash", {"command": "screencapture x.png"})
+    d = await g.decide("Bash", {"command": command})
     assert not d.allow and d.kind == "redirect" and "screenshot tool" in d.message and calls == []
+
+
+async def test_an_ordinary_command_is_not_redirected():
+    g, calls, _ = make([True])
+    assert (await g.decide("Bash", {"command": "Get-Process screenshot-helper"})).kind == "auto"
 
 
 async def test_trust_window_allows_second_click_same_app():
@@ -99,52 +111,40 @@ async def test_preapproval_never_for_always_confirm():
     assert d.kind == "approved" and len(calls) == 1
 
 
-async def test_allowlisted_shortcut_runs_without_asking():
-    g, calls, cards = make([], shortcut_allowlist=["Morning", "Pay Rent"])
-    d = await g.decide("mcp__system__run_shortcut", {"name": "morning"})
-    assert d.allow and d.kind == "auto" and calls == []
-    assert cards[-1] == ("Run the shortcut 'morning'", "auto")
+@pytest.fixture
+def priya(_fake_contacts):
+    _fake_contacts[:] = [("Priya Shah", ["priya@example.com"])]
+    return _fake_contacts
 
 
-async def test_unlisted_shortcut_asks():
-    g, calls, _ = make([True], shortcut_allowlist=["Morning"])
-    d = await g.decide("mcp__system__run_shortcut", {"name": "Wipe Disk"})
-    assert d.allow and d.kind == "approved"
-    assert calls[0][0] == "Run the shortcut 'Wipe Disk'"
+MAIL = {"subject": "Hi", "body": "on my way"}
 
 
-async def test_shortcuts_ask_by_default():
-    g, calls, _ = make([True])
-    assert (await g.decide("mcp__system__run_shortcut", {"name": "Morning"})).kind == "approved"
-    assert len(calls) == 1
-
-
-async def test_message_send_is_asked_even_when_preapproved():
+async def test_mail_send_is_asked_even_when_preapproved(priya):
     now = [10.0]
     g, calls, _ = make([True], now=now)
     g.begin_turn(1); g.preapprove(1, until=30.0)
-    d = await g.decide("mcp__pim__message_send", {"to": "Priya", "body": "on my way"})
-    assert d.kind == "approved" and calls[0][0] == "Message Priya Shah (+91 98765 43210): on my way"
-    assert calls[0][1] == calls[0][0]
+    d = await g.decide("mcp__pim__mail_send", {"to": "Priya", **MAIL})
+    assert d.kind == "approved" and calls[0][0] == "Send mail to Priya Shah (priya@example.com)"
 
 
-async def test_message_send_to_a_handle_is_shown_as_is():
+async def test_mail_send_to_an_address_is_shown_as_is():
     g, calls, _ = make([True])
-    await g.decide("mcp__pim__message_send", {"to": "+15551234567", "body": "hi"})
-    assert calls[0][0] == "Message +15551234567: hi"
+    await g.decide("mcp__pim__mail_send", {"to": "zed@example.com", **MAIL})
+    assert calls[0][0] == "Send mail to zed@example.com"
 
 
-async def test_message_send_to_an_ambiguous_name_is_handed_back_without_asking(_fake_contacts):
-    _fake_contacts.append(("Priya Nair", ["+44 1"]))
+async def test_mail_send_to_an_ambiguous_name_is_handed_back_without_asking(priya):
+    priya.append(("Priya Nair", ["nair@example.com"]))
     g, calls, cards = make([])
-    d = await g.decide("mcp__pim__message_send", {"to": "Priya", "body": "hi"})
+    d = await g.decide("mcp__pim__mail_send", {"to": "Priya", **MAIL})
     assert not d.allow and d.kind == "redirect" and d.message == "Which Priya — Priya Shah or Priya Nair?"
     assert calls == [] and cards == []
 
 
-async def test_message_send_to_an_unknown_name_is_handed_back():
+async def test_mail_send_to_an_unknown_name_is_handed_back():
     g, calls, _ = make([])
-    d = await g.decide("mcp__pim__message_send", {"to": "Zed", "body": "hi"})
+    d = await g.decide("mcp__pim__mail_send", {"to": "Zed", **MAIL})
     assert not d.allow and "No contact named Zed" in d.message and calls == []
 
 
@@ -174,15 +174,15 @@ async def test_a_denied_call_error_is_not_a_failure():
     assert cards == []
 
 
-async def test_a_failed_message_send_names_the_step_the_confirm_showed():
+async def test_a_failed_mail_send_names_the_step_the_confirm_showed(priya):
     g, _, cards = make([True])
-    inp = {"to": "Priya", "body": "hi"}
-    await g.decide("mcp__pim__message_send", inp)
-    g.tool_result("mcp__pim__message_send", inp, True)
-    assert cards == [("Message Priya Shah (+91 98765 43210): hi", "failed")]
+    inp = {"to": "Priya", **MAIL}
+    await g.decide("mcp__pim__mail_send", inp)
+    g.tool_result("mcp__pim__mail_send", inp, True)
+    assert cards == [("Send mail to Priya Shah (priya@example.com)", "failed")]
 
 
-# -- GateServer: the socket front for out-of-process callers ------------------
+# -- GateServer: the loopback front for out-of-process callers ----------------
 import asyncio
 import json
 
@@ -190,15 +190,25 @@ from veronica.brain.gate import GateServer
 
 
 @pytest.fixture
-def sock(tmp_path, monkeypatch):
-    """AF_UNIX paths are capped at ~104 bytes and pytest's tmp_path on macOS
-    is longer, so bind relative to it."""
-    monkeypatch.chdir(tmp_path)
-    return Path("gate.sock")
+def sock(tmp_path):
+    """The gate's endpoint file (name kept from the Unix-socket days)."""
+    return tmp_path / "run" / "gate.json"
 
 
-async def _roundtrip(path, req):
-    r, w = await asyncio.open_unix_connection(str(path))
+def _endpoint(path):
+    data = json.loads(path.read_text())
+    return data["port"], data["token"]
+
+
+async def _connect(path, token=None):
+    port, real = _endpoint(path)
+    r, w = await asyncio.open_connection("127.0.0.1", port)
+    w.write(((real if token is None else token) + "\n").encode())
+    return r, w
+
+
+async def _roundtrip(path, req, token=None):
+    r, w = await _connect(path, token)
     w.write((json.dumps(req) + "\n").encode())
     await w.drain()
     line = await r.readline()
@@ -212,7 +222,6 @@ async def test_gate_server_allow_and_deny(sock):
     srv = GateServer(g, sock)
     await srv.start()
     try:
-        assert (sock).stat().st_mode & 0o777 == 0o600
         ok = await _roundtrip(sock,
                               {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "a"}, "origin": "mcp", "backend": "codex"})
         assert ok == {"allow": True, "kind": "approved", "reason": ""}
@@ -222,6 +231,101 @@ async def test_gate_server_allow_and_deny(sock):
     finally:
         await srv.stop()
     assert not (sock).exists()
+
+
+async def test_gate_server_listens_on_loopback_and_publishes_its_endpoint(sock):
+    g, _, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        data = json.loads(sock.read_text())
+        assert set(data) == {"v", "port", "token", "pid"} and data["port"] == srv.port
+        assert len(data["token"]) >= 32
+        assert srv._server.sockets[0].getsockname()[0] == "127.0.0.1"
+        assert not sock.with_name("gate.json.tmp").exists()
+    finally:
+        await srv.stop()
+    assert not sock.exists()
+
+
+async def test_each_start_gets_a_fresh_port_and_token(sock):
+    g, _, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    first = json.loads(sock.read_text())
+    await srv.stop()
+    await srv.start()
+    try:
+        assert json.loads(sock.read_text())["token"] != first["token"]
+    finally:
+        await srv.stop()
+
+
+async def test_a_stale_endpoint_file_is_replaced(sock):
+    sock.parent.mkdir(parents=True)
+    sock.write_text('{"port": 1, "token": "old"}')
+    g, _, _ = make([])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        assert json.loads(sock.read_text())["token"] != "old"
+    finally:
+        await srv.stop()
+
+
+@pytest.mark.parametrize("token", ["wrong", "", "x" * 43])
+async def test_a_wrong_token_is_refused_before_the_request_is_read(sock, token):
+    g, calls, _ = make([True])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        resp = await _roundtrip(sock, {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "a"},
+                                       "origin": "mcp", "backend": "codex"}, token=token)
+        assert resp == {"allow": False, "kind": "denied", "reason": "bad token"} and calls == []
+    finally:
+        await srv.stop()
+
+
+async def test_a_request_line_in_place_of_the_token_is_refused(sock):
+    g, calls, _ = make([True])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        port, _ = _endpoint(sock)
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write((json.dumps({"v": 1, "tool": "mcp__system__volume_get", "input": {}}) + "\n").encode())
+        await w.drain()
+        assert json.loads(await r.readline())["reason"] == "bad token" and calls == []
+        w.close()
+    finally:
+        await srv.stop()
+
+
+async def test_a_silent_connection_is_dropped(sock):
+    g, _, _ = make([])
+    srv = GateServer(g, sock)
+    srv.auth_timeout_s = 0.05
+    await srv.start()
+    try:
+        port, _ = _endpoint(sock)
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        line = await asyncio.wait_for(r.readline(), 2)
+        assert json.loads(line)["reason"] == "bad token"
+        w.close()
+    finally:
+        await srv.stop()
+
+
+async def test_a_large_request_line_is_read_whole(sock):
+    g, calls, _ = make([True])
+    srv = GateServer(g, sock)
+    await srv.start()
+    try:
+        big = {"v": 1, "tool": "Write", "input": {"file_path": "C:\\x.txt", "content": "a" * 200_000},
+               "origin": "hook", "backend": "codex"}
+        assert (await _roundtrip(sock, big))["allow"] is True and len(calls) == 1
+    finally:
+        await srv.stop()
 
 
 async def test_gate_server_allow_class_needs_no_confirm(sock):
@@ -241,7 +345,7 @@ async def test_gate_server_malformed_request_is_denied(sock):
     srv = GateServer(g, sock)
     await srv.start()
     try:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await _connect(sock)
         w.write(b"not json\n")
         await w.drain()
         assert json.loads(await r.readline()) == {"allow": False, "kind": "denied", "reason": "bad request"}
@@ -490,7 +594,7 @@ async def test_a_plain_yes_remembers_nothing(saved):
 
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
-    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
+    ("mcp__system__powershell", {"script": "Get-Date"}),
     ("Bash", {"command": "rm -rf /tmp/x"}),
 ])
 async def test_always_on_an_ineligible_tool_approves_once_and_says_so(saved, tool, inp):
@@ -516,10 +620,8 @@ async def test_always_on_a_screen_action_approves_once_and_says_so(saved):
 
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
-    ("mcp__pim__message_send", {"to": "Priya", "body": "hi"}),
-    ("mcp__system__applescript", {"script": "delete everything"}),
+    ("mcp__system__powershell", {"script": "Remove-Item -Recurse C:\\x"}),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}),
-    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
 ])
 async def test_a_hand_typed_ineligible_tool_is_asked_every_single_time(tool, inp):
     # trust window off, so nothing but the auto-allow list is under test
