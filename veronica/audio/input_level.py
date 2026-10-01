@@ -1,16 +1,16 @@
 """Input-volume floor guard.
 
-macOS keeps lowering the system input volume behind our back: call apps
-with auto-gain (Zoom, Meet, FaceTime) and default-device switches leave it
-at 27–33 %, and far-field wake detection dies at that level. `InputLevelGuard`
-reads the input volume via osascript and raises it back to a configurable
-floor (never lowers it). It runs periodically from the orchestrator loop
-and once, forced, right after every device switch.
+Windows lets other software lower the capture endpoint's level behind our
+back: call apps with auto-gain (Teams, Zoom, Meet) and default-device
+switches leave it at 27–33 %, and far-field wake detection dies at that
+level. `InputLevelGuard` reads the default capture endpoint's master volume
+(IAudioEndpointVolume) and raises it back to a configurable floor (never
+lowers it). It runs periodically from the orchestrator loop and once,
+forced, right after every device switch.
 """
 
 import asyncio
 import logging
-import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -19,33 +19,36 @@ from veronica.audio import devices
 
 log = logging.getLogger("veronica.audio")
 
-_TIMEOUT_S = 5
+
+def _endpoint_volume():
+    """IAudioEndpointVolume of the default capture endpoint (pycaw/comtypes,
+    imported lazily: Windows only). Raises on any failure."""
+    from ctypes import POINTER, cast
+
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import IAudioEndpointVolume
+
+    dev = devices.default_capture_device()
+    iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return cast(iface, POINTER(IAudioEndpointVolume))
 
 
-def get_input_volume(run: Callable = subprocess.run) -> int | None:
-    """The Mac's input volume (0-100) via osascript; None on any failure
-    (osascript missing, timeout, non-zero exit, non-integer output)."""
+def get_input_volume(endpoint: Callable = _endpoint_volume) -> int | None:
+    """The default input's volume (0-100, the Sound settings slider); None
+    on any failure (no capture device, COM error, pycaw missing)."""
     try:
-        proc = run(
-            ["osascript", "-e", "input volume of (get volume settings)"],
-            capture_output=True, text=True, timeout=_TIMEOUT_S,
-        )
-        if proc.returncode != 0:
-            return None
-        return int(str(proc.stdout).strip())
+        scalar = float(endpoint().GetMasterVolumeLevelScalar())
+        return max(0, min(100, round(scalar * 100)))
     except Exception:
         return None
 
 
-def set_input_volume(level: int, run: Callable = subprocess.run) -> bool:
-    """Set the Mac's input volume to `level` (clamped to 0-100). False on failure."""
+def set_input_volume(level: int, endpoint: Callable = _endpoint_volume) -> bool:
+    """Set the default input's volume to `level` (clamped to 0-100). False on failure."""
     level = max(0, min(100, int(level)))
     try:
-        proc = run(
-            ["osascript", "-e", f"set volume input volume {level}"],
-            capture_output=True, text=True, timeout=_TIMEOUT_S,
-        )
-        return proc.returncode == 0
+        endpoint().SetMasterVolumeLevelScalar(level / 100.0, None)
+        return True
     except Exception:
         return False
 
@@ -55,10 +58,11 @@ class InputLevelGuard:
 
     `check()` is throttled to one read per `interval_s` unless `force` is
     set (the device-switch hook forces one), and is a no-op while
-    `floor() <= 0`. It only runs subprocesses (osascript: ~100 ms typical,
-    worst case 2 x 5 s timeouts), under a lock so a forced and a periodic
-    check can't race the same fix, so call it from a thread that may block
-    for that long, never from the audio loop or under `refresh_lock`.
+    `floor() <= 0`. It makes blocking COM calls into the Windows audio
+    service (a few ms typically, but they can stall while the service is
+    busy with a device change), under a lock so a forced and a periodic
+    check can't race the same fix, so call it from a thread that may block,
+    never from the audio loop or under `refresh_lock`.
     """
 
     def __init__(
@@ -118,8 +122,8 @@ class InputLevelGuard:
 
 async def run_periodic(guard: InputLevelGuard, stop: asyncio.Event) -> None:
     """One forced check now (startup), then a throttled check every
-    `guard.interval_s` until `stop` is set. Checks run on a thread (they
-    shell out to osascript); a failing check is logged and the loop goes on."""
+    `guard.interval_s` until `stop` is set. Checks run on a thread (they make
+    blocking COM calls); a failing check is logged and the loop goes on."""
     force = True
     while not stop.is_set():
         try:

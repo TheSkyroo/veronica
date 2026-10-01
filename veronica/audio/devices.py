@@ -1,16 +1,16 @@
 """Default-input-device tracking for PortAudio.
 
-macOS switches the default input device on its own (AirPods connect, a USB
-mic is plugged in), but PortAudio snapshots the device table at init and a
-stream opened afterwards still lands on the *old* default. `InputWatch`
-polls CoreAudio for the current default input id; on a change the mic
+Windows switches the default input device on its own (a Bluetooth headset
+connects, a USB mic is plugged in), but PortAudio snapshots the device
+table at init and a stream opened afterwards (WASAPI/MME alike) still lands
+on the *old* default. `InputWatch` polls Core Audio (MMDevice API) for the
+current default capture endpoint id; on a change the mic
 reader closes its stream, `refresh_portaudio()` re-initialises PortAudio
 (after closing any persistent output stream via `before`), and the next
 open follows the new device.
 """
 
 import contextlib
-import ctypes
 import logging
 import threading
 import time
@@ -20,22 +20,13 @@ import sounddevice as sd
 
 log = logging.getLogger("veronica.audio")
 
-_COREAUDIO = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
-_COREFOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-_SYSTEM_OBJECT = 1                                       # kAudioObjectSystemObject
-_DEFAULT_INPUT = int.from_bytes(b"dIn ", "big")          # kAudioHardwarePropertyDefaultInputDevice
-_OBJECT_NAME = int.from_bytes(b"lnam", "big")            # kAudioObjectPropertyName (CFStringRef)
-_CF_UTF8 = 0x08000100                                    # kCFStringEncodingUTF8
-_SCOPE_GLOBAL = int.from_bytes(b"glob", "big")           # kAudioObjectPropertyScopeGlobal
-_ELEMENT_MAIN = 0
-
 # -- shared state -----------------------------------------------------------
 # Kept at module level (not per InputWatch) because wake readers come and go:
 # WhisperWake/WakeWord close their frame generator every time wait() returns,
 # so a per-reader baseline would miss any change that happens between readers
-# (e.g. AirPods connecting during a capture/turn).
-last_input_id: int | None = None      # most recent poll
-initialised_for: int | None = None    # default input id PortAudio was last (re)initialised for
+# (e.g. a headset connecting during a capture/turn).
+last_input_id: str | None = None      # most recent poll (endpoint id string)
+initialised_for: str | None = None    # default input id PortAudio was last (re)initialised for
 pending: bool = False                 # last_input_id != initialised_for: a refresh is owed
 generation: int = 0                   # bumped by every refresh_portaudio(); streams opened
                                       # under an older generation are dead (Pa_Terminate closes them)
@@ -89,7 +80,7 @@ def subscribe_change(fn: Callable[[], None]) -> None:
     mic has followed a default-input switch). Callbacks run on a short
     daemon thread, never on the refreshing thread: the real callers hold
     `refresh_lock` around the whole refresh, and a subscriber may shell out
-    (the input-volume guard runs osascript). Errors are logged, not raised."""
+    (the input-volume guard makes COM calls). Errors are logged, not raised."""
     _change_subscribers.append(fn)
 
 
@@ -101,12 +92,12 @@ def _run_subscribers() -> None:
             log.warning("device change callback failed", exc_info=True)
 
 
-def observe(current: int | None) -> bool:
+def observe(current: str | None) -> bool:
     """Record a polled default input id. The first observation is the
     baseline PortAudio was initialised for. Returns True when the id differs
     from the previous observation; `pending` says whether a refresh is owed
     (it clears itself if the device switches back). A None poll after a
-    valid baseline means "couldn't read it" (a transient CoreAudio hiccup),
+    valid baseline means "couldn't read it" (a transient Core Audio hiccup),
     not "no device": the last id is kept and nothing changes."""
     global last_input_id, initialised_for, pending, _baselined
     if not _baselined:
@@ -121,105 +112,88 @@ def observe(current: int | None) -> bool:
     return changed
 
 
-class _PropertyAddress(ctypes.Structure):
-    _fields_ = [("mSelector", ctypes.c_uint32), ("mScope", ctypes.c_uint32), ("mElement", ctypes.c_uint32)]
+# PKEY_Device_FriendlyName ("Microphone (Realtek(R) Audio)") in an
+# endpoint's property store: {a45c254e-df1c-4efd-8020-67d146a850e0}, 14.
+_FRIENDLY_NAME_FMTID = "{A45C254E-DF1C-4EFD-8020-67D146A850E0}"
+_FRIENDLY_NAME_PID = 14
+_STGM_READ = 0
+
+_com_ready = threading.local()
 
 
-_getter_cache: list = []
-
-
-def _coreaudio_getter():
-    """AudioObjectGetPropertyData from CoreAudio, or None if unavailable."""
-    if _getter_cache:
-        return _getter_cache[0]
+def com_init() -> None:
+    """Make sure COM is initialised on the calling thread (once per thread).
+    Core Audio is COM: every thread that touches it needs CoInitialize, and
+    the mic reader, the input-volume guard and the subscriber threads are
+    all workers. Never uninitialised: the threads are few and the interface
+    pointers comtypes hands out are released lazily (__del__), possibly
+    after a CoUninitialize would already have run. Already-initialised (in
+    either apartment model) is fine; any failure is left for the actual
+    COM call to report."""
+    if getattr(_com_ready, "done", False):
+        return
+    _com_ready.done = True
     try:
-        lib = ctypes.cdll.LoadLibrary(_COREAUDIO)
-        fn = lib.AudioObjectGetPropertyData
-        fn.restype = ctypes.c_int32
-        fn.argtypes = [
-            ctypes.c_uint32, ctypes.POINTER(_PropertyAddress), ctypes.c_uint32,
-            ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p,
-        ]
+        import comtypes
+        comtypes.CoInitialize()
     except Exception:
-        fn = None
-    _getter_cache.append(fn)
-    return fn
+        log.debug("CoInitialize failed", exc_info=True)
 
 
-def default_input_id(get: Callable | None = None) -> int | None:
-    """CoreAudio's current default input device id, or None on any failure.
-    `get` stands in for AudioObjectGetPropertyData (same call signature) in
-    tests."""
+def default_capture_device():
+    """The default capture endpoint (eCapture, eConsole) as a pycaw/comtypes
+    IMMDevice. Raises on any failure (no capture device, pycaw missing)."""
+    com_init()
+    import comtypes
+    from pycaw.constants import CLSID_MMDeviceEnumerator, EDataFlow, ERole
+    from pycaw.pycaw import IMMDeviceEnumerator
+
+    enumerator = comtypes.CoCreateInstance(
+        CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_INPROC_SERVER,
+    )
+    return enumerator.GetDefaultAudioEndpoint(EDataFlow.eCapture.value, ERole.eConsole.value)
+
+
+def default_input_id(device: Callable | None = None) -> str | None:
+    """The default capture endpoint's id string (e.g.
+    "{0.0.1.00000000}.{8d3c...}"), or None on any failure (no input device,
+    COM/pycaw unavailable). `device` stands in for `default_capture_device`
+    (returns an IMMDevice-like object) in tests."""
     try:
-        fn = get if get is not None else _coreaudio_getter()
-        if fn is None:
+        dev = (device or default_capture_device)()
+        if dev is None:
             return None
-        addr = _PropertyAddress(_DEFAULT_INPUT, _SCOPE_GLOBAL, _ELEMENT_MAIN)
-        data = ctypes.c_uint32(0)
-        size = ctypes.c_uint32(ctypes.sizeof(data))
-        status = fn(_SYSTEM_OBJECT, ctypes.byref(addr), 0, None, ctypes.byref(size), ctypes.byref(data))
-        if status != 0:
-            return None
-        return int(data.value)
+        return str(dev.GetId()) or None
     except Exception:
         return None
 
 
-_cf_to_str_cache: list = []
+def _friendly_name(dev) -> str | None:
+    """PKEY_Device_FriendlyName from an IMMDevice's property store."""
+    store = dev.OpenPropertyStore(_STGM_READ)
+    for i in range(store.GetCount()):
+        key = store.GetAt(i)
+        if str(key.fmtid).upper() != _FRIENDLY_NAME_FMTID or int(key.pid) != _FRIENDLY_NAME_PID:
+            continue
+        value = store.GetValue(key)
+        try:
+            name = value.GetValue()
+        finally:
+            with contextlib.suppress(Exception):
+                value.clear()
+        return str(name) if name else None
+    return None
 
 
-def _cfstring_to_str():
-    """A CFStringRef -> str converter (releases the ref), or None if
-    CoreFoundation is unavailable."""
-    if _cf_to_str_cache:
-        return _cf_to_str_cache[0]
+def default_input_name(device: Callable | None = None) -> str | None:
+    """The current default input device's friendly name ("Microphone
+    (Realtek(R) Audio)", "Headset (WH-1000XM4 Hands-Free)"), or None on any
+    failure. `device` stands in for `default_capture_device` in tests."""
     try:
-        cf = ctypes.cdll.LoadLibrary(_COREFOUNDATION)
-        get_c = cf.CFStringGetCString
-        get_c.restype = ctypes.c_bool
-        get_c.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
-        release = cf.CFRelease
-        release.restype = None
-        release.argtypes = [ctypes.c_void_p]
-
-        def to_str(ref: int) -> str | None:
-            try:
-                buf = ctypes.create_string_buffer(256)
-                if not get_c(ref, buf, 256, _CF_UTF8):
-                    return None
-                return buf.value.decode("utf-8", "replace")
-            finally:
-                release(ref)
-    except Exception:
-        to_str = None
-    _cf_to_str_cache.append(to_str)
-    return to_str
-
-
-def default_input_name(
-    get: Callable | None = None,
-    device_id: int | None = None,
-    to_str: Callable[[int], str | None] | None = None,
-) -> str | None:
-    """The current default input device's name ("MacBook Air Microphone",
-    "AirPods Pro"), or None on any failure. CoreAudio's kAudioObjectPropertyName
-    is a CFStringRef (owned by the caller), read with CFStringGetCString and
-    released. `get`/`device_id`/`to_str` are test injection points."""
-    try:
-        dev = device_id if device_id is not None else default_input_id(get)
+        dev = (device or default_capture_device)()
         if dev is None:
             return None
-        fn = get if get is not None else _coreaudio_getter()
-        conv = to_str if to_str is not None else _cfstring_to_str()
-        if fn is None or conv is None:
-            return None
-        addr = _PropertyAddress(_OBJECT_NAME, _SCOPE_GLOBAL, _ELEMENT_MAIN)
-        ref = ctypes.c_void_p(0)
-        size = ctypes.c_uint32(ctypes.sizeof(ref))
-        status = fn(dev, ctypes.byref(addr), 0, None, ctypes.byref(size), ctypes.byref(ref))
-        if status != 0 or not ref.value:
-            return None
-        return conv(ref.value) or None
+        return _friendly_name(dev) or None
     except Exception:
         return None
 
@@ -257,15 +231,15 @@ def refresh_portaudio(before: Callable[[], None] | None = None) -> None:
     # Off this thread: mic.refresh_if_pending / play._ensure_stream call us
     # inside their own `with refresh_lock:` (RLock), so anything run inline
     # here would still hold the lock and stall every other waiter for as
-    # long as the subscriber takes (osascript: up to 2x5 s worst case).
+    # long as the subscriber takes (a COM call into the audio service can hang).
     if _change_subscribers:
         threading.Thread(target=_run_subscribers, name="audio-change-subscribers", daemon=True).start()
 
 
-def _snapshot_baseline(get: Callable[[], int | None] = default_input_id) -> None:
+def _snapshot_baseline(get: Callable[[], str | None] = default_input_id) -> None:
     """Take the baseline at import time — right after `import sounddevice`
     initialised PortAudio — so a default-input change during warmup (model
-    loads take seconds; AirPods connect meanwhile) is already a change by the
+    loads take seconds; a headset connects meanwhile) is already a change by the
     time the first mic reader's InputWatch polls, instead of becoming the
     baseline. Guarded: never raises, and only baselines if nothing has yet."""
     if _baselined:
@@ -280,7 +254,7 @@ _snapshot_baseline()
 
 
 class InputWatch:
-    """Polls the default input device id at most every `poll_s` seconds and
+    """Polls the default input endpoint id at most every `poll_s` seconds and
     feeds `observe()`. `check(now)` is cheap enough to call per mic frame: it
     returns True (and calls `on_change(old, new)`) when the id differs from
     the previous observation; the very first observation (module-wide, not
@@ -290,8 +264,8 @@ class InputWatch:
     def __init__(
         self,
         poll_s: float = 2.0,
-        get_id: Callable[[], int | None] | None = None,
-        on_change: Callable[[int | None, int | None], None] | None = None,
+        get_id: Callable[[], str | None] | None = None,
+        on_change: Callable[[str | None, str | None], None] | None = None,
     ) -> None:
         self.poll_s = poll_s
         self._get_id = get_id
@@ -299,10 +273,10 @@ class InputWatch:
         self._next_poll: float | None = None
 
     @property
-    def last(self) -> int | None:
+    def last(self) -> str | None:
         return last_input_id
 
-    def _poll(self) -> int | None:
+    def _poll(self) -> str | None:
         get = self._get_id if self._get_id is not None else default_input_id
         with contextlib.suppress(Exception):
             return get()

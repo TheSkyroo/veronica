@@ -74,7 +74,7 @@ class Recorder:
                 self.input_latency_s = 0.0
         # Like mic.mic_frames, never a blocking read: only what is buffered
         # (read_available) is read, so a stream PortAudio stopped mid-capture
-        # (-10863 when AirPods leave or the Mac sleeps) ends the capture after
+        # (the endpoint was unplugged/disconnected or the PC slept) ends the capture after
         # STALL_S instead of holding the turn forever. The lock is held only
         # for the copy out of the ring, never while waiting for audio.
         pending = bytearray()

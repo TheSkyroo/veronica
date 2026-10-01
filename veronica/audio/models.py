@@ -85,7 +85,7 @@ def _fetch(model: ModelFile, dest: Path, fetch) -> Path:
         got = sha256_of(part)
         if got != model.sha256:
             raise ValueError(f"{model.name}: checksum {got} does not match {model.sha256}")
-        part.rename(dest)
+        part.replace(dest)   # replace, not rename: rename fails on Windows if dest exists
     except BaseException:
         part.unlink(missing_ok=True)
         raise
