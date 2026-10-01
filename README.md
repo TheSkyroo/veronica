@@ -438,6 +438,12 @@ warning when your own `%USERPROFILE%\.codex\config.toml` has a setting it doesn'
 another tool, such as `mcp_servers.<name>.type`). Veronica now treats that as a warning, but it's still worth removing
 the line it names. Run `codex exec "say hi"` in a terminal to see whether Codex itself works.
 
+**She says Windows "declined" or "blocked" opening something.** That's Codex's own sandbox. On Windows it can stop
+Codex's commands from starting programs or opening windows. Opening apps, folders and Settings pages doesn't need
+Codex: say "open …" and Veronica opens it herself. If you want Codex's own commands to be able to launch programs
+too, turn on **Settings → Brain → Codex: no sandbox for its shell**. Every command is still checked by Veronica,
+and risky ones are still asked.
+
 **A brain is "not installed" or "not logged in".** Run its install and login commands from [Brains](#brains) in a
 new terminal, so it picks up the updated `PATH`.
 
