@@ -9,7 +9,6 @@ import pytest
 
 from veronica.brain.backends import BACKENDS, Availability
 
-
 # -- fake pystray ------------------------------------------------------------------
 
 class FakePystrayMenu:

@@ -14,6 +14,7 @@ import pytest
 from veronica.brain.policy import classify
 from veronica.config import EDITABLE_SETTINGS, Settings, load_settings
 from veronica.proactive import Schedule
+from veronica.ui.settings import bridge as bridge_mod
 from veronica.ui.settings.bridge import AUTO_ALLOW_LABELS, SettingsBridge
 
 
@@ -162,9 +163,38 @@ def run_thread(fn):
     fn()
 
 
+class FakeAccount:
+    """spotify_account / google_account stand-in."""
+
+    def __init__(self, configured=True, connected=False, who="", connect_error=None, said=None):
+        self.configured, self.connected, self.who = configured, connected, who
+        self.connect_error, self.said = connect_error, said
+        self.calls = []
+
+    def is_configured(self):
+        return self.configured
+
+    def is_connected(self):
+        return self.connected
+
+    def account(self):
+        return self.who
+
+    def connect(self):
+        self.calls.append("connect")
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+        return self.said
+
+    def disconnect(self):
+        self.calls.append("disconnect")
+        self.connected = False
+
+
 class Harness:
     def __init__(self, *, orch: FakeOrch | None = None, warming=False, exe=Path("/tmp/Veronica/Veronica.exe"),
-                 updater=None, prefs=None, login=None):
+                 updater=None, prefs=None, login=None, accounts=None):
         self.orch = orch if orch is not None else (None if warming else FakeOrch())
         self.prefs = prefs or FakePrefs()
         self.store = FakeStore()
@@ -174,6 +204,14 @@ class Harness:
         self.opened: list = []
         self.states: list[dict] = []
         self.settings = Settings()
+        self.accounts = accounts if accounts is not None else {
+            "spotify": FakeAccount(configured=False), "google": FakeAccount()}
+
+        def account_module(name):
+            acct = self.accounts[name]
+            if isinstance(acct, Exception):
+                raise acct
+            return acct
 
         def relaunch():
             self.relaunches += 1
@@ -193,6 +231,7 @@ class Harness:
             repo=Path("/repo"),
             run_thread=run_thread,
             open_path=self.opened.append,
+            account_module=account_module,
         )
         self.bridge.on_state_changed = self.states.append
 
@@ -1145,3 +1184,70 @@ def test_speaker_threshold_applies_live():
     assert ("speaker_threshold", 0.5) in h.prefs.overrides
     h.bridge.set("listening", "noise_suppression", False)
     assert h.orch.s.noise_suppression is False
+
+
+# -- accounts (Spotify, Google) -------------------------------------------------------
+
+def test_accounts_in_state(h):
+    h.accounts["google"] = FakeAccount(connected=True, who="me@gmail.com")
+    rows = {r["id"]: r for r in h.bridge.get_state()["general"]["accounts"]}
+    assert list(rows) == ["spotify", "google"]
+    assert rows["spotify"] == {"id": "spotify", "label": "Spotify", "configured": False, "connected": False,
+                               "busy": False, "detail": bridge_mod.ACCOUNT_SETUP["spotify"]}
+    assert rows["google"]["connected"] is True and rows["google"]["detail"] == "Connected as me@gmail.com."
+    assert "spotify_client_id" in h.bridge.get_state()["general"]
+
+
+def test_account_that_cannot_load_shows_unavailable(h):
+    h.accounts["google"] = ImportError("No module named 'google_auth_oauthlib'")
+    rows = {r["id"]: r for r in h.bridge.get_state()["general"]["accounts"]}
+    assert rows["google"]["configured"] is False and "isn't available" in rows["google"]["detail"]
+
+
+def test_connect_account_signs_in_and_pushes_busy_then_done(h):
+    h.accounts["google"].said = "Google is connected as me@gmail.com."
+    res = h.bridge.handle("connect_account", {"account": "google"})
+    assert res == {"ok": True, "message": "Google is connected as me@gmail.com."}
+    assert h.accounts["google"].calls == ["connect"]
+    busy = [next(r for r in st["general"]["accounts"] if r["id"] == "google")["busy"] for st in h.states]
+    assert busy == [True, False]                      # "waiting for the browser", then the result
+    assert h.states[0]["general"]["accounts"][1]["detail"] == bridge_mod.WAITING_FOR_BROWSER
+
+
+def test_connect_account_default_message_and_failure_text(h):
+    h.accounts["spotify"] = FakeAccount()
+    assert h.bridge.connect_account("spotify") == {"ok": True, "message": "Spotify is connected."}
+    h.accounts["spotify"] = FakeAccount(connect_error=RuntimeError("Spotify sign-in timed out."))
+    res = h.bridge.connect_account("spotify")
+    assert res == {"ok": False, "message": "Spotify sign-in timed out."}
+    assert h.bridge._connecting == set()              # the slot is released either way
+
+
+def test_connect_account_refuses_when_not_set_up_or_already_connecting(h):
+    res = h.bridge.connect_account("spotify")         # no Client ID
+    assert res["ok"] is False and res["message"] == bridge_mod.ACCOUNT_SETUP["spotify"]
+    assert h.accounts["spotify"].calls == []
+    h.bridge._connecting.add("google")
+    assert h.bridge.connect_account("google") == {"ok": False, "message": "Already connecting Google."}
+    assert h.bridge.connect_account("myspace")["ok"] is False
+
+
+def test_disconnect_account(h):
+    h.accounts["google"] = FakeAccount(connected=True)
+    assert h.bridge.handle("disconnect_account", {"account": "google"}) == {
+        "ok": True, "message": "Google is disconnected."}
+    assert h.accounts["google"].calls == ["disconnect"]
+    assert h.states and h.states[-1]["general"]["accounts"][1]["connected"] is False
+    assert h.bridge.disconnect_account("nope")["ok"] is False
+
+
+def test_account_commands_run_off_the_ui_thread():
+    from veronica.ui.settings import LONG_COMMANDS
+
+    assert {"connect_account", "disconnect_account"} <= LONG_COMMANDS
+
+
+def test_default_account_modules_are_the_real_ones():
+    assert bridge_mod.ACCOUNTS["spotify"][1] == "veronica.spotify_account"
+    assert bridge_mod.ACCOUNTS["google"][1] == "veronica.google_account"
+    assert bridge_mod._import_account("spotify").__name__ == "veronica.spotify_account"

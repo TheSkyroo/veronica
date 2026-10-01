@@ -102,7 +102,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
     # (or a mail count) and composes the announcement itself.
-    # A failed fetch (timeout, Outlook unavailable) raises so build_briefing's
+    # A failed fetch (timeout, Google not connected) raises so build_briefing's
     # guarded fetch logs it and drops the sentence, rather than reading the
     # error text as "Nothing on your calendar today."
     def _text_or_raise(res: dict) -> str:

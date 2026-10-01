@@ -209,7 +209,7 @@ class ToolGate:
     async def _recipient(self, input: dict) -> tuple[dict, str | None]:
         """For mail_send: the input as the confirm should show it
         ("Priya Shah (priya@example.com)"), or a reason to hand back to the
-        brain when the name is ambiguous, unknown or Outlook can't be
+        brain when the name is ambiguous, unknown or Google can't be
         asked. Never guesses; the tool itself still sends to the same
         address."""
         to = str(input.get("to", "")).strip()
@@ -415,7 +415,7 @@ class GateServer:
     also RUNS the tool here, in the app process, and returns its MCP
     content blocks — that is how an external brain's tools.serve child
     gets a screenshot or a click done by the app that owns the screen,
-    clipboard and Outlook session, and how a timer set from it announces.
+    clipboard and account sign-ins, and how a timer set from it announces.
     It needs `run_tool`; without one it fails closed.
 
     Confirms are serialized because the orchestrator can only ask one

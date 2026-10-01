@@ -5,7 +5,7 @@ and an external brain's `tools.serve` child indirectly, over the gate
 socket. Running the handlers in the app process and nowhere else keeps
 what Windows ties to a process with Veronica: the foreground rights and
 integrity level SendInput and UI Automation need, the toast identity, the
-Outlook COM connection and the audio sessions — a call issued from a
+Google and Spotify sign-ins and the audio sessions — a call issued from a
 helper the CLI spawned would run in that helper's (often hidden, console)
 context instead."""
 import base64

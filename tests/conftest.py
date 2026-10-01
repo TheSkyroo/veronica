@@ -41,7 +41,7 @@ def _no_real_audio_models(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fake_contacts(monkeypatch):
-    """Hermetic: the real Contacts framework is never read. One contact
+    """Hermetic: Google Contacts is never asked. One contact
     ("Priya Shah") unless a test swaps the list; returns it so tests can."""
     from veronica.tools import pim
 

@@ -37,8 +37,9 @@ TITLE = "Veronica Settings"
 WIDTH, HEIGHT = 720, 520
 MIN_SIZE = (560, 400)
 BACKGROUND = "#080a0f"
-#: Commands that may block (git fetch/pull, build): run off the UI thread.
-LONG_COMMANDS = frozenset({"check_update", "update_now"})
+#: Commands that may block (git fetch/pull, build, a browser sign-in): run
+#: off the UI thread.
+LONG_COMMANDS = frozenset({"check_update", "update_now", "connect_account", "disconnect_account"})
 TABS = ("general", "voice", "listening", "briefings", "brain", "history", "about")
 
 _main_thread = on_ui_thread

@@ -76,7 +76,7 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "reminder_create": "confirm",
         "reminders_due": "allow",
         # Append-only and harmless (a mistaken note is trivially deleted in
-        # Outlook), so — unlike calendar_create/mail_send/reminder_create
+        # Google Drive), so — unlike calendar_create/mail_send/reminder_create
         # — this doesn't need a confirm gate.
         "notes_create": "allow",
         "timer_set": "allow",

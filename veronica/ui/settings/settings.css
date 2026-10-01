@@ -44,6 +44,7 @@ button,input,select{font:inherit;color:inherit}
 .row .status{grid-column:1 / span 2;font-size:11.5px;color:var(--ice);min-height:0}
 .row .status:empty{display:none}
 .row .status.error{color:var(--red)}
+.row .status.good{color:var(--green)}
 .row .restart-tag{margin-left:6px;font-size:10px;letter-spacing:.06em;text-transform:uppercase;
   color:var(--amber);border:1px solid rgba(255,180,84,.35);border-radius:6px;padding:0 5px}
 .row.disabled{opacity:.5}

@@ -1,4 +1,4 @@
-"""GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
+r"""GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
 
 How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19; the
 Windows specifics are noted where they differ):
