@@ -1462,3 +1462,11 @@ async def test_timeout_logs_why_the_turn_ended(brain, monkeypatch, caplog):
     brain.s = Settings(brain_timeout_s=0.05)
     assert [s async for s in brain.ask("x")] == ["Taking too long, cancelled."]
     assert "turn ended early: reason=brain_timeout" in caplog.text
+
+
+def test_browser_click_by_ref_is_summarised_readably():
+    from veronica.brain.agent import summarize_detail
+    assert summarize_detail("mcp__browser__browser_click", {"ref": 12, "target": "Samay Raina video"}) == \
+        "Click 'Samay Raina video'"
+    assert summarize_detail("mcp__browser__browser_click", {"ref": 12}) == "Click 'element 12'"
+    assert summarize_detail("mcp__browser__browser_elements", {}) == "List what's clickable on the page"
