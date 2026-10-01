@@ -37,6 +37,7 @@ from veronica.brain.intents import (
     match_memory_intent,
     match_music_intent,
     match_note_intent,
+    match_open_intent,
     match_proactive_intent,
     match_screen_intent,
     match_settings_intent,
@@ -2237,6 +2238,24 @@ class Orchestrator:
             self._queued.clear()
             self._emit_queue()
 
+    async def _open_locally(self, target: str) -> bool:
+        """"Open This PC" / "launch Spotify" without the brain: True if it was
+        opened here; False (nothing spoken) when it isn't a Windows place or
+        an installed app, so the request goes to the brain as usual."""
+        opened = await asyncio.to_thread(system_tools.open_locally, target)
+        if opened is None:
+            log.info("open %r: nothing local by that name; asking the brain", target)
+            return False
+        label = opened if opened.lower() != "this pc" else "This PC"
+        log.info("opened %r locally", label)
+        self._emit("tool", {"summary": f"Open {label}", "decision": "auto"})
+        self.player.reset()
+        if self._utterance_lang == "hi":
+            await self.say("खोल दिया।", lang="hi")
+        else:
+            await self.say("Opening it.")
+        return True
+
     async def _barge_teardown(self, turn: asyncio.Future) -> None:
         """Common teardown for a wake-word barge and a push-to-talk press
         landing mid-turn: stop playback, unblock ANY capture the turn has
@@ -2601,6 +2620,11 @@ class Orchestrator:
                 if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or brain_action is not None or quick_hit is not None)
                 else match_dictation_intent(text)
             )
+            open_target = (
+                None
+                if (intent is not None or mem is not None or screen_intent or music_action or note_body is not None or voice_action or lang_mode is not None or local_hit or proactive_action is not None or brain_action is not None or quick_hit is not None or dictation_intent)
+                else match_open_intent(text)
+            )
             if resume_hit:
                 # "Continue": speak the parked remainder (already synthesised)
                 # under the usual barge race, so she can be stopped — or
@@ -2710,6 +2734,8 @@ class Orchestrator:
             elif quick_hit is not None:
                 self.player.reset()
                 await self._quick_turn(quick_hit, text)
+            elif open_target is not None and await self._open_locally(open_target):
+                pass
             elif dictation_intent:
                 barged = await self._run_with_barge(self._dictation_turn())
                 if barged:

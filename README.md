@@ -158,6 +158,10 @@ She can open:
 - **Places and tools:** about 80 Windows folders, Settings pages and system tools.
 - **Web pages:** "open github.com" opens it in your default browser.
 
+A plain "open …" / "launch …" / "start …" (or "… kholo") is handled by Veronica herself, instantly and without the
+brain, whenever the name is a Windows place or an installed app. A slightly misheard name ("open this DC") still
+finds This PC. Anything more involved ("open GitHub in Chrome") goes to the brain as usual.
+
 ### See your screen
 
 "What's on my screen?", "summarise this page", "what does this error say?"
@@ -428,6 +432,11 @@ administrator windows needs Veronica to run as administrator too.
 
 **"Google isn't connected" / "Google isn't set up".** Check `google_client.json` exists, then use Settings → Accounts
 → Connect Google. In *Testing* mode, reconnect weekly.
+
+**"Codex returned an error" on every request.** Check the log for the line after `turn ended early`. Codex prints a
+warning when your own `%USERPROFILE%\.codex\config.toml` has a setting it doesn't recognise (for example one left by
+another tool, such as `mcp_servers.<name>.type`). Veronica now treats that as a warning, but it's still worth removing
+the line it names. Run `codex exec "say hi"` in a terminal to see whether Codex itself works.
 
 **A brain is "not installed" or "not logged in".** Run its install and login commands from [Brains](#brains) in a
 new terminal, so it picks up the updated `PATH`.
