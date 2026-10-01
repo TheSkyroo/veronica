@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a0b94a-66e3-77d3-9f46-080cb96ecd83"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'touch /var/folders/_3/zr22lvld13g3c6lrcn8jz8lm0000gn/T/vb-l9y7ez22/canary-ok.txt && echo canary-ok'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'touch /var/folders/_3/zr22lvld13g3c6lrcn8jz8lm0000gn/T/vb-l9y7ez22/canary-ok.txt && echo canary-ok'","aggregated_output":"canary-ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"canary-ok"}}
+{"type":"turn.completed","usage":{"input_tokens":27770,"cached_input_tokens":26112,"cache_write_input_tokens":0,"output_tokens":140,"reasoning_output_tokens":34}}

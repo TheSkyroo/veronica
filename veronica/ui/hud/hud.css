@@ -1,0 +1,141 @@
+html,body{margin:0;background:transparent;font-family:-apple-system,system-ui,"SF Pro Text","Noto Sans Devanagari","Devanagari Sangam MN",sans-serif;color:#e8ecf1;overflow:hidden;-webkit-user-select:none;cursor:default}
+#card{box-sizing:border-box;width:540px;height:300px;padding:16px;display:flex;gap:16px;align-items:center;
+  background:rgba(8,10,16,.72);border:1px solid rgba(255,255,255,.10);border-radius:18px;backdrop-filter:blur(18px);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 20px 40px rgba(0,0,0,.35)}
+#orb{width:170px;height:170px;flex:0 0 170px}
+#text{flex:1;min-width:0;max-height:268px;display:flex;flex-direction:column;gap:10px;overflow:hidden}
+
+.hidden{display:none !important}
+
+/* ---- status row ---- */
+#status{display:flex;align-items:center;gap:6px;min-height:14px;flex:0 0 auto}
+#status .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s ease}
+#status .label{flex:0 0 auto;font-size:10.5px;letter-spacing:.03em;opacity:.65;white-space:nowrap}
+#status .label:empty{display:none}
+#status .level{flex:1;min-width:0;height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-left:4px;display:none}
+#status .level i{display:block;height:100%;width:0%;background:#7ad0ff;border-radius:2px;transition:width .08s linear}
+#status[data-state="listening"] .level,
+#status[data-state="followup"] .level,
+#status[data-state="confirming"] .level{display:block}
+
+#status[data-state="warming"] .dot{background:#a0a4ad}
+#status[data-state="listening"] .dot,#status[data-state="followup"] .dot{
+  background:#7ad0ff;animation:hud-pulse 1.1s ease-in-out infinite;
+}
+#status[data-state="thinking"] .dot{background:#ffb454}
+#status[data-state="speaking"] .dot{background:#f0c36c}
+#status[data-state="confirming"] .dot{background:#ff8a3c}
+#status[data-state="paused"] .dot{background:#f0c36c;opacity:.55}
+#status[data-state="error"] .dot{background:#ff5a5a}
+
+/* ---- brain line: "Brain: Codex" under the status row (hud event with a
+   `backend`); hidden until the first one arrives ---- */
+#brain{flex:0 0 auto;font-size:10px;letter-spacing:.03em;opacity:.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:-6px}
+#brain:empty{display:none}
+
+@keyframes hud-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(122,208,255,.55)}
+  50%{box-shadow:0 0 0 4px rgba(122,208,255,0)}
+}
+
+/* ---- chat bubbles ---- */
+#chat{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;gap:5px;overflow:hidden}
+.bubble{box-sizing:border-box;padding:8px 10px;border-radius:12px;max-width:100%;font-size:12px;line-height:1.2;overflow:hidden}
+.bubble .who{display:block;font-size:9px;letter-spacing:.08em;text-transform:uppercase;opacity:.55;margin-bottom:2px}
+.bubble .msg{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;white-space:pre-wrap}
+.you{background:rgba(255,255,255,.06);align-self:flex-start}
+.you .msg{opacity:.75}
+.you .msg.partial{font-style:italic;opacity:.6}
+.her{background:rgba(255,190,90,.10);border:1px solid rgba(255,190,90,.18)}
+.her .msg{font-weight:500}
+
+/* ---- action card ---- */
+#action{flex:0 0 auto;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+  border-radius:12px;padding:8px 10px;overflow:hidden}
+
+#tool.head{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px}
+#tool .badge{flex:0 0 auto;display:inline-block;min-width:16px;text-align:center;border-radius:6px;padding:1px 5px;font-size:11px;background:rgba(255,255,255,.08)}
+.badge.auto{color:#7ad0ff}.badge.ask{color:#ffb454}.badge.allowed{color:#7dffb0}.badge.declined{color:#ff7a7a}.badge.redirected{color:#ffb454}
+/* pre-approved by the request's own wording ("just do it"): gold, outlined — it was never asked */
+.badge.preapproved{color:#ffd666;box-shadow:inset 0 0 0 1px rgba(255,214,102,.7)}
+/* usage limit: "Codex: usage limit — on Claude" — the brain was swapped, not asked */
+.badge.limit{color:#ff9f7a}
+#tool .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.9}
+#tool .pill{flex:0 0 auto;margin-left:auto;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,.06)}
+.pill.auto{color:#7ad0ff}
+.pill.waiting{color:#ffb454}
+.pill.done{color:#7dffb0}
+.pill.declined{color:#ff7a7a}
+.pill.redirected{color:#ffb454}
+.pill.pre-approved{color:#ffd666;box-shadow:inset 0 0 0 1px rgba(255,214,102,.5)}
+.pill.limit{color:#ff9f7a}
+#tool .detail{flex:0 0 100%;font-size:10.5px;opacity:.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+#tool .detail:empty{display:none}
+
+#prompt{margin-top:5px}
+#prompt .msg{font-size:13px;font-weight:500;color:#f0c36c}
+
+.countdown{height:3px;border-radius:2px;background:rgba(255,255,255,.10);overflow:hidden;margin-top:5px}
+.countdown i{display:block;height:100%;width:100%;background:#f0c36c}
+
+#hint{margin-top:3px}
+#hint .msg{font-size:11px;opacity:.6;color:#ffcc66}
+
+/* ---- plan checklist: a multi-step turn's tool calls, at most the newest
+   five (older ones collapse into the "+N more" line above them). Same
+   palette as the tool card — amber for what is running, green for what is
+   done, red for a decline — plus a muted grey for what hasn't started. ---- */
+#plan{margin-top:6px;display:flex;flex-direction:column;gap:1px;
+  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.35}
+#plan .more{opacity:.35;letter-spacing:.03em;padding-left:14px}
+#plan .step{display:flex;align-items:baseline;gap:5px;min-width:0}
+#plan .step .mark{flex:0 0 auto;width:9px;text-align:center}
+#plan .step .msg{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#plan .step.pending{opacity:.42}
+#plan .step.running{color:#ffb454}
+#plan .step.done{color:#7dffb0;opacity:.55}
+#plan .step.failed,#plan .step.declined{color:#ff7a7a}
+/* A checklist makes the card tight (body.planning is set while one is up),
+   so the things it duplicates give way: the tool card's detail row (the
+   checklist's own last row names that action), the transcript bubble (the
+   checklist IS what she's doing about it) and the reply's extra lines. */
+body.planning #heard{display:none}
+body.planning .bubble .msg{-webkit-line-clamp:1}
+body.planning #tool .detail{display:none}
+
+/* ---- mini mode: compact bar — a 64px orb plus a caption pill ---- */
+body.mini #card{width:400px;height:72px;padding:0 8px;gap:12px;align-items:center;justify-content:flex-start;
+  border:none;background:transparent;box-shadow:none;backdrop-filter:none;border-radius:0}
+body.mini #orb{width:64px;height:64px;flex:0 0 64px}
+body.mini #text{display:none}
+
+/* ---- caption pill: single-line status/turn text, mini mode only ---- */
+#caption{display:none}
+body.mini #caption{display:flex;align-items:center;gap:6px;max-width:320px;box-sizing:border-box;
+  padding:8px 12px;border-radius:16px;background:rgba(8,10,16,.72);border:1px solid rgba(255,255,255,.10);
+  backdrop-filter:blur(18px);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 20px 40px rgba(0,0,0,.35);
+  font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.mini #caption.hidden{display:none}
+#caption .dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25)}
+#caption .msg{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#caption .msg.partial{font-style:italic;opacity:.75}
+#caption .msg.prompt{color:#f0c36c;font-weight:500}
+/* the plan's running step, mini mode's one line of it ("2/4 Open Safari") */
+#caption .step{display:none}
+body.mini #caption .step{display:inline-block;flex:0 1 auto;min-width:0;max-width:150px;
+  font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:10.5px;color:#ffb454;opacity:.75;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+#caption[data-state="warming"] .dot{background:#a0a4ad}
+#caption[data-state="listening"] .dot,#caption[data-state="followup"] .dot{background:#7ad0ff}
+#caption[data-state="thinking"] .dot{background:#ffb454}
+#caption[data-state="speaking"] .dot{background:#f0c36c}
+#caption[data-state="confirming"] .dot{background:#ff8a3c}
+#caption[data-state="error"] .dot{background:#ff5a5a}
+
+/* ---- icon-render mode (?icon=1): orb only, transparent, fills viewport --- */
+body.icon-mode{background:transparent}
+body.icon-mode #card{width:100vw;height:100vh;padding:0;margin:0;display:flex;align-items:center;justify-content:center;
+  background:transparent;border:none;border-radius:0;box-shadow:none;backdrop-filter:none}
+body.icon-mode #text,body.icon-mode #caption{display:none !important}
+body.icon-mode #orb{width:100vw;height:100vh;flex:0 0 auto}

@@ -1,0 +1,3 @@
+{"event":"init","conversation_id":"11111111-2222-3333-4444-555555555555","init":{"cwd":"/tmp","tools":["run_command"],"permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"conversation_id":"11111111-2222-3333-4444-555555555555","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"result","result":{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"ERROR","error":"genai.APIError: 429 RESOURCE_EXHAUSTED: You have exceeded your usage limit for this model. Please try again later.","duration_seconds":1.2,"num_turns":1}}
