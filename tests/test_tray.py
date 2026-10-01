@@ -236,10 +236,10 @@ class FakeHotkeyMonitor:
     instances = []
     available_on_start = True
 
-    def __init__(self, on_press, on_release, keycode=0xA3):
+    def __init__(self, on_press, on_release, hotkey="win+space"):
         self.on_press = on_press
         self.on_release = on_release
-        self.keycode = keycode
+        self.hotkey = hotkey
         self.available = True
         self.started_with_loop = None
         self.stopped = False
@@ -988,7 +988,7 @@ def test_ptt_hotkey_started_with_background_loop_when_enabled(fake_env, monkeypa
         assert len(FakeHotkeyMonitor.instances) == 1
         mon = FakeHotkeyMonitor.instances[0]
         assert mon.started_with_loop is app._loop
-        assert mon.keycode == env.tray.settings.ptt_keycode
+        assert mon.hotkey == env.tray.settings.ptt_hotkey
         assert app._ptt_item is None  # available: no "unavailable" item
     finally:
         _quit_and_join(app)
@@ -1541,3 +1541,31 @@ def test_refresh_brain_menu_disables_unavailable_from_cached_check(fake_env, mon
         assert app._brain_items["copilot"].callback == app._pick_brain
     finally:
         _quit_and_join(app)
+
+
+# -- listening mode -----------------------------------------------------------------
+
+def test_listening_menu_reflects_and_switches_mode(fake_env):
+    env, orch_holder = fake_env
+    app, orch = _make_app(env, orch_holder)
+    try:
+        assert app._listen_items["always"].state and not app._listen_items["ptt"].state
+        assert "Win+Space" in app._listen_items["ptt"].title
+        scheduled = []
+        app._schedule = lambda coro: (scheduled.append(coro), coro.close())
+        orch.set_listen_mode = lambda mode: _Noop(mode)
+        app._pick_listen_mode("ptt")
+        assert app._listen_items["ptt"].state and not app._listen_items["always"].state
+        assert [c.mode for c in scheduled] == ["ptt"]
+    finally:
+        _quit_and_join(app)
+
+
+class _Noop:
+    """A coroutine-like stand-in that records which mode it was made for."""
+
+    def __init__(self, mode):
+        self.mode = mode
+
+    def close(self):
+        pass

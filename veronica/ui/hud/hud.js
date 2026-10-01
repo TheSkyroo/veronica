@@ -17,6 +17,7 @@
   const heardEl = heardRowEl.querySelector('.msg');
   const replyEl = replyRowEl.querySelector('.msg');
   const actionEl = $('action');
+  const queueEl = $('queue');
   const toolBoxEl = $('tool');
   const toolTitleEl = $('tool-title');
   const detailEl = toolBoxEl.querySelector('.detail');
@@ -191,6 +192,16 @@
             if (payload === 'thinking') setCaption('Thinking…');
             else if (payload === 'error') setCaption('Error');
             break;
+          case 'queue': {
+            // Requests made while she was busy, in the order she'll do them.
+            const items = Array.isArray(payload) ? payload.map(String) : [];
+            queueEl.classList.toggle('hidden', items.length === 0);
+            const first = items[0] || '';
+            const more = items.length > 1 ? `  (+${items.length - 1} more)` : '';
+            queueEl.querySelector('.msg').textContent =
+              (first.length > 60 ? first.slice(0, 59) + '…' : first) + more;
+            break;
+          }
           case 'heard_partial': {
             const s = String(payload ?? '');
             setBubble(heardRowEl, heardEl, s);

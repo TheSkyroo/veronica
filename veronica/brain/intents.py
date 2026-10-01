@@ -4,7 +4,8 @@ import re
 import string
 from typing import Literal
 
-Intent = Literal["end", "hud_mini", "hud_full", "hud_hide", "hud_reset", "mute", "unmute", "quit"]
+Intent = Literal["end", "hud_mini", "hud_full", "hud_hide", "hud_reset", "mute", "unmute", "quit",
+                 "listen_ptt", "listen_always"]
 
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
@@ -78,6 +79,27 @@ QUIT_PHRASES = frozenset({
     "quit", "quit veronica", "shut down", "shut yourself down", "exit", "turn off completely",
     # Hinglish
     "quit karo", "band ho jao",
+})
+
+# Listening mode: push-to-talk only (the mic stays closed until the hotkey
+# is held) vs always listening for the wake word.
+LISTEN_PTT_PHRASES = frozenset({
+    "push to talk mode", "push to talk only", "switch to push to talk", "use push to talk",
+    "push to talk", "only push to talk", "stop listening all the time", "stop always listening",
+    "dont listen all the time", "do not listen all the time",
+    # Hinglish
+    "push to talk mode karo", "sirf push to talk",
+})
+
+# whisper often writes "push-to-talk", which normalize() turns into "pushtotalk"
+LISTEN_PTT_PHRASES |= {ph.replace("push to talk", "pushtotalk") for ph in LISTEN_PTT_PHRASES}
+
+LISTEN_ALWAYS_PHRASES = frozenset({
+    "always listen", "always listening", "always listening mode", "always listen mode",
+    "listen all the time", "keep listening", "wake word mode", "switch to always listening",
+    "use the wake word", "turn on the wake word",
+    # Hinglish
+    "hamesha suno", "hamesha sunte raho",
 })
 
 # Screen-awareness fast path: matched exactly like the other local intents
@@ -300,6 +322,10 @@ def _match_candidate(candidate: str) -> Intent | None:
         return "unmute"
     if candidate in QUIT_PHRASES:
         return "quit"
+    if candidate in LISTEN_PTT_PHRASES:
+        return "listen_ptt"
+    if candidate in LISTEN_ALWAYS_PHRASES:
+        return "listen_always"
     return None
 
 
