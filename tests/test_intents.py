@@ -607,3 +607,23 @@ def test_speaker_hinglish_phrases_answer_in_hindi():
 
     assert quick.is_hinglish_phrase("meri awaaz yaad rakho")
     assert not quick.is_hinglish_phrase("learn my voice")
+
+
+@pytest.mark.parametrize("text, target", [
+    ("Open this PC.", "this pc"),
+    ("Open this DC.", "this dc"),                       # misheard; the fuzzy match settles it
+    ("Veronica, open the downloads folder", "downloads folder"),
+    ("launch spotify please", "spotify"),
+    ("start notepad", "notepad"),
+    ("open bluetooth settings", "bluetooth settings"),
+    ("downloads kholo", "downloads"),
+    ("open github in chrome", None),                    # more than opening: the brain
+    ("open a new tab", None),
+    ("open this file", None),
+    ("open it", None),
+    ("what is open source", None),
+    ("open the door to the garden of my old house", None),
+])
+def test_match_open_intent(text, target):
+    from veronica.brain.intents import match_open_intent
+    assert match_open_intent(text) == target

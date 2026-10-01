@@ -417,3 +417,19 @@ def test_server_and_names():
 async def test_live_open_notepad():
     res = await system.open_app.handler({"name": "Notepad"})
     assert not res.get("is_error")
+
+
+def test_open_locally_opens_places_apps_and_misheard_this_pc(apps, started):
+    assert system.open_locally("this pc") == "this pc"
+    assert system.open_locally("this dc") == "this pc"          # "Open this DC." as whisper heard it
+    assert system.open_locally("downloads folder") == "downloads folder"
+    assert system.open_locally("spotify") == "spotify"
+    assert started == ["shell:MyComputerFolder", "shell:MyComputerFolder", "shell:Downloads",
+                       r"C:\Users\u\SM\Spotify.lnk"]
+
+
+def test_open_locally_returns_none_for_unknown_or_unsafe_names(apps, started):
+    assert system.open_locally("quantum flux capacitor") is None
+    assert system.open_locally(r"C:\evil.exe") is None
+    assert system.open_locally("-flag") is None
+    assert started == []
