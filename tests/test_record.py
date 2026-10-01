@@ -849,3 +849,42 @@ async def test_a_dead_stream_that_complains_on_close_still_returns(monkeypatch):
     rec = dying_recorder(monkeypatch, [480] * 3, close_raises=True)
     pcm = await asyncio.wait_for(rec.capture(max_s=5), timeout=3)
     assert pcm is not None and pcm.size == 3 * FRAME
+
+
+async def test_release_to_vad_turns_a_hold_into_a_silence_ended_capture(monkeypatch):
+    """A push-to-talk tap: the hold capture carries on and ends at the next
+    silence (90 ms here) instead of waiting for finish()."""
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    # gated after the first frame; then speech, a silence long enough to end
+    # a normal capture, then speech that must NOT be included
+    r = Recorder(s, frames=lambda: _gated_frames("." + "ssss" + "..." + "s" * 50, 0, started, gate))
+    task = asyncio.create_task(r.capture(max_s=30, hold=True))
+    await asyncio.to_thread(started.wait, 2)
+    r.release_to_vad(wait_s=5)
+    gate.set()
+    pcm = await asyncio.wait_for(task, timeout=2)
+    assert pcm is not None
+    assert len(pcm) == FRAME * 7            # 4 speech + 3 silence frames, not the speech after
+
+
+async def test_release_to_vad_with_no_speech_gives_up_after_the_wait(monkeypatch):
+    monkeypatch.setattr(Recorder, "_vad_cls", FakeVad)
+    s = Settings(vad_silence_ms=90, min_speech_ms=60, max_utterance_s=10)
+    started, gate = threading.Event(), threading.Event()
+    r = Recorder(s, frames=lambda: _gated_frames("." * 2000, 0, started, gate))
+    task = asyncio.create_task(r.capture(max_s=30, hold=True))
+    await asyncio.to_thread(started.wait, 2)
+    r.release_to_vad(wait_s=0.3)            # 10 frames of 30 ms, not the 30 s hold cap
+    gate.set()
+    assert await asyncio.wait_for(task, timeout=2) is None
+
+
+def test_release_to_vad_is_ignored_outside_hold_captures(monkeypatch):
+    r = make([], monkeypatch)
+    r.release_to_vad(wait_s=5)
+    assert r._to_vad_wait_s is None
+    r.arm(hold=False)
+    r.release_to_vad(wait_s=5)
+    assert r._to_vad_wait_s is None
