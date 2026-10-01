@@ -59,13 +59,26 @@ def _token_path() -> Path:
 
 def client_id() -> str:
     """The user's Spotify app Client ID: VERONICA_SPOTIFY_CLIENT_ID, else
-    the first line of ~/.veronica/spotify_client_id; "" when neither."""
+    the first line of ~/.veronica/spotify_client_id, else the Settings
+    field (prefs.json / .env); "" when none."""
     cid = os.environ.get("VERONICA_SPOTIFY_CLIENT_ID", "").strip()
     if cid:
         return cid
     try:
         return (_home() / "spotify_client_id").read_text(encoding="utf-8").strip().split()[0]
     except (OSError, IndexError):
+        pass
+    return _settings_client_id()
+
+
+def _settings_client_id() -> str:
+    """The Client ID typed into Settings (prefs.json) or set in .env."""
+    try:
+        from veronica import prefs
+        from veronica.config import load_settings
+
+        return load_settings(prefs.load().get("settings")).spotify_client_id.strip()
+    except Exception:  # noqa: BLE001  (a broken prefs file means "not configured")
         return ""
 
 
