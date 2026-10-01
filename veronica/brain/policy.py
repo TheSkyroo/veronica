@@ -113,6 +113,7 @@ MCP_TOOL_RISK: dict[str, dict[str, Decision]] = {
         "browser_open": "allow",
         "browser_read": "allow",
         "browser_find": "allow",
+        "browser_elements": "allow",
         "browser_scroll": "allow",
         "browser_back": "allow",
         # Acts inside the user's logged-in session: confirm.

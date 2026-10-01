@@ -475,30 +475,187 @@ async def browser_find(args: dict) -> dict:
     return _ok("\n".join(out) if out else "not found")
 
 
-@tool("browser_click", "Click a link/button on the current page by its visible text or label", {"target": str})
+ELEMENTS_DEFAULT = 150
+# Browsers whose window a real mouse click may be aimed at.
+BROWSER_EXES = frozenset({"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe"})
+
+
+def _ref_or_target(args: dict) -> tuple[int | None, str]:
+    """(ref, target) from a click/type request; ValueError if neither."""
+    ref = args.get("ref")
+    if ref in ("", None):
+        ref = None
+    elif isinstance(ref, bool) or not str(ref).strip().lstrip("#").isdigit():
+        raise ValueError("ref must be an element number from browser_elements")
+    else:
+        ref = int(str(ref).strip().lstrip("#"))
+    target = str(args.get("target") or "").strip()
+    if ref is None and not target:
+        raise ValueError("give ref (a number from browser_elements) or target (the element's visible text)")
+    return ref, target
+
+
+@tool("browser_elements",
+      "List what can be clicked or typed into on the current page — links, buttons, video players, "
+      "search boxes — each with a number (ref) to pass to browser_click / browser_type. Use it whenever "
+      "you need to click something whose exact text you don't know (a video, an icon button, a result).",
+      {"type": "object", "properties": {"max": {"type": "integer"}}, "required": []})
+@_guard
+async def browser_elements(args: dict) -> dict:
+    try:
+        max_items = max(10, min(300, int(args.get("max") or ELEMENTS_DEFAULT)))
+    except (TypeError, ValueError):
+        max_items = ELEMENTS_DEFAULT
+    res = _dict(await _call("elements", max=max_items))
+    items = [e for e in (res.get("elements") or []) if isinstance(e, dict)]
+    lines = [f"Title: {_clean(res.get('title'), 200)}", f"URL: {_clean(res.get('url'), 500)}",
+             "Elements (ref role \"name\"; * = on screen now):"]
+    for e in items:
+        bits = [f"[{e.get('ref')}]", "*" if e.get("in_view") else " ", str(e.get("role") or ""),
+                f"\"{_clean(e.get('name'), 100)}\""]
+        if e.get("href"):
+            bits.append(f"-> {_clean(e['href'], 80)}")
+        for flag in ("disabled", "checked", "playing"):
+            if flag in e:
+                bits.append(f"{flag}={str(e[flag]).lower()}")
+        if e.get("value"):
+            bits.append(f"value=\"{_clean(e['value'], 60)}\"")
+        lines.append(" ".join(bits))
+    total = res.get("total")
+    if isinstance(total, int) and total > len(items):
+        lines.append(f"(+{total - len(items)} more further down; scroll and list again)")
+    if not items:
+        lines.append("(nothing clickable found — the page may still be loading)")
+    return _ok("\n".join(lines))
+
+
+# -- real clicks ---------------------------------------------------------------------
+# A script's element.click() is not a user gesture: sites that only react to
+# real input, and anything the browser gates on a gesture (starting a video
+# with sound, fullscreen, some popups), ignore it. So a click goes where the
+# element is on screen, with the actual mouse — when that is certain to land
+# on the browser — and falls back to the script click otherwise.
+
+def _screen_point(loc: dict) -> tuple[int, int] | None:
+    """The physical screen pixel for the page point `loc` describes (CSS
+    pixels inside the viewport, plus the window geometry the page reported).
+    The browser window's own borders are inferred from outer - inner size."""
+    try:
+        zoom = float(loc.get("zoom") or 1.0)
+        dpr = float(loc["dpr"])
+        scale = dpr / zoom                         # Windows display scaling (DIP -> physical)
+        border = max(0.0, (float(loc["outerWidth"]) - float(loc["innerWidth"]) * zoom) / 2)
+        top = float(loc["outerHeight"]) - float(loc["innerHeight"]) * zoom - border
+        x = (float(loc["screenX"]) + border) * scale + float(loc["x"]) * dpr
+        y = (float(loc["screenY"]) + top) * scale + float(loc["y"]) * dpr
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    return round(x), round(y)
+
+
+def _window_pid_at(x: int, y: int) -> int | None:
+    """The process owning the top-level window under screen point (x, y)."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32")
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+    hwnd = user32.WindowFromPoint(wintypes.POINT(x, y))
+    if not hwnd:
+        return None
+    root = user32.GetAncestor(hwnd, 2) or hwnd          # GA_ROOT
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+    return pid.value or None
+
+
+def _mouse_click(x: int, y: int) -> bool:
+    """A real left click at (x, y) if it will land on the browser in front;
+    False (nothing done) otherwise."""
+    from veronica.tools import computer_events as ce
+
+    ce.ensure_dpi_awareness()
+    front = ce.frontmost()
+    if front.bundle_id.lower() not in BROWSER_EXES:
+        log.info("real click skipped: %s is in front, not the browser", front.bundle_id or "?")
+        return False
+    if ce.input_blocked():
+        log.info("real click skipped: the browser runs as administrator")
+        return False
+    if _window_pid_at(x, y) != front.pid:
+        log.info("real click skipped: something else is on top at (%d, %d)", x, y)
+        return False
+    ce.click(x, y)
+    return True
+
+
+async def _click(ref: int | None, target: str) -> str | None:
+    """Click the element; what was clicked (or None if there's no such
+    element). A real mouse click where possible, a script click if not."""
+    loc = _dict(await _call("locate", ref=ref, target=target))
+    if not loc.get("found"):
+        return None
+    point = None if loc.get("covered") else _screen_point(loc)
+    if point is not None:
+        try:
+            if await asyncio.to_thread(_mouse_click, *point):
+                log.info("browser click: real mouse at %s on %s", point, loc.get("described"))
+                return str(loc.get("described") or "")
+        except Exception:
+            log.warning("real browser click failed; using a script click", exc_info=True)
+    clicked = _dict(await _call("click", ref=ref, target=target)).get("clicked")
+    return str(clicked) if clicked else None
+
+
+_CLICK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ref": {"type": "integer", "description": "Element number from browser_elements (preferred)"},
+        "target": {"type": "string", "description": "The element's visible text or label (also shown when asking)"},
+    },
+    "required": [],
+}
+
+
+@tool("browser_click",
+      "Click something on the current page: pass ref (a number from browser_elements) — and target, its "
+      "name — or just target, its visible text or label. Uses the real mouse when it can, so video players "
+      "and other controls that ignore scripted clicks still work.",
+      _CLICK_SCHEMA)
 @_guard
 async def browser_click(args: dict) -> dict:
-    target = str(args.get("target", "")).strip()
-    if not target:
-        return _err("target is required")
-    clicked = _dict(await _call("click", target=target)).get("clicked")
+    try:
+        ref, target = _ref_or_target(args)
+    except ValueError as exc:
+        return _err(str(exc))
+    clicked = await _click(ref, target)
     if not clicked:
-        return _err(f"no element matching '{target}'")
+        return _err(f"no element {ref}" if ref is not None else f"no element matching '{target}'")
     await _wait_for_load()
     return _ok(f"Clicked {_clean(clicked, 80)}")
 
 
-@tool("browser_type", "Type text into a field on the current page (by placeholder/label/name), optionally pressing Enter", {"target": str, "text": str, "submit": bool})
+@tool("browser_type",
+      "Type text into a field on the current page — by ref (a number from browser_elements) or target "
+      "(its placeholder, label or name) — optionally pressing Enter",
+      {"type": "object",
+       "properties": {"ref": {"type": "integer"}, "target": {"type": "string"},
+                      "text": {"type": "string"}, "submit": {"type": "boolean"}},
+       "required": ["text"]})
 @_guard
 async def browser_type(args: dict) -> dict:
-    target = str(args.get("target", "")).strip()
+    try:
+        ref, target = _ref_or_target(args)
+    except ValueError as exc:
+        return _err(str(exc))
     text = str(args.get("text", ""))
-    if not target:
-        return _err("target is required")
     submit = bool(args.get("submit", False))
-    typed = _dict(await _call("type", target=target, text=text, submit=submit)).get("typed")
+    typed = _dict(await _call("type", ref=ref, target=target, text=text, submit=submit)).get("typed")
     if not typed:
-        return _err(f"no field matching '{target}'")
+        return _err(f"no field {ref}" if ref is not None else f"no field matching '{target}'")
     if submit:
         await _wait_for_load()
     return _ok(f"Typed into {_clean(typed, 80)}")
@@ -525,6 +682,7 @@ async def browser_back(args: dict) -> dict:
     return _ok("Went back")
 
 
-TOOLS = [browser_tabs, browser_open, browser_read, browser_find, browser_click, browser_type, browser_scroll, browser_back]
+TOOLS = [browser_tabs, browser_open, browser_read, browser_find, browser_elements, browser_click, browser_type,
+         browser_scroll, browser_back]
 BROWSER_TOOL_NAMES = [t.name for t in TOOLS]
 browser_server = create_sdk_mcp_server(name="browser", version="1.0.0", tools=TOOLS)
