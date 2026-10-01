@@ -8,15 +8,15 @@ Threads:
   it returns once every window has been destroyed (Quit).
 - UI thread (veronica.ui.dispatch): all window/menu state changes, plus the
   timers — the 0.25 s refresh (tray icon/tooltip, submenus), the 30 Hz drain
-  of orchestrator events into the HUD and the hourly update check. It plays
-  the AppKit main thread's part: everything below that touches UI state
-  runs there, and callbacks from other threads hop onto it (`_main_thread`).
+  of orchestrator events into the HUD and the hourly update check.
+  Everything below that touches UI state runs there, and callbacks from
+  other threads hop onto it (`_main_thread`).
 - tray: pystray's own message loop (`Icon.run` on a daemon thread). Menu
   clicks arrive there and are hopped onto the UI thread.
 - orchestrator: a daemon thread running the asyncio loop (`_run_loop`).
 
-Menu items are kept as small `MenuItem` records (title, callback, state —
-the shape rumps used); the pystray menu reads them through callables, and
+Menu items are kept as small `MenuItem` records (title, callback, check
+state); the pystray menu reads them through callables, and
 the refresh timer calls `Icon.update_menu()` whenever one changes. A click
 on the HUD orb pops up the same tray menu at the cursor (`_popup_menu_at`,
 which asks pystray's own window to show it, so there's exactly one menu).

@@ -319,7 +319,7 @@ async def test_one_oversized_question_is_truncated_not_thrown_away(tmp_path):
 async def test_the_system_prompt_says_it_is_offline(tmp_path):
     brain, client, _ = make_brain(tmp_path, rounds=[[sse(content="Ok.")]])
     await drain(brain)
-    assert "offline on this Mac" in client.posts[0]["messages"][0]["content"]
+    assert "offline on this PC" in client.posts[0]["messages"][0]["content"]
     await brain.close()
 
 
@@ -363,11 +363,11 @@ async def test_arguments_arrive_in_pieces(tmp_path, monkeypatch):
     server = FakeToolServer()
     fake_catalog(monkeypatch, server, names=("mcp__system__open_app",))
     brain, *_ = make_brain(tmp_path, rounds=[
-        [tool_delta(0, "mcp__system__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Safari"}')],
+        [tool_delta(0, "mcp__system__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Microsoft Edge"}')],
         [sse(content="Opened.")],
     ])
-    await drain(brain, "open safari")
-    assert server.calls == [("open_app", {"name": "Safari"})]
+    await drain(brain, "open edge")
+    assert server.calls == [("open_app", {"name": "Microsoft Edge"})]
     await brain.close()
 
 
@@ -568,7 +568,7 @@ async def test_live_tool_turn(capsys):
 
 
 async def test_catch_all_tools_are_not_offered_to_the_local_model():
-    """A 3B model treats applescript / screen control as an escape hatch when
+    """A 3B model treats PowerShell / screen control as an escape hatch when
     no tool fits, so the user gets a confirm out of nowhere. They're hidden."""
     import veronica.brain.backends.local as local_mod
 
@@ -578,7 +578,7 @@ async def test_catch_all_tools_are_not_offered_to_the_local_model():
     finally:
         local_mod._tools = None
     names = {s["function"]["name"] for s in schemas}
-    assert "mcp__system__applescript" not in names and "mcp__system__applescript" not in index
+    assert "mcp__system__powershell" not in names and "mcp__system__powershell" not in index
     assert not any(n.startswith("mcp__computer__") for n in names)
     assert "mcp__system__volume_get" in names        # ordinary tools still offered
 

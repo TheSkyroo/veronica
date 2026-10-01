@@ -29,6 +29,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -54,6 +55,29 @@ def _has_console() -> bool:
         return bool(ctypes.windll.kernel32.GetConsoleWindow())   # type: ignore[attr-defined]
     except (AttributeError, OSError):
         return True
+
+
+def console_python(executable: str | None = None) -> str:
+    """The interpreter for a child that speaks over stdio (the hook, an MCP
+    server): `python.exe`, never `pythonw.exe`. Veronica itself usually
+    runs windowless under pythonw, whose stdin/stdout are None — a hook or
+    MCP server started with it would have nothing to talk on. The same goes
+    for the windowed PyInstaller build, which hands children the checkout's
+    venv interpreter instead."""
+    if executable is None and getattr(sys, "frozen", False):
+        # The built Veronica.exe is windowed, so its stdio can't carry an
+        # MCP conversation; the checkout it was built from (VERONICA_REPO,
+        # set by its entry script) has a console interpreter that can.
+        repo = os.environ.get("VERONICA_REPO")
+        venv_python = Path(repo) / ".venv" / "Scripts" / "python.exe" if repo else None
+        if venv_python is not None and venv_python.is_file():
+            return str(venv_python)
+    exe = Path(executable or sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        console = exe.with_name("python.exe")
+        if console.is_file():
+            return str(console)
+    return str(exe)
 
 
 def spawn_flags(has_console: Callable[[], bool] = _has_console) -> int:

@@ -31,11 +31,16 @@ needs_codex = pytest.mark.skipif(shutil.which("codex") is None, reason="codex no
 needs_copilot = pytest.mark.skipif(shutil.which("copilot") is None, reason="copilot not installed")
 
 
+def touch(proof) -> str:
+    """A PowerShell command that creates `proof` and prints the canary
+    (`;`, not `&&`: Windows PowerShell 5.1 has no `&&`)."""
+    return f"New-Item -ItemType File -Force -Path '{proof}' | Out-Null; Write-Output canary-ok"
+
+
 @pytest.fixture
 def short_home():
-    """AF_UNIX socket paths are capped at ~104 bytes on macOS and the hook /
-    MCP children get the gate socket as an absolute path, so the test
-    home lives directly under /tmp rather than pytest's long tmp_path."""
+    """A short home in the temp folder: the hook and MCP children get the
+    gate's endpoint file as an absolute path on their command lines."""
     d = Path(tempfile.mkdtemp(prefix="vb-"))
     try:
         yield d
@@ -106,8 +111,8 @@ class RecordingCopilot(_Recording, CopilotBrain):
 
 
 async def _gate_server(home, answers, cards, seen=None):
-    """A ToolGate served on home/gate.sock whose confirm pops `answers`;
-    every tool name that reaches `decide` (from the socket or in-process)
+    """A ToolGate served through home/run/gate.json whose confirm pops `answers`;
+    every tool name that reaches `decide` (over the gate or in-process)
     is appended to `seen`."""
     s = Settings(home=home)
 
@@ -125,13 +130,13 @@ async def _gate_server(home, answers, cards, seen=None):
             return await decide(tool, inp)
 
         gate.decide = recording_decide
-    srv = GateServer(gate, s.gate_socket, run_tool=registry.call_tool)
+    srv = GateServer(gate, s.gate_endpoint, run_tool=registry.call_tool)
     await srv.start()
     return s, gate, srv
 
 
 async def _brain_with_gate(home, answers, cards, brain_cls=RecordingAntigravity):
-    """A brain whose gate is served on home/gate.sock and whose confirm
+    """A brain whose gate is served through home/run/gate.json and whose confirm
     pops `answers`."""
     s, gate, srv = await _gate_server(home, answers, cards)
     return brain_cls(s, gate, on_tool=lambda su, d: cards.append((su, d))), srv
@@ -167,7 +172,7 @@ async def test_agy_native_shell_gated_and_allowed(short_home, agy_hooks_file):
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards)
     try:
         # `touch` is confirm-class, so this proves the whole chain: hook -> gate -> confirm -> ran
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof} && echo canary-ok` with your "
+        out = [x async for x in b.ask(f"Run the shell command `{touch(proof)}` with your "
                                       "run_command tool and reply with its output only.")]
         assert any("canary-ok" in x for x in out), out
         assert proof.exists()
@@ -189,7 +194,7 @@ async def test_agy_native_shell_denied_does_not_run(short_home, agy_hooks_file):
     cards = []
     b, srv = await _brain_with_gate(short_home, [False] * 5, cards)
     try:
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof}` with your run_command tool, "
+        out = [x async for x in b.ask(f"Run the shell command `New-Item -ItemType File -Force -Path '{proof}'` with your run_command tool, "
                                       "then reply with one short sentence saying whether it ran.")]
         assert not proof.exists(), out
         entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
@@ -247,7 +252,7 @@ async def test_codex_native_shell_gated_and_allowed(short_home):
     cards = []
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCodex)
     try:
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof} && echo canary-ok` and reply "
+        out = [x async for x in b.ask(f"Run the shell command `{touch(proof)}` and reply "
                                       "with its output only.")]
         assert any("canary-ok" in x for x in out), out
         assert proof.exists()
@@ -267,7 +272,7 @@ async def test_codex_native_shell_denied_does_not_run(short_home):
     cards = []
     b, srv = await _brain_with_gate(short_home, [False] * 5, cards, RecordingCodex)
     try:
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof}`, then reply with one short "
+        out = [x async for x in b.ask(f"Run the shell command `New-Item -ItemType File -Force -Path '{proof}'`, then reply with one short "
                                       "sentence saying whether it ran.")]
         assert not proof.exists(), out
         entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
@@ -299,11 +304,10 @@ async def test_codex_mcp_tool_through_serve(short_home):
 
 @needs_codex
 async def test_codex_screenshot_is_captured_by_this_process(short_home):
-    """The TCC bug: the capture must happen wherever the gate lives — in the
-    app, not in the `tools.serve` child the CLI spawned, which is a
-    different binary as far as macOS Screen Recording is concerned. Here
-    "the app" is pytest, so what this proves is that the capture ran on
-    THIS side of the socket and its image came back through Codex."""
+    """The capture must happen wherever the gate lives — in the app, not in
+    the `tools.serve` child the CLI spawned. Here "the app" is pytest, so
+    what this proves is that the capture ran on THIS side of the gate and
+    its image came back through Codex."""
     cards, seen = [], []
     here = os.getpid()
     took = []
@@ -365,12 +369,12 @@ async def test_copilot_native_shell_gated_and_allowed(short_home, copilot_hooks_
     cards = []
     b, srv = await _brain_with_gate(short_home, [True] * 5, cards, RecordingCopilot)
     try:
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof} && echo canary-ok` with your bash "
+        out = [x async for x in b.ask(f"Run the shell command `{touch(proof)}` with your powershell "
                                       "tool and reply with its output only.")]
         assert any("canary-ok" in x for x in out), out
         assert proof.exists()
         entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
-        assert any(e["call"] == "bash" and "canary-ok" in e["key"] for e in entries), entries
+        assert any(e["call"] == "powershell" and "canary-ok" in e["key"] for e in entries), entries
         assert any(c[0] == "confirm" for c in cards), cards       # the gate was really asked
         assert b.s.copilot_native_tools is True                   # canary did not trip
     finally:
@@ -385,7 +389,8 @@ async def test_copilot_native_shell_denied_does_not_run(short_home, copilot_hook
     cards = []
     b, srv = await _brain_with_gate(short_home, [False] * 5, cards, RecordingCopilot)
     try:
-        out = [x async for x in b.ask(f"Run the shell command `touch {proof}` with your bash tool, then reply "
+        out = [x async for x in b.ask(f"Run the shell command `New-Item -ItemType File -Force -Path '{proof}'` "
+                                      "with your powershell tool, then reply "
                                       "with one short sentence saying whether it ran.")]
         assert not proof.exists(), out
         entries = [json.loads(l) for l in b.hook_log.read_text().splitlines()]
@@ -424,7 +429,7 @@ VOLUME_PROMPT = "Use the volume_get tool and tell me the result in one short sen
 async def test_every_brain_answers_through_the_gate(name, short_home, agy_hooks_file, copilot_hooks_file):
     """`make_brain(name)` on a real GateServer: one turn that calls our
     `volume_get` (auto-allowed) speaks a sentence, and the gate saw exactly
-    one request for it — over the socket from tools.serve for the CLI
+    one request for it — over the gate from tools.serve for the CLI
     brains, in-process (can_use_tool) for Claude."""
     avail = check_backend(name)
     if not avail.ok:
@@ -467,7 +472,7 @@ async def test_claude_brain_in_process_through_the_gate(short_home):
 
 async def test_switcher_starts_on_codex(short_home):
     """`BrainSwitcher.start()` with the default preference activates Codex
-    on a Mac where it is installed and logged in — no stand-in."""
+    on a PC where it is installed and logged in — no stand-in."""
     avail = check_backend("codex")
     if not avail.ok:
         pytest.skip(f"codex: {avail.reason}")

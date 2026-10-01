@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,7 @@ class FakeSession:
 def player(monkeypatch):
     """The OS seams replaced: one current media session (None to simulate
     no player), a Spotify-installed switch, and a log of opened URIs and
-    per-app volume calls."""
+    per-app volume calls. Spotify isn't connected."""
     state = SimpleNamespace(session=FakeSession(), spotify=True, opened=[], volumes=[],
                             mixer_hit="Spotify.exe")
 
@@ -53,6 +54,7 @@ def player(monkeypatch):
     monkeypatch.setattr(music, "_spotify_installed", lambda: state.spotify)
     monkeypatch.setattr(music, "_open", state.opened.append)
     monkeypatch.setattr(music, "_set_app_volume", set_volume)
+    monkeypatch.setattr(music, "_spotify_connected", lambda: False)
     return state
 
 
@@ -76,28 +78,235 @@ async def test_music_session_manager_failure_counts_as_no_player(player, monkeyp
     assert text(await music.music_now_playing.handler({})) == "Nothing is playing."
 
 
-async def test_music_play_with_query_opens_spotify_search(player):
+# -- play <query>: Spotify ------------------------------------------------------------
+class FakeSpotify:
+    """The Spotify Web API: canned search results, a device list that can
+    change after N polls, and a play endpoint that records or refuses."""
+
+    def __init__(self):
+        self.calls = []
+        self.tracks = [{"uri": "spotify:track:t1", "name": "Bohemian Rhapsody",
+                        "artists": [{"name": "Queen"}]}]
+        self.artists = [{"uri": "spotify:artist:a1", "name": "Queen"}]
+        self.playlists = [{"uri": "spotify:playlist:p1", "name": "Chill Mix"}]
+        self.devices = [[{"id": "pc", "name": "MYPC", "type": "Computer", "is_active": False}]]
+        self.play_error = None
+
+    def __call__(self, method, path, params=None, body=None):
+        self.calls.append((method, path, params, body))
+        if path == "/search":
+            return {"tracks": {"items": self.tracks}, "artists": {"items": self.artists},
+                    "playlists": {"items": self.playlists}}
+        if path == "/me/player/devices":
+            devs = self.devices[0] if len(self.devices) == 1 else self.devices.pop(0)
+            return {"devices": devs}
+        if path == "/me/player/play":
+            if self.play_error:
+                raise self.play_error
+            return {}
+        raise AssertionError(path)
+
+    def played(self):
+        return [(p, b) for m, path, p, b in self.calls if path == "/me/player/play"]
+
+
+@pytest.fixture
+def spotify(player, monkeypatch):
+    api = FakeSpotify()
+    monkeypatch.setattr(music, "_spotify_connected", lambda: True)
+    monkeypatch.setattr(music, "_spotify_api", api)
+    monkeypatch.setattr(music, "_sleep", lambda s: None)
+    monkeypatch.setenv("COMPUTERNAME", "MyPC")
+    return api
+
+
+@pytest.fixture
+def youtube(player, monkeypatch):
+    """The YouTube results page: canned HTML (or an exception), and the
+    URLs fetched."""
+    state = SimpleNamespace(html=YT_PAGE, fetched=[])
+
+    def get(url):
+        state.fetched.append(url)
+        if isinstance(state.html, Exception):
+            raise state.html
+        return state.html
+
+    monkeypatch.setattr(music, "_http_get", get)
+    return state
+
+
+def _vr(vid, title, live=False):
+    vr = {"videoId": vid, "title": {"runs": [{"text": title}]}}
+    if live:
+        vr["badges"] = [{"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_LIVE_NOW", "label": "LIVE"}}]
+    else:
+        vr["lengthText"] = {"simpleText": "5:55"}
+    return {"videoRenderer": vr}
+
+
+YT_DATA = {"contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {
+    "sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [
+        {"adSlotRenderer": {"videoId": "AAAAAAAAAAA"}},
+        {"reelShelfRenderer": {"items": [{"reelItemRenderer": {"videoId": "SSSSSSSSSSS"}}]}},
+        _vr("LLLLLLLLLLL", "Live radio", live=True),
+        _vr("fJ9rUzIMcZQ", "Queen – Bohemian Rhapsody (Official Video)"),
+        _vr("zzzzzzzzzzz", "Second"),
+    ]}}]}}}}}
+YT_PAGE = ('<html><script>var foo = 1;</script><script nonce="x">var ytInitialData = '
+           + json.dumps(YT_DATA) + ';</script><script>var x = {"a": "};"};</script></html>')
+
+
+async def test_spotify_search_picks_device_and_plays_track(spotify, youtube, player):
+    res = await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert text(res) == "Playing Bohemian Rhapsody by Queen on Spotify."
+    assert spotify.played() == [({"device_id": "pc"}, {"uris": ["spotify:track:t1"]})]
+    assert player.opened == [] and youtube.fetched == []
+
+
+async def test_spotify_prefers_the_active_device(spotify, youtube, player):
+    spotify.devices = [[{"id": "pc", "name": "MYPC", "type": "Computer"},
+                        {"id": "phone", "name": "Pixel", "type": "Smartphone", "is_active": True}]]
+    await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert spotify.played()[0][0] == {"device_id": "phone"}
+
+
+async def test_spotify_prefers_this_pc_over_other_computers(spotify, youtube, player):
+    spotify.devices = [[{"id": "lap", "name": "LAPTOP", "type": "Computer"},
+                        {"id": "pc", "name": "MyPC", "type": "Computer"}]]
+    await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert spotify.played()[0][0] == {"device_id": "pc"}
+
+
+async def test_spotify_artist_query_plays_the_artist(spotify, youtube, player):
+    res = await music.music_play.handler({"query": "queen"})
+    assert text(res) == "Playing Queen on Spotify."
+    assert spotify.played()[0][1] == {"context_uri": "spotify:artist:a1"}
+
+
+async def test_spotify_playlist_query(spotify, youtube, player):
+    res = await music.music_play.handler({"query": "playlist chill"})
+    assert text(res) == "Playing the playlist Chill Mix on Spotify."
+    assert spotify.calls[0][2]["type"] == "playlist" and spotify.calls[0][2]["q"] == "chill"
+    assert spotify.played()[0][1] == {"context_uri": "spotify:playlist:p1"}
+
+
+async def test_spotify_no_device_launches_app_and_polls(spotify, youtube, player):
+    spotify.devices = [[], [], [{"id": "pc", "name": "MyPC", "type": "Computer"}]]
+    res = await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert player.opened == ["spotify:"]
+    assert text(res) == "Playing Bohemian Rhapsody by Queen on Spotify."
+    assert spotify.played()[0][0] == {"device_id": "pc"}
+
+
+async def test_spotify_device_never_appears_falls_back_to_youtube(spotify, youtube, player):
+    spotify.devices = [[]]
+    res = await music.music_play.handler({"query": "bohemian rhapsody"})
+    polls = [c for c in spotify.calls if c[1] == "/me/player/devices"]
+    assert 2 < len(polls) <= 12
+    assert player.opened == ["spotify:", "https://www.youtube.com/watch?v=fJ9rUzIMcZQ"]
+    assert spotify.played() == []
+    assert "on YouTube" in text(res)
+
+
+async def test_spotify_not_installed_does_not_launch(spotify, youtube, player):
+    spotify.devices = [[]]
+    player.spotify = False
+    await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert player.opened == ["https://www.youtube.com/watch?v=fJ9rUzIMcZQ"]
+
+
+async def test_spotify_premium_required_falls_back_to_youtube(spotify, youtube, player):
+    spotify.play_error = music.SpotifyError(403, "Premium required", "PREMIUM_REQUIRED")
     res = await music.music_play.handler({"query": "bohemian rhapsody"})
     assert not res.get("is_error")
-    assert player.opened == ["spotify:search:bohemian%20rhapsody"]
-    assert text(res) == "Searching Spotify for bohemian rhapsody."
+    assert player.opened == ["https://www.youtube.com/watch?v=fJ9rUzIMcZQ"]
+    assert text(res) == ("Spotify Premium is needed for playback control, so playing "
+                         "Queen – Bohemian Rhapsody (Official Video) on YouTube.")
 
 
-async def test_music_play_spotify_query_percent_encodes_specials(player):
-    await music.music_play.handler({"query": 'AC/DC & "friends" #1 café'})
-    assert player.opened == ["spotify:search:AC%2FDC%20%26%20%22friends%22%20%231%20caf%C3%A9"]
+async def test_spotify_api_failure_falls_back_quietly(spotify, youtube, player):
+    spotify.play_error = music.SpotifyError(0, "couldn't reach Spotify")
+    res = await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert text(res) == "Playing Queen – Bohemian Rhapsody (Official Video) on YouTube."
 
 
-async def test_music_play_without_spotify_uses_youtube_music(player):
-    player.spotify = False
+# -- play <query>: YouTube --------------------------------------------------------------
+async def test_not_connected_plays_top_youtube_video(youtube, player):
+    res = await music.music_play.handler({"query": "bohemian rhapsody"})
+    assert youtube.fetched == ["https://www.youtube.com/results?search_query=bohemian+rhapsody"]
+    assert player.opened == ["https://www.youtube.com/watch?v=fJ9rUzIMcZQ"]
+    assert text(res) == "Playing Queen – Bohemian Rhapsody (Official Video) on YouTube."
+
+
+async def test_youtube_query_encoded_and_whitespace_collapsed(youtube, player):
+    await music.music_play.handler({"query": "  AC/DC &\n\t\"friends\" #1 café "})
+    assert youtube.fetched == [
+        "https://www.youtube.com/results?search_query=AC%2FDC+%26+%22friends%22+%231+caf%C3%A9"]
+
+
+def test_youtube_parse_skips_ads_shorts_and_live():
+    assert music._youtube_top(YT_PAGE) == ("fJ9rUzIMcZQ", "Queen – Bohemian Rhapsody (Official Video)")
+
+
+def test_youtube_parse_window_assignment_and_simple_text():
+    data = {"x": [{"videoRenderer": {"videoId": "abcdefghij_", "lengthText": {},
+                                     "title": {"simpleText": "Simple"}}}]}
+    html = 'window["ytInitialData"] = ' + json.dumps(data) + ";"
+    assert music._youtube_top(html) == ("abcdefghij_", "Simple")
+
+
+def test_youtube_parse_only_live_still_plays_it():
+    html = "var ytInitialData = " + json.dumps({"c": [_vr("LLLLLLLLLLL", "Live", live=True)]}) + ";"
+    assert music._youtube_top(html) == ("LLLLLLLLLLL", "Live")
+
+
+def test_youtube_parse_regex_fallback():
+    html = 'var ytInitialData = {broken json; ... "videoId":"dQw4w9WgXcQ" ...'
+    assert music._youtube_top(html) == ("dQw4w9WgXcQ", "")
+    assert music._youtube_top('<a "videoId":"dQw4w9WgXcQ">') == ("dQw4w9WgXcQ", "")
+    assert music._youtube_top("<html>consent</html>") is None
+
+
+async def test_youtube_regex_fallback_says_the_query(youtube, player):
+    youtube.html = '"videoId":"dQw4w9WgXcQ"'
+    res = await music.music_play.handler({"query": "never gonna"})
+    assert player.opened == ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]
+    assert text(res) == "Playing never gonna on YouTube."
+
+
+@pytest.mark.parametrize("html", [RuntimeError("offline"), "<html>no results</html>"])
+async def test_youtube_failure_opens_results_page(youtube, player, html):
+    youtube.html = html
     res = await music.music_play.handler({"query": "adele & co"})
-    assert player.opened == ["https://music.youtube.com/search?q=adele+%26+co"]
-    assert text(res) == "Searching YouTube Music for adele & co."
+    assert not res.get("is_error")
+    assert player.opened == ["https://www.youtube.com/results?search_query=adele+%26+co"]
+    assert text(res) == "I couldn't start a video, so I opened YouTube results for adele & co."
 
 
-async def test_music_play_query_whitespace_collapsed(player):
-    await music.music_play.handler({"query": "  a\n\tb  "})
-    assert player.opened == ["spotify:search:a%20b"]
+async def test_spotify_connected_check_failure_uses_youtube(youtube, player, monkeypatch):
+    def broken():
+        raise OSError("disk")
+    monkeypatch.setattr(music, "_spotify_connected", broken)
+    res = await music.music_play.handler({"query": "x"})
+    assert "on YouTube" in text(res)
+
+
+def test_open_only_web_and_spotify_uris(monkeypatch):
+    opened = []
+    monkeypatch.setattr(music.os, "startfile", opened.append, raising=False)
+    music._open("https://www.youtube.com/watch?v=x")
+    music._open("spotify:")
+    for bad in ("C:\\Windows\\notepad.exe", "file:///c:/x", "ms-settings:"):
+        with pytest.raises(ValueError):
+            music._open(bad)
+    assert opened == ["https://www.youtube.com/watch?v=x", "spotify:"]
+
+
+def test_choose_device_skips_restricted():
+    devs = [{"id": "a", "type": "Computer", "is_active": True, "is_restricted": True},
+            {"id": "b", "type": "Speaker"}]
+    assert music._choose_device(devs) is None
 
 
 async def test_music_pause(player):

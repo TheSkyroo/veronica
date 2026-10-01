@@ -11,7 +11,7 @@ from pathlib import Path
 log = logging.getLogger("veronica.prefs")
 
 _PREFS_PATH = Path.home() / ".veronica" / "prefs.json"
-# Every load-modify-save runs under this: the menubar's main thread, the
+# Every load-modify-save runs under this: the UI thread, the
 # orchestrator's loop thread and the settings bridge all write prefs.json,
 # and a lost update would silently drop someone's setting.
 _LOCK = threading.RLock()

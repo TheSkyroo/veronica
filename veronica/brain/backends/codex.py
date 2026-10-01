@@ -1,6 +1,6 @@
 """Codex (`codex` 0.155.1) as a Veronica brain.
 
-How it runs (verified against codex 0.155 on macOS, 2026-09-19; the
+How it runs (verified against codex 0.155 on macOS, 2026-09-19 — recheck on Windows; the
 Windows specifics below follow the same contract and are noted where they
 differ):
 - One `codex exec --json` child per turn (`per_turn`), the prompt last
@@ -42,7 +42,6 @@ differ):
 """
 import json
 import re
-import sys
 from pathlib import Path
 
 from veronica.brain import hook
@@ -79,7 +78,7 @@ _SHELL_WRAP = re.compile(
     r"\s+(?:-command|-c|-lc|-lic|-ic|/c)\s+(?P<cmd>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-_SHELLS = ("powershell", "pwsh", "cmd", "bash", "sh", "zsh")
+_SHELLS = ("powershell", "pwsh", "cmd", "bash", "sh", "zsh")   # zsh: the recorded fixtures
 
 
 def unwrap_shell(command: str) -> str:
@@ -114,7 +113,7 @@ class CodexBrain(CliBrain):
         out: list[str] = []
         for server in hook.OUR_SERVERS:
             key = f"mcp_servers.veronica-{server}"
-            out += ["-c", f"{key}.command={toml_str(sys.executable)}",
+            out += ["-c", f"{key}.command={toml_str(winproc.console_python())}",
                     "-c", f'{key}.args=["-m","veronica.tools.serve","{server}"]',
                     "-c", f"{key}.env.VERONICA_GATE={toml_str(str(self.s.gate_endpoint))}",
                     "-c", f'{key}.env.VERONICA_BRAIN="codex"',
@@ -154,7 +153,7 @@ class CodexBrain(CliBrain):
         # The child inherits VERONICA_* from us, but the flags make the hook
         # independent of that. Codex hands the string to a shell, so it is
         # written to read the same in cmd.exe and PowerShell.
-        return winproc.neutral_command([sys.executable, "-m", "veronica.brain.hook", "codex",
+        return winproc.neutral_command([winproc.console_python(), "-m", "veronica.brain.hook", "codex",
                                         "--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log)])
 
     def prepare_workspace(self, prompt_text: str, native: bool) -> None:

@@ -120,7 +120,7 @@ body.mini #caption.hidden{display:none}
 #caption .msg{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #caption .msg.partial{font-style:italic;opacity:.75}
 #caption .msg.prompt{color:#f0c36c;font-weight:500}
-/* the plan's running step, mini mode's one line of it ("2/4 Open Safari") */
+/* the plan's running step, mini mode's one line of it ("2/4 Open Edge") */
 #caption .step{display:none}
 body.mini #caption .step{display:inline-block;flex:0 1 auto;min-width:0;max-width:150px;
   font-family:"Cascadia Mono",Consolas,ui-monospace,monospace;font-size:10.5px;color:#ffb454;opacity:.75;

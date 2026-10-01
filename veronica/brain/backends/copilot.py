@@ -1,6 +1,6 @@
-"""GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
+r"""GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
 
-How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19; the
+How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19 — recheck on Windows; the
 Windows specifics are noted where they differ):
 - One `copilot -p <prompt> --output-format json --silent --no-ask-user`
   child per turn (`per_turn`), stdin closed. The stream is JSONL with
@@ -48,7 +48,6 @@ Windows specifics are noted where they differ):
   default model "auto" ('Model "auto" does not support reasoning effort').
 """
 import json
-import sys
 import uuid
 from pathlib import Path
 
@@ -89,7 +88,7 @@ class CopilotBrain(CliBrain):
         env = {"VERONICA_GATE": str(self.s.gate_endpoint), "VERONICA_BRAIN": "copilot",
                "VERONICA_HOOK_LOG": str(self.hook_log)}
         return {"mcpServers": {
-            f"veronica-{server}": {"type": "local", "command": sys.executable,
+            f"veronica-{server}": {"type": "local", "command": winproc.console_python(),
                                    "args": ["-m", "veronica.tools.serve", server],
                                    "env": dict(env), "tools": ["*"]}
             for server in hook.OUR_SERVERS}}
@@ -118,7 +117,7 @@ class CopilotBrain(CliBrain):
     def hook_command(self) -> str:
         """The hook as a PowerShell command line (Copilot runs the
         `powershell` entry on Windows)."""
-        return winproc.ps_command([sys.executable, "-m", "veronica.brain.hook", "copilot",
+        return winproc.ps_command([winproc.console_python(), "-m", "veronica.brain.hook", "copilot",
                                    "--gate", str(self.s.gate_endpoint), "--log", str(self.hook_log),
                                    "--scope-cwd", str(self.workspace)])
 
