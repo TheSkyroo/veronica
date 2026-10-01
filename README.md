@@ -87,8 +87,17 @@ Optional, but recommended:
 
 - **Wake word:** say "Veronica" or "hey Veronica", then the request **in the same breath**: "Veronica, what's on
   my calendar today?". Anything you say right after the wake word is kept, so there's no need to pause.
-- **Push-to-talk:** hold **Right Ctrl**, speak, and release. No wake word needed.
-- **Follow-ups:** after a reply she listens for 4 more seconds, so you can keep going without the wake word.
+- **Push-to-talk:** hold **Win+Space**, speak, and release. No wake word needed. While you hold it, Windows
+  doesn't switch your keyboard layout and letting go doesn't open the Start menu. To use other keys, change
+  *Push-to-talk keys* in Settings → General (for example `ctrl+alt+space` or `right_ctrl`).
+- **Listening mode:** choose how she listens. You can switch by voice ("push-to-talk mode" / "always listen"), from
+  the tray's **Listening** menu, or in Settings → General.
+  - **Always listening** (default): she listens for her name whenever she's idle, and push-to-talk works too.
+  - **Push-to-talk only:** the microphone stays off until you hold Win+Space. There's no wake word and no follow-up
+    window; she only opens the mic herself to hear your yes/no when she asks a question. While muted in this mode,
+    hold Win+Space and say "unmute".
+- **Follow-ups:** after a reply she listens for 4 more seconds, so you can keep going without the wake word
+  (always-listening mode only).
 - **Interrupt:** say the wake word, or press push-to-talk, while she's talking.
   - **Pause:** "hold on" / "wait" / "ruko" stops her but keeps the rest of the answer. "Continue" / "go on" / "aage
     bolo" picks up where she stopped.
@@ -339,7 +348,7 @@ menu.
 
 | Tab | What's there |
 | --- | --- |
-| General | HUD mode, start at login, **Accounts** (Google, Spotify), microphone privacy shortcut |
+| General | listening mode, push-to-talk keys, HUD, start at login, **Accounts** (Google, Spotify), microphone privacy shortcut |
 | Voice | voice, Hindi voice, speed, language |
 | Listening | wake sensitivity, follow-up window, noise reduction, "learn my voice", input volume floor |
 | Briefings | daily briefing, meeting nudges, quiet hours, battery and mail alerts |
@@ -350,7 +359,7 @@ menu.
 Most settings apply immediately; the rest show a *Restart to apply* banner. Values are saved in
 `%USERPROFILE%\.veronica\prefs.json` and override `.env`. Any setting can also be given as a `VERONICA_<NAME>`
 environment variable or in a `.env` file in the repo, for example `VERONICA_HUD_ENABLED=false`,
-`VERONICA_PTT_ENABLED=false`, `VERONICA_FOLLOWUP_WINDOW_S=6` or `VERONICA_LOG_LEVEL=DEBUG`.
+`VERONICA_PTT_ENABLED=false`, `VERONICA_PTT_HOTKEY=ctrl+alt+space`, `VERONICA_LISTEN_MODE=ptt`, `VERONICA_FOLLOWUP_WINDOW_S=6` or `VERONICA_LOG_LEVEL=DEBUG`.
 
 ---
 
@@ -393,7 +402,8 @@ Logs are written to `%USERPROFILE%\.veronica\logs\veronica.log`.
 seconds.
 
 **Push-to-talk does nothing.** The tray shows "Push-to-talk unavailable" if the keyboard hook couldn't be installed.
-Restart Veronica. Some games and anti-cheat tools block global hooks.
+Restart Veronica. Some games and anti-cheat tools block global hooks. If another app already uses Win+Space, pick
+different keys in Settings → General → *Push-to-talk keys*.
 
 **Clicks land in the wrong place.** Take a fresh screenshot ("look at my screen") first. Clicking into
 administrator windows needs Veronica to run as administrator too.

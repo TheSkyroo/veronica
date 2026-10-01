@@ -5352,3 +5352,75 @@ async def test_a_barge_says_in_the_log_why_the_turn_ended(caplog):
     assert await fut == "ptt"
     o._ptt_event.clear()
     assert "turn ended early: reason=barge_ptt" in caplog.text
+
+
+# -- listening mode: always vs push-to-talk only -----------------------------------
+
+@pytest.fixture
+def saved_overrides(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(orchestrator_mod.prefs, "save_settings_override", lambda k, v: saved.__setitem__(k, v))
+    return saved
+
+
+async def test_ptt_only_mode_never_arms_the_wake_listener_and_skips_followup(saved_overrides):
+    o, _ = build_ptt(stt_texts=["ptt text"], pcms=[np.zeros(1, np.int16)])
+    o.s.listen_mode = "ptt"
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    assert o.wake.waits == 0                       # mic closed while idle
+    o.ptt_start()
+    await _settle()
+    assert o.recorder.hold_calls == [True]
+    o.ptt_end()
+    await _settle()
+    assert o.brain.asked == ["ptt text"]
+    assert o.recorder.hold_calls == [True]         # no follow-up capture after the answer
+    assert o.state == "idle"
+    assert o.wake.waits == 0                       # no wake-word barge listener during the answer either
+    assert o.wake.stops == 0
+    await _cancel(rf)
+
+
+async def test_switching_to_ptt_only_while_idle_stops_the_wake_listener(saved_overrides):
+    o, _ = build_ptt()
+    rf = asyncio.create_task(o.run_forever())
+    await _settle()
+    assert o.wake.waits == 1
+    await o.set_listen_mode("ptt")
+    await _settle()
+    assert o.wake.stops == 1 and o.wake.waits == 1
+    assert saved_overrides == {"listen_mode": "ptt"}
+    await o.set_listen_mode("always")
+    await _settle()
+    assert o.wake.waits == 2                       # wake word back on at once
+    await _cancel(rf)
+
+
+async def test_listen_mode_voice_intents(saved_overrides):
+    o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16)] * 2, stt_texts=["push-to-talk mode", "always listen"])
+    await o.one_turn()
+    assert o.s.listen_mode == "ptt"
+    assert o.tts.said == ["Push-to-talk only. Hold Win+Space to talk to me."]
+    assert states[-1] == "idle"
+    await o.one_turn()
+    assert o.s.listen_mode == "always"
+    assert o.tts.said[-1] == "Okay, I'm listening for my name again."
+    assert saved_overrides == {"listen_mode": "always"}
+
+
+async def test_ptt_only_refused_while_push_to_talk_is_off(saved_overrides):
+    o, _ = build_ptt()
+    o.s.ptt_enabled = False
+    await o.set_listen_mode("ptt", speak=True)
+    assert o.s.listen_mode == "always" and saved_overrides == {}
+    assert any("Push-to-talk is turned off" in t for t in o.tts.said)
+
+
+def test_ptt_press_counts_while_muted_in_ptt_only_mode():
+    o, _ = build()
+    o.ready = True
+    o.muted = True
+    o.s.listen_mode = "ptt"
+    o.ptt_start()                                  # the only way to say "unmute"
+    assert o._ptt_event.is_set()
