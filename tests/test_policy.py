@@ -102,17 +102,17 @@ CASES = [
     ("Bash", {"command": "ls 'unterminated"}, CONFIRM),
     ("Bash", {}, CONFIRM),
     # mac tools
-    ("mcp__mac__open_app", {"name": "Safari"}, ALLOW),
-    ("mcp__mac__open_url", {"url": "https://x"}, ALLOW),
-    ("mcp__mac__clipboard_read", {}, ALLOW),
-    ("mcp__mac__clipboard_write", {"text": "x"}, CONFIRM),
-    ("mcp__mac__notify", {"title": "a", "message": "b"}, ALLOW),
-    ("mcp__mac__volume_get", {}, ALLOW),
-    ("mcp__mac__volume_set", {"level": 30}, ALLOW),
-    ("mcp__mac__applescript", {"script": "beep"}, CONFIRM),
-    ("mcp__mac__unknown", {}, CONFIRM),
+    ("mcp__system__open_app", {"name": "Safari"}, ALLOW),
+    ("mcp__system__open_url", {"url": "https://x"}, ALLOW),
+    ("mcp__system__clipboard_read", {}, ALLOW),
+    ("mcp__system__clipboard_write", {"text": "x"}, CONFIRM),
+    ("mcp__system__notify", {"title": "a", "message": "b"}, ALLOW),
+    ("mcp__system__volume_get", {}, ALLOW),
+    ("mcp__system__volume_set", {"level": 30}, ALLOW),
+    ("mcp__system__applescript", {"script": "beep"}, CONFIRM),
+    ("mcp__system__unknown", {}, CONFIRM),
     # no allowlist passed: every shortcut is asked about
-    ("mcp__mac__run_shortcut", {"name": "Morning"}, CONFIRM),
+    ("mcp__system__run_shortcut", {"name": "Morning"}, CONFIRM),
     # pim tools
     ("mcp__pim__calendar_events", {"day": "today"}, ALLOW),
     ("mcp__pim__calendar_create", {"title": "x", "start": "2026-09-20 10:00"}, CONFIRM),
@@ -184,7 +184,7 @@ ALWAYS_CASES = [
     ("mcp__pim__mail_send", {"to": "a@b.c"}, True),
     ("mcp__pim__message_send", {"to": "+1555", "body": "on my way"}, True),
     ("mcp__pim__calendar_create", {"title": "x"}, False),
-    ("mcp__mac__clipboard_write", {"text": "x"}, False),
+    ("mcp__system__clipboard_write", {"text": "x"}, False),
     ("mcp__memory__fact_add", {"text": "x"}, False),
     ("Write", {"file_path": "/a"}, False),
     # bash: destructive / power / privilege
@@ -244,15 +244,15 @@ ALWAYS_CASES = [
     ("mcp__computer__computer_type", {"text": "hi"}, False),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}, False),
     # applescript
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to shut down'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to restart'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to log out'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "Finder" to delete file "x"'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "Finder" to empty trash'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to keystroke return'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to key code 36'}, True),
-    ("mcp__mac__applescript", {"script": 'tell application "System Events" to keystroke "a"'}, False),
-    ("mcp__mac__applescript", {"script": 'tell application "Finder" to activate'}, False),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to shut down'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to restart'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to log out'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "Finder" to delete file "x"'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "Finder" to empty trash'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to keystroke return'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to key code 36'}, True),
+    ("mcp__system__applescript", {"script": 'tell application "System Events" to keystroke "a"'}, False),
+    ("mcp__system__applescript", {"script": 'tell application "Finder" to activate'}, False),
 ]
 
 
@@ -286,33 +286,33 @@ def test_always_confirm_every_computer_tool_on_system_dialog(short, inp):
 # --- run_shortcut: allow only what the user put on the allowlist -------------
 
 def test_run_shortcut_allowlisted_name_is_allowed():
-    assert classify("mcp__mac__run_shortcut", {"name": "Morning"}, ["Morning"]) == ALLOW
+    assert classify("mcp__system__run_shortcut", {"name": "Morning"}, ["Morning"]) == ALLOW
 
 
 def test_run_shortcut_allowlist_ignores_case_and_padding():
-    assert classify("mcp__mac__run_shortcut", {"name": " morning "}, [" Morning"]) == ALLOW
+    assert classify("mcp__system__run_shortcut", {"name": " morning "}, [" Morning"]) == ALLOW
 
 
 def test_run_shortcut_off_the_allowlist_confirms():
-    assert classify("mcp__mac__run_shortcut", {"name": "Wipe Disk"}, ["Morning"]) == CONFIRM
-    assert classify("mcp__mac__run_shortcut", {"name": ""}, ["Morning", ""]) == CONFIRM
-    assert classify("mcp__mac__run_shortcut", {}, ["Morning"]) == CONFIRM
+    assert classify("mcp__system__run_shortcut", {"name": "Wipe Disk"}, ["Morning"]) == CONFIRM
+    assert classify("mcp__system__run_shortcut", {"name": ""}, ["Morning", ""]) == CONFIRM
+    assert classify("mcp__system__run_shortcut", {}, ["Morning"]) == CONFIRM
 
 
 def test_run_shortcut_empty_allowlist_allows_nothing():
-    assert classify("mcp__mac__run_shortcut", {"name": "Morning"}, []) == CONFIRM
+    assert classify("mcp__system__run_shortcut", {"name": "Morning"}, []) == CONFIRM
 
 
 def test_the_allowlist_does_not_leak_to_other_tools():
     # the extra argument must not turn anything else into an auto-allow
-    assert classify("mcp__mac__applescript", {"script": "Morning"}, ["Morning"]) == CONFIRM
+    assert classify("mcp__system__applescript", {"script": "Morning"}, ["Morning"]) == CONFIRM
     assert classify("mcp__pim__message_send", {"to": "Morning"}, ["Morning"]) == CONFIRM
 
 
 def test_run_shortcut_is_not_always_confirm():
     # allowlisted shortcuts are meant to be auto-allowed; only the classify
     # gate decides, so this must stay False
-    assert always_confirm("mcp__mac__run_shortcut", {"name": "Morning"}) is False
+    assert always_confirm("mcp__system__run_shortcut", {"name": "Morning"}) is False
 
 
 def test_always_confirm_future_send_tools():
@@ -326,7 +326,7 @@ def test_always_confirm_future_send_tools():
 
 def test_auto_allowable_is_exactly_the_eligible_set():
     assert AUTO_ALLOWABLE == {
-        "mcp__mac__clipboard_write",
+        "mcp__system__clipboard_write",
         "mcp__pim__calendar_create",
         "mcp__pim__reminder_create",
         "mcp__memory__fact_add",
@@ -343,17 +343,17 @@ def test_eligible_tool_confirms_until_it_is_on_the_list(tool):
 
 
 def test_auto_allow_only_covers_the_tool_that_is_listed():
-    assert classify("mcp__pim__reminder_create", {}, (), ["mcp__mac__clipboard_write"]) == CONFIRM
+    assert classify("mcp__pim__reminder_create", {}, (), ["mcp__system__clipboard_write"]) == CONFIRM
 
 
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
     ("mcp__pim__message_send", {"to": "a", "body": "y"}),
-    ("mcp__mac__applescript", {"script": "delete everything"}),
+    ("mcp__system__applescript", {"script": "delete everything"}),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}),
     ("mcp__computer__computer_type", {"text": "rm -rf /"}),
     ("mcp__computer__computer_key", {"combo": "return"}),
-    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
     ("Bash", {"command": "rm -rf /tmp/x"}),
 ])
 def test_ineligible_tool_still_confirms_even_if_hand_typed_into_the_setting(tool, inp):
@@ -367,10 +367,10 @@ def test_always_confirm_wins_over_the_auto_allow_list():
 
 
 def test_auto_allow_entries_are_trimmed_and_blanks_ignored():
-    assert classify("mcp__mac__clipboard_write", {}, (), [" mcp__mac__clipboard_write "]) == ALLOW
-    assert classify("mcp__mac__clipboard_write", {}, (), ["", None]) == CONFIRM
+    assert classify("mcp__system__clipboard_write", {}, (), [" mcp__system__clipboard_write "]) == ALLOW
+    assert classify("mcp__system__clipboard_write", {}, (), ["", None]) == CONFIRM
 
 
 def test_clipboard_write_is_auto_allowed_by_default():
-    assert Settings().auto_allow_tools == ["mcp__mac__clipboard_write"]
-    assert classify("mcp__mac__clipboard_write", {"text": "hi"}, (), Settings().auto_allow_tools) == ALLOW
+    assert Settings().auto_allow_tools == ["mcp__system__clipboard_write"]
+    assert classify("mcp__system__clipboard_write", {"text": "hi"}, (), Settings().auto_allow_tools) == ALLOW

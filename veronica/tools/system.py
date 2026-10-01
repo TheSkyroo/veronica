@@ -233,4 +233,4 @@ def dictate_type(text: str) -> dict:
 TOOLS = [open_app, open_url, clipboard_read, clipboard_write, notify, volume_get, volume_set,
          applescript, run_shortcut]
 MAC_TOOL_NAMES = [t.name for t in TOOLS]
-mac_server = create_sdk_mcp_server(name="mac", version="1.0.0", tools=TOOLS)
+system_server = create_sdk_mcp_server(name="system", version="1.0.0", tools=TOOLS)

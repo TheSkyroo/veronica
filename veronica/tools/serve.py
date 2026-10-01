@@ -29,7 +29,7 @@ from veronica.brain.gateclient import call_gate
 log = logging.getLogger("veronica.tools.serve")
 
 SERVERS = {
-    "mac": "veronica.tools.mac",
+    "system": "veronica.tools.system",
     "pim": "veronica.tools.pim",
     "memory": "veronica.tools.memory_tools",
     "screen": "veronica.tools.screen",

@@ -20,7 +20,7 @@ from veronica.orchestrator import ConfirmResult, Orchestrator
 from veronica.speech import voices
 from veronica.speech.stt import Transcriber, stt_spec
 from veronica.speech.tts import Synthesizer
-from veronica.tools import mac as mac_tools, memory_tools, pim
+from veronica.tools import system as system_tools, memory_tools, pim
 from veronica.tools.timers import TimerService
 
 
@@ -129,7 +129,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
 
     async def _battery() -> tuple[int | None, str | None]:
         # pmset shells out: off the loop, like the battery quick reply.
-        return await asyncio.to_thread(mac_tools.read_battery)
+        return await asyncio.to_thread(system_tools.read_battery)
 
     pro = None
     if audio:

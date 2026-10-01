@@ -49,7 +49,7 @@ from veronica.config import Settings
 from veronica.speech import voices
 from veronica.speech.stt import stt_spec
 from veronica.brain.sentences import has_devanagari
-from veronica.tools import mac as mac_tools
+from veronica.tools import system as system_tools
 from veronica.tools import music as music_tools
 from veronica.tools import pim as pim_tools
 from veronica.tools import registry
@@ -1774,10 +1774,10 @@ class Orchestrator:
         # mode ("shukriya" -> "कोई बात नहीं।"), so voice it in Hindi too.
         lang = reply if kind in ("battery", "volume") else quick.reply_lang(heard, self._utterance_lang)
         if kind == "battery":
-            percent, state = await asyncio.to_thread(mac_tools.read_battery)
+            percent, state = await asyncio.to_thread(system_tools.read_battery)
             reply = quick.reply_for("battery", lang, percent=percent, state=state)
         elif kind == "volume":
-            res = await mac_tools.volume_get.handler({})
+            res = await system_tools.volume_get.handler({})
             try:
                 percent = None if res.get("is_error") else int(float(res["content"][0]["text"].strip()))
             except (ValueError, KeyError, IndexError, TypeError):
@@ -1920,7 +1920,7 @@ class Orchestrator:
                 if not typed_any:
                     self._emit("tool", {"summary": "Dictate text", "decision": "auto"})
                 chunk = text if not typed_any else f" {text}"
-                res = await asyncio.to_thread(mac_tools.dictate_type, chunk)
+                res = await asyncio.to_thread(system_tools.dictate_type, chunk)
                 if res.get("is_error"):
                     failed = True
                     break

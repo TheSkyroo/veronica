@@ -13,7 +13,7 @@ from mcp.types import CallToolRequestParams
 from veronica.brain.gate import GateServer, ToolGate
 from veronica.config import Settings
 from veronica.tools import (
-    browser, computer, mac, memory_tools, music, pim, registry, screen, serve,
+    browser, computer, memory_tools, music, pim, registry, screen, serve, system,
 )
 from veronica.tools.timers import TimerService
 
@@ -31,7 +31,7 @@ def app_side(monkeypatch):
     """Give the registry its own server objects. In the app the proxy lives
     in another process; in one process it and the registry would share the
     module-level instances, and the proxy would end up calling itself."""
-    mods = {"mac": mac, "pim": pim, "memory": memory_tools, "screen": screen,
+    mods = {"system": system, "pim": pim, "memory": memory_tools, "screen": screen,
             "music": music, "browser": browser, "computer": computer}
     monkeypatch.setattr(registry, "SERVERS",
                         {n: create_sdk_mcp_server(n, tools=m.TOOLS) for n, m in mods.items()})
@@ -41,7 +41,7 @@ def app_side(monkeypatch):
 def _restore_handlers():
     # gated_server wraps the module-level servers in place; put them back.
     saved = [(serve.server_for(n), serve.server_for(n).get_request_handler("tools/call"))
-             for n in ("mac", "pim", "screen")]
+             for n in ("system", "pim", "screen")]
     yield
     for inst, entry in saved:
         inst.add_request_handler("tools/call", entry.params_type, entry.handler)
@@ -79,7 +79,7 @@ async def test_a_timer_set_through_an_external_brain_fires(sock, monkeypatch):
     async def no_banner(args):
         return {"content": []}
 
-    monkeypatch.setattr(mac.notify, "handler", no_banner)      # no real notification in a test
+    monkeypatch.setattr(system.notify, "handler", no_banner)      # no real notification in a test
     monkeypatch.setattr(pim, "service", TimerService(on_fire=announce))
     res = await proxy_call(sock, monkeypatch, "pim", "timer_set", {"minutes": 0.0001, "label": "tea"})
     assert not res.is_error and res.content[0].text.startswith("Timer set for")
@@ -102,8 +102,8 @@ async def test_a_screenshot_comes_back_as_an_image_over_the_socket(sock, monkeyp
 
 async def test_a_denied_call_never_reaches_the_tool(sock, monkeypatch):
     ran = []
-    monkeypatch.setattr(mac, "run", lambda *a, **k: ran.append(a))
-    res = await proxy_call(sock, monkeypatch, "mac", "clipboard_write", {"text": "hi"}, answers=(False,))
+    monkeypatch.setattr(system, "run", lambda *a, **k: ran.append(a))
+    res = await proxy_call(sock, monkeypatch, "system", "clipboard_write", {"text": "hi"}, answers=(False,))
     assert res.is_error and "Not allowed" in res.content[0].text and ran == []
 
 

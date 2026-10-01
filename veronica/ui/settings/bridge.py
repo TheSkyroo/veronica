@@ -71,7 +71,7 @@ HUD_CONFIG_KEYS = ("hud_particles", "hud_intensity")
 # (policy.AUTO_ALLOWABLE — a test pins the two to each other), in the order
 # they're shown, with the plain-English name beside each.
 AUTO_ALLOW_LABELS: dict[str, str] = {
-    "mcp__mac__clipboard_write": "Copy to the clipboard",
+    "mcp__system__clipboard_write": "Copy to the clipboard",
     "mcp__pim__calendar_create": "Create a calendar event",
     "mcp__pim__reminder_create": "Create a reminder",
     "mcp__memory__fact_add": "Remember a fact",

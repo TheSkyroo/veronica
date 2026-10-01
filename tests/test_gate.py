@@ -35,25 +35,25 @@ def make(answers, *, front=FINDER, now=None, said=None, **settings):
 
 async def test_allow_class_is_auto_without_asking():
     g, calls, cards = make([])
-    d = await g.decide("mcp__mac__volume_get", {})
+    d = await g.decide("mcp__system__volume_get", {})
     assert d.allow and d.kind == "auto" and calls == [] and cards == [("volume_get", "auto")]
 
 
 async def test_confirm_class_asks_and_yes_allows():
     g, calls, _ = make([True])
-    d = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    d = await g.decide("mcp__system__clipboard_write", {"text": "hi"})
     assert d.allow and d.kind == "approved" and calls[0][0] == "Copy to clipboard: hi"
 
 
 async def test_no_denies_with_user_declined():
     g, _, _ = make([False])
-    d = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    d = await g.decide("mcp__system__clipboard_write", {"text": "hi"})
     assert not d.allow and d.kind == "denied" and d.message == "user declined"
 
 
 async def test_other_answer_becomes_redirect():
     g, _, _ = make([ConfirmResult("other", "open it in the other profile")])
-    d = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    d = await g.decide("mcp__system__clipboard_write", {"text": "hi"})
     assert not d.allow and d.kind == "other"
     assert d.message == "user declined and said: 'open it in the other profile'"
     assert g.pending_redirect == "open it in the other profile"
@@ -85,9 +85,9 @@ async def test_preapproval_covers_first_confirm_call_only():
     g, calls, cards = make([True], now=now)
     g.begin_turn(7)
     g.preapprove(7, until=30.0)
-    d1 = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    d1 = await g.decide("mcp__system__clipboard_write", {"text": "hi"})
     assert d1.allow and d1.kind == "preapproved" and calls == [] and cards[-1] == ("Copy to clipboard: hi", "preapproved")
-    d2 = await g.decide("mcp__mac__clipboard_write", {"text": "yo"})
+    d2 = await g.decide("mcp__system__clipboard_write", {"text": "yo"})
     assert d2.allow and d2.kind == "approved" and len(calls) == 1
 
 
@@ -101,21 +101,21 @@ async def test_preapproval_never_for_always_confirm():
 
 async def test_allowlisted_shortcut_runs_without_asking():
     g, calls, cards = make([], shortcut_allowlist=["Morning", "Pay Rent"])
-    d = await g.decide("mcp__mac__run_shortcut", {"name": "morning"})
+    d = await g.decide("mcp__system__run_shortcut", {"name": "morning"})
     assert d.allow and d.kind == "auto" and calls == []
     assert cards[-1] == ("Run the shortcut 'morning'", "auto")
 
 
 async def test_unlisted_shortcut_asks():
     g, calls, _ = make([True], shortcut_allowlist=["Morning"])
-    d = await g.decide("mcp__mac__run_shortcut", {"name": "Wipe Disk"})
+    d = await g.decide("mcp__system__run_shortcut", {"name": "Wipe Disk"})
     assert d.allow and d.kind == "approved"
     assert calls[0][0] == "Run the shortcut 'Wipe Disk'"
 
 
 async def test_shortcuts_ask_by_default():
     g, calls, _ = make([True])
-    assert (await g.decide("mcp__mac__run_shortcut", {"name": "Morning"})).kind == "approved"
+    assert (await g.decide("mcp__system__run_shortcut", {"name": "Morning"})).kind == "approved"
     assert len(calls) == 1
 
 
@@ -152,16 +152,16 @@ async def test_message_send_to_an_unknown_name_is_handed_back():
 
 async def test_an_allowed_call_that_errors_reports_failed():
     g, _, cards = make([])
-    await g.decide("mcp__mac__volume_get", {})
-    g.tool_result("mcp__mac__volume_get", {}, True)
+    await g.decide("mcp__system__volume_get", {})
+    g.tool_result("mcp__system__volume_get", {}, True)
     assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
 
 
 async def test_a_successful_call_reports_nothing_more():
     g, _, cards = make([])
-    await g.decide("mcp__mac__volume_get", {})
-    g.tool_result("mcp__mac__volume_get", {}, False)
-    g.tool_result("mcp__mac__volume_get", {}, True)      # already settled: ignored
+    await g.decide("mcp__system__volume_get", {})
+    g.tool_result("mcp__system__volume_get", {}, False)
+    g.tool_result("mcp__system__volume_get", {}, True)      # already settled: ignored
     assert cards == [("volume_get", "auto")]
 
 
@@ -169,8 +169,8 @@ async def test_a_denied_call_error_is_not_a_failure():
     """A deny comes back to the model as an error result too; that step is
     already 'declined', never 'failed'."""
     g, _, cards = make([False])
-    await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
-    g.tool_result("mcp__mac__clipboard_write", {"text": "hi"}, True)
+    await g.decide("mcp__system__clipboard_write", {"text": "hi"})
+    g.tool_result("mcp__system__clipboard_write", {"text": "hi"}, True)
     assert cards == []
 
 
@@ -214,10 +214,10 @@ async def test_gate_server_allow_and_deny(sock):
     try:
         assert (sock).stat().st_mode & 0o777 == 0o600
         ok = await _roundtrip(sock,
-                              {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "a"}, "origin": "mcp", "backend": "codex"})
+                              {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "a"}, "origin": "mcp", "backend": "codex"})
         assert ok == {"allow": True, "kind": "approved", "reason": ""}
         no = await _roundtrip(sock,
-                              {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "b"}, "origin": "hook", "backend": "codex"})
+                              {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "b"}, "origin": "hook", "backend": "codex"})
         assert no == {"allow": False, "kind": "denied", "reason": "user declined"}
     finally:
         await srv.stop()
@@ -230,7 +230,7 @@ async def test_gate_server_allow_class_needs_no_confirm(sock):
     await srv.start()
     try:
         ok = await _roundtrip(sock,
-                              {"v": 1, "tool": "mcp__mac__volume_get", "input": {}, "origin": "mcp", "backend": "codex"})
+                              {"v": 1, "tool": "mcp__system__volume_get", "input": {}, "origin": "mcp", "backend": "codex"})
         assert ok == {"allow": True, "kind": "auto", "reason": ""} and calls == []
     finally:
         await srv.stop()
@@ -265,8 +265,8 @@ async def test_gate_server_serializes_confirms(sock):
     await srv.start()
     try:
         await asyncio.gather(
-            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "A"}, "origin": "mcp", "backend": "x"}),
-            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "B"}, "origin": "mcp", "backend": "x"}),
+            _roundtrip(sock, {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "A"}, "origin": "mcp", "backend": "x"}),
+            _roundtrip(sock, {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "B"}, "origin": "mcp", "backend": "x"}),
         )
     finally:
         await srv.stop()
@@ -286,7 +286,7 @@ def runner(log_to, content=None, *, delay=0.0):
     return run_tool
 
 
-CALL = {"v": 1, "op": "call", "tool": "mcp__mac__clipboard_write",
+CALL = {"v": 1, "op": "call", "tool": "mcp__system__clipboard_write",
         "input": {"text": "a"}, "origin": "mcp", "backend": "codex"}
 
 
@@ -301,7 +301,7 @@ async def test_call_runs_the_tool_here_after_a_yes(sock):
         await srv.stop()
     assert resp == {"allow": True, "kind": "approved", "reason": "",
                     "content": [{"type": "text", "text": "ran"}], "is_error": False}
-    assert ran == [("mcp__mac__clipboard_write", {"text": "a"})]
+    assert ran == [("mcp__system__clipboard_write", {"text": "a"})]
 
 
 async def test_call_shows_exactly_one_hud_card(sock):
@@ -310,7 +310,7 @@ async def test_call_shows_exactly_one_hud_card(sock):
     srv = GateServer(g, sock, run_tool=runner([]))
     await srv.start()
     try:
-        await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+        await _roundtrip(sock, dict(CALL, tool="mcp__system__volume_get", input={}))
     finally:
         await srv.stop()
     assert cards == [("volume_get", "auto")]
@@ -362,7 +362,7 @@ async def test_a_tool_that_blows_up_is_an_error_not_a_dropped_call(sock):
     srv = GateServer(g, sock, run_tool=boom)
     await srv.start()
     try:
-        resp = await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+        resp = await _roundtrip(sock, dict(CALL, tool="mcp__system__volume_get", input={}))
     finally:
         await srv.stop()
     assert resp["allow"] and resp["is_error"] and "kaboom" in resp["content"][0]["text"]
@@ -373,7 +373,7 @@ async def test_a_call_whose_tool_errors_reports_failed(sock):
     srv = GateServer(g, sock, run_tool=runner([], ([{"type": "text", "text": "error: no"}], True)))
     await srv.start()
     try:
-        await _roundtrip(sock, dict(CALL, tool="mcp__mac__volume_get", input={}))
+        await _roundtrip(sock, dict(CALL, tool="mcp__system__volume_get", input={}))
     finally:
         await srv.stop()
     assert cards == [("volume_get", "auto"), ("volume_get", "failed")]
@@ -401,7 +401,7 @@ async def test_a_slow_tool_does_not_block_an_unrelated_confirm(sock):
     try:
         await asyncio.gather(
             _roundtrip(sock, CALL),
-            _roundtrip(sock, {"v": 1, "tool": "mcp__mac__clipboard_write",
+            _roundtrip(sock, {"v": 1, "tool": "mcp__system__clipboard_write",
                               "input": {"text": "B"}, "origin": "mcp", "backend": "x"}),
         )
     finally:
@@ -433,8 +433,8 @@ def saved(monkeypatch):
 
 
 async def test_an_auto_allowed_tool_runs_without_asking():
-    g, calls, cards = make([], auto_allow_tools=["mcp__mac__clipboard_write"])
-    d = await g.decide("mcp__mac__clipboard_write", {"text": "hi"})
+    g, calls, cards = make([], auto_allow_tools=["mcp__system__clipboard_write"])
+    d = await g.decide("mcp__system__clipboard_write", {"text": "hi"})
     assert d.allow and d.kind == "auto" and calls == []
     assert cards == [("Copy to clipboard: hi", "auto")]   # HUD wire value unchanged
 
@@ -447,7 +447,7 @@ async def test_the_shipped_default_auto_allows_clipboard_write():
         return True
 
     g = ToolGate(Settings(), confirm)
-    assert (await g.decide("mcp__mac__clipboard_write", {"text": "hi"})).kind == "auto"
+    assert (await g.decide("mcp__system__clipboard_write", {"text": "hi"})).kind == "auto"
     assert calls == []
 
 
@@ -476,10 +476,10 @@ async def test_always_approves_and_remembers_an_eligible_tool(saved):
 
 async def test_always_keeps_what_is_already_on_the_list(saved):
     g, _, _ = make([ConfirmResult("approved", "always", always=True)],
-                   auto_allow_tools=["mcp__mac__clipboard_write"])
+                   auto_allow_tools=["mcp__system__clipboard_write"])
     await g.decide("mcp__memory__fact_add", {"text": "x"})
-    assert g.s.auto_allow_tools == ["mcp__mac__clipboard_write", "mcp__memory__fact_add"]
-    assert saved[-1] == ("auto_allow_tools", ["mcp__mac__clipboard_write", "mcp__memory__fact_add"])
+    assert g.s.auto_allow_tools == ["mcp__system__clipboard_write", "mcp__memory__fact_add"]
+    assert saved[-1] == ("auto_allow_tools", ["mcp__system__clipboard_write", "mcp__memory__fact_add"])
 
 
 async def test_a_plain_yes_remembers_nothing(saved):
@@ -490,7 +490,7 @@ async def test_a_plain_yes_remembers_nothing(saved):
 
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
-    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
     ("Bash", {"command": "rm -rf /tmp/x"}),
 ])
 async def test_always_on_an_ineligible_tool_approves_once_and_says_so(saved, tool, inp):
@@ -517,9 +517,9 @@ async def test_always_on_a_screen_action_approves_once_and_says_so(saved):
 @pytest.mark.parametrize("tool, inp", [
     ("mcp__pim__mail_send", {"to": "a@b.c", "subject": "x", "body": "y"}),
     ("mcp__pim__message_send", {"to": "Priya", "body": "hi"}),
-    ("mcp__mac__applescript", {"script": "delete everything"}),
+    ("mcp__system__applescript", {"script": "delete everything"}),
     ("mcp__computer__computer_click", {"x": 1, "y": 2}),
-    ("mcp__mac__run_shortcut", {"name": "Wipe Disk"}),
+    ("mcp__system__run_shortcut", {"name": "Wipe Disk"}),
 ])
 async def test_a_hand_typed_ineligible_tool_is_asked_every_single_time(tool, inp):
     # trust window off, so nothing but the auto-allow list is under test

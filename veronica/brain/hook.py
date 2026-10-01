@@ -36,7 +36,7 @@ READONLY_TOOLS = {"read_file", "view", "glob", "grep", "list_directory", "find",
 # Where each CLI puts the one string that identifies a native call: the
 # command line, else the file. Same order on both sides of the canary.
 _KEY_FIELDS = ("command", "CommandLine", "file_path", "TargetFile", "AbsolutePath", "path")
-OUR_SERVERS = ("mac", "pim", "memory", "screen", "music", "browser", "computer")
+OUR_SERVERS = ("system", "pim", "memory", "screen", "music", "browser", "computer")
 
 # Vendor tool name -> what the gate (policy.classify) knows how to judge.
 CANONICAL: dict[str, str] = (
@@ -48,12 +48,12 @@ CANONICAL: dict[str, str] = (
 
 
 def _ours(tool_name: str) -> str | None:
-    """'mcp__veronica-mac__open_app' / 'veronica-mac__open_app' /
-    'veronica-mac-open_app' (Copilot joins server and tool with '-') ->
-    'mcp__mac__open_app'. The `veronica-` prefix is required: every backend
+    """'mcp__veronica-system__open_app' / 'veronica-system__open_app' /
+    'veronica-system-open_app' (Copilot joins server and tool with '-') ->
+    'mcp__system__open_app'. The `veronica-` prefix is required: every backend
     registers our servers under it, so a bare `memory__…` / `browser__…` can
     only be the user's own MCP server and has to go through the gate. Codex
-    sanitises the server name in its hook payload, so `veronica_mac__…`
+    sanitises the server name in its hook payload, so `veronica_system__…`
     counts too (verified live against codex 0.155)."""
     t = tool_name.removeprefix("mcp__")
     if t.startswith("veronica_"):

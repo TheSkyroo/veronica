@@ -56,7 +56,7 @@ MAX_TOOL_ROUNDS = 4
 # catalogue: every one is either a catch-all or needs judgement the bigger
 # brains have. Hiding them changes nothing about the gate — they are simply
 # not offered.
-HIDDEN_FROM_LOCAL = frozenset({"mcp__mac__applescript"})
+HIDDEN_FROM_LOCAL = frozenset({"mcp__system__applescript"})
 HIDDEN_SERVERS_FOR_LOCAL = frozenset({"computer"})
 # History budget. Rough on purpose: a token is ~3.5 characters of English,
 # and the system prompt, the 40-odd tool schemas and the reply need most of

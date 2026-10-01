@@ -49,10 +49,10 @@ def _serve_once(path, reply):
 
 def test_ask_gate_allow(sock):
     t, box = _serve_once(sock, {"allow": True, "kind": "approved", "reason": ""})
-    d = ask_gate("mcp__mac__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
+    d = ask_gate("mcp__system__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
     t.join(2)
     assert d.allow and d.kind == "approved"
-    assert box["req"] == {"v": 1, "tool": "mcp__mac__clipboard_write", "input": {"text": "hi"}, "origin": "mcp",
+    assert box["req"] == {"v": 1, "tool": "mcp__system__clipboard_write", "input": {"text": "hi"}, "origin": "mcp",
                           "backend": "codex", "budget": gateclient.GATE_ANSWER_BUDGET_S}
 
 
@@ -158,7 +158,7 @@ def test_call_gate_returns_the_tools_content(sock):
 def test_call_gate_deny_has_no_content(sock):
     t, _ = _serve_once(sock, {"allow": False, "kind": "denied", "reason": "user declined"})
     d, content, is_error = gateclient.call_gate(
-        "mcp__mac__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
+        "mcp__system__clipboard_write", {"text": "hi"}, origin="mcp", backend="codex", sock=str(sock))
     t.join(2)
     assert not d.allow and d.message == "user declined" and content == [] and is_error
 
