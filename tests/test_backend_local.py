@@ -363,11 +363,11 @@ async def test_arguments_arrive_in_pieces(tmp_path, monkeypatch):
     server = FakeToolServer()
     fake_catalog(monkeypatch, server, names=("mcp__system__open_app",))
     brain, *_ = make_brain(tmp_path, rounds=[
-        [tool_delta(0, "mcp__system__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Safari"}')],
+        [tool_delta(0, "mcp__system__open_app", '{"name":', "c1"), tool_delta(0, None, ' "Microsoft Edge"}')],
         [sse(content="Opened.")],
     ])
-    await drain(brain, "open safari")
-    assert server.calls == [("open_app", {"name": "Safari"})]
+    await drain(brain, "open edge")
+    assert server.calls == [("open_app", {"name": "Microsoft Edge"})]
     await brain.close()
 
 

@@ -1,6 +1,6 @@
 r"""GitHub Copilot CLI (`copilot` 1.0.86) as a Veronica brain.
 
-How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19; the
+How it runs (verified against copilot 1.0.86 on macOS, 2026-09-19 — recheck on Windows; the
 Windows specifics are noted where they differ):
 - One `copilot -p <prompt> --output-format json --silent --no-ask-user`
   child per turn (`per_turn`), stdin closed. The stream is JSONL with

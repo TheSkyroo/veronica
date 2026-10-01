@@ -1,6 +1,6 @@
 """Codex (`codex` 0.155.1) as a Veronica brain.
 
-How it runs (verified against codex 0.155 on macOS, 2026-09-19; the
+How it runs (verified against codex 0.155 on macOS, 2026-09-19 — recheck on Windows; the
 Windows specifics below follow the same contract and are noted where they
 differ):
 - One `codex exec --json` child per turn (`per_turn`), the prompt last

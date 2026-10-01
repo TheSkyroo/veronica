@@ -1,14 +1,23 @@
 # Veronica
 
-macOS voice assistant. Say "Hey Veronica" once you have trained the custom model (see scripts/train_wakeword.md); until then say "Hey Jarvis", ask, listen.
+Voice assistant for **Windows 10/11**. Say "Veronica …" (or "Hey Jarvis" with the openwakeword engine until you
+train a custom model — see scripts/train_wakeword.md), ask, listen.
 Brain = Codex, Antigravity, Claude or Copilot, each through its own CLI login (no API keys; see Brains below).
 Speech = local (faster-whisper + Kokoro).
 
 ## Setup
-    brew install uv portaudio
-    uv venv --python 3.12 && uv pip install -e ".[dev]"
+
+In PowerShell:
+
+    winget install astral-sh.uv Git.Git OpenJS.NodeJS.LTS
+    git clone https://github.com/TheSkyroo/veronica; cd veronica
+    uv venv --python 3.12; uv pip install -e ".[dev]"
     uv run python scripts/download_models.py
-    npm i -g @openai/codex && codex login    # the default brain; others under Brains below
+    npm i -g @openai/codex; codex login    # the default brain; others under Brains below
+    uv run python -m veronica              # tray app (see Run / Install as an app below)
+
+PortAudio ships inside the `sounddevice` wheel, so there is nothing else to install for audio. The HUD and
+Settings windows use Microsoft Edge WebView2, which Windows 10/11 already has.
 
 Wake word: say "Veronica" or "hey Veronica" (whisper engine, default). To use the lighter openwakeword engine set VERONICA_WAKE_ENGINE=openwakeword (falls back to "hey jarvis" until you train a custom model — see scripts/train_wakeword.md).
 
@@ -17,7 +26,8 @@ Wake word not triggering? Run `uv run python scripts/wake_scores.py`, say the ph
 Do not set `ANTHROPIC_API_KEY` (or any other vendor key) — every brain uses the login of its own CLI (`codex login`,
 `agy`, `claude`, `copilot login`); keys are ignored if set.
 
-- macOS will ask for Microphone access for your terminal app on first run (System Settings → Privacy & Security → Microphone).
+- Windows must allow desktop apps to use the microphone: **Settings → Privacy & security → Microphone → Let desktop
+  apps access your microphone** (Settings → General → "Microphone Privacy…" jumps there).
 - First run downloads the whisper `small.en` model (~470 MB). Hindi mode needs the multilingual `small`/`tiny`
   models too (~500 MB more) — fetched the first time you say "speak hindi", or ahead of time with
   `uv run python scripts/download_models.py --hindi`.
@@ -27,8 +37,8 @@ Do not set `ANTHROPIC_API_KEY` (or any other vendor key) — every brain uses th
   else you say is treated as a new request and the remainder is dropped; "stop" / "that's all" still cancels.
 - If a slow answer leaves her silent for more than 3.5 s she says "On it." once (Settings → Listening, or
   `VERONICA_ACK_AFTER_S`; 0 turns it off).
-- Risky actions (writing files, shell commands that change things, AppleScript, clipboard writes) ask "Run …?" — answer "yes" or "no".
-- A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. Disable with VERONICA_HUD_ENABLED=false.
+- Risky actions (writing files, shell commands that change things, PowerShell scripts, clipboard writes) ask "Run …?" — answer "yes" or "no".
+- A floating HUD appears at the top-right when Veronica wakes (orb + transcript + tool activity) and fades after 3 s of idle. It never takes keyboard focus from the app you're in. Disable with VERONICA_HUD_ENABLED=false.
 - The HUD can be dragged anywhere on screen (click and drag its background) — it reopens wherever you left it.
 
 ## Using Veronica
@@ -46,7 +56,7 @@ The HUD's status line under the orb shows what she's doing:
 - **Speaking** — she's talking.
 - **Say yes or no** — she's asked for confirmation before a risky action and is listening for your answer; the
   question itself appears above, and the mic-level bar is still shown while she listens for it. During a
-  confirmation, anything that isn't yes/no is taken as your next request ("no, open it in Safari instead",
+  confirmation, anything that isn't yes/no is taken as your next request ("no, open it in Edge instead",
   "what will that do?"): the action is skipped and she answers that instead. Silence skips it too.
 - **Error** — something went wrong; check the log.
 
@@ -54,8 +64,8 @@ The HUD's status line under the orb shows what she's doing:
 it", "open chrome and go ahead", "add the reminder without asking", "haan kar do abhi" — she skips the yes/no for
 the **one** action that request produces (the HUD shows it with a gold "pre-approved" pill). It's one-shot and
 short-lived (20 s, the first confirmable action of that request only); a second action in the same request is
-asked as usual, and the pre-approval never covers sending mail or messages, `rm -r`, force-pushes, shutdown /
-restart / sleep, `sudo`, pressing Enter, typing into a terminal, or anything on a system dialog — those are
+asked as usual, and the pre-approval never covers sending mail, `rm -r` / `Remove-Item -Recurse`, force-pushes, shutdown /
+restart / sleep, running as administrator, pressing Enter, typing into a terminal, or anything on a system dialog — those are
 confirmed every time, however you phrase it. A bare "do it" or "yes" is an answer, not a request, and a question
 ("should I do it?") never pre-approves. Turn it off in **Settings → Brain → Pre-approve when I say "do it"**.
 
@@ -67,7 +77,7 @@ as anything else that runs without asking. Seven tools are eligible, and **only*
 
 | Tool | What it does |
 | --- | --- |
-| `mcp__mac__clipboard_write` | Copy to the clipboard — **ticked by default** |
+| `mcp__system__clipboard_write` | Copy to the clipboard — **ticked by default** |
 | `mcp__pim__calendar_create` | Create a calendar event |
 | `mcp__pim__reminder_create` | Create a reminder |
 | `mcp__memory__fact_add` | Remember a fact |
@@ -75,8 +85,8 @@ as anything else that runs without asking. Seven tools are eligible, and **only*
 | `mcp__browser__browser_click` | Click in the browser |
 | `mcp__browser__browser_type` | Type in the browser (including a typed Enter) |
 
-**Destructive tools can never be added**, whichever way you try. Sending mail or messages, AppleScript, every
-screen-control action (`mcp__computer__*`), running a Shortcut and the shell are not on the list, so saying
+**Destructive tools can never be added**, whichever way you try. Sending mail, PowerShell, every
+screen-control action (`mcp__computer__*`) and the shell are not on the list, so saying
 "always" to one of them approves that single call and she answers "That one I'll always ask about." Typing one
 into the free-form field by hand does nothing either: `policy.classify` only honours names in
 `policy.AUTO_ALLOWABLE`, and `policy.always_confirm` is checked first, so a hand-typed `mcp__pim__mail_send` or
@@ -87,7 +97,7 @@ revoking: untick one, or clear the field, and she starts asking again immediatel
 
 While she's listening, the HUD also shows a live partial transcript of what you're saying (in italics), which is
 replaced by the final transcript once you finish talking. This costs a bit of CPU; disable it with
-`VERONICA_PARTIAL_STT=false` in `.env` to save power on slower Macs.
+`VERONICA_PARTIAL_STT=false` in `.env` to save power on slower PCs.
 
 She stops listening rather than eavesdropping indefinitely: the follow-up window after a reply is short (4 s by
 default — set `VERONICA_FOLLOWUP_WINDOW_S` in `.env` to change it), and if that follow-up capture comes back empty
@@ -103,7 +113,7 @@ other command — with or without "Veronica"/"hey Veronica" first, optionally en
 
 - **Mini mode** — "shrink", "make yourself smaller", "minimize", "mini mode", "small mode", "go small": collapses
   the HUD to a compact bar (a small orb plus a single-line caption pill showing what's being heard or said), which
-  defaults to a notch-style position centered under the menu bar rather than the full card's top-right corner.
+  defaults to the top centre of the screen rather than the full card's top-right corner.
 - **Full mode** — "expand", "make yourself bigger", "full mode", "show details", "go big": returns to the full card
   layout (transcript, reply, tool activity).
 - **Hide** — "hide", "hide yourself", "hide the hud", "hide the panel": hides the HUD immediately and goes idle.
@@ -117,7 +127,7 @@ A turn that runs more than one tool shows them in the full card as a checklist: 
 built-in tool, such as their own shell, reports no result to Veronica, so its step only ever shows done.)
 
 The current mode (and the last dragged position) persists across restarts in `~/.veronica/prefs.json`. You can also
-switch modes from the menu bar item ("HUD: Mini" / "HUD: Full" toggles it).
+switch modes from the tray menu ("HUD: Mini" / "HUD: Full" toggles it).
 
 ### Mute, unmute, quit
 
@@ -142,19 +152,19 @@ one is active. Every brain uses the vendor CLI's own login — there are no API 
 | Brain | What it is | Install | Log in |
 | --- | --- | --- | --- |
 | **Codex** (default) | OpenAI's `codex` CLI, on your ChatGPT plan | `npm i -g @openai/codex` | `codex login` |
-| **Antigravity** | Google's `agy` CLI (Gemini), on your Google account | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | `agy` |
-| **Claude** | Anthropic's `claude` CLI (Claude Code), on your Claude plan | `npm i -g @anthropic-ai/claude-code` | `claude` |
+| **Antigravity** | Google's `agy` CLI (Gemini), on your Google account | the Windows installer from antigravity.google | `agy` |
+| **Claude** | Anthropic's `claude` CLI (Claude Code), on your Claude plan | `npm i -g @anthropic-ai/claude-code` (needs Git for Windows, for Git Bash) | `claude` |
 | **Copilot** | GitHub's `copilot` CLI, on your Copilot plan | `npm i -g @github/copilot` | `copilot login` |
-| **Local** | llama.cpp on this Mac — no account, no network | a `llama-server` binary and a `.gguf` | — |
+| **Local** | llama.cpp on this PC — no account, no network | a `llama-server.exe` binary and a `.gguf` | — |
 
 Only the brains that are installed *and* logged in are offered; the check is local and cheap (the binary on
 `PATH` plus the file the login writes — `~/.codex/auth.json`, `~/.copilot/config.json`, Antigravity's
-`~/.gemini/antigravity-cli/conversations` or its Keychain item; Claude reports a missing login itself). An
+`~/.gemini/antigravity-cli/conversations` or its Windows Credential Manager entry; Claude reports a missing login itself). An
 unavailable one is spoken as "Codex isn't installed — run npm i -g @openai/codex, then codex login." or "Codex
 isn't logged in — run codex login in a terminal."
 
 **Choosing one.** The preferred brain is **Settings → Brain → Brain** (`brain_backend`, default `codex`, live — no
-restart). The menu bar has a **Brain: Codex** submenu with one radio item per brain (unavailable ones read
+restart). The tray menu has a **Brain: Codex** submenu with one radio item per brain (unavailable ones read
 "Copilot (not installed)" / "(not logged in)" and are disabled). By voice, without a brain round-trip: "switch to
 codex", "use antigravity", "use copilot", "back to claude" / "go back to claude", "switch brain to codex",
 "codex pe switch karo", "copilot use karo"; she answers "Switched to Codex." or "Already on Codex." (or the
@@ -165,14 +175,14 @@ left off. The HUD's status area shows "Brain: Codex" and the settings page's Bra
 
 **The confirm gate applies to every brain.** Two paths, one gate:
 
-- *Veronica's tools* (`mac`, `pim` for calendar/mail/reminders/timers, `memory`, `screen`, `music`, `browser`,
+- *Veronica's tools* (`system`, `pim` for calendar/mail/tasks/notes/timers, `memory`, `screen`, `music`, `browser`,
   `computer`) are served to an external brain as MCP servers over stdio (`python -m veronica.tools.serve <name>`,
   registered as `veronica-<name>`). That process is only a proxy: each call goes to the app's gate socket
-  (`~/.veronica/gate.sock`), which asks the same question the in-process gate asks Claude — policy, trust window,
+  (a loopback port with a per-start token, published in `~/.veronica/run/gate.json`), which asks the same question the in-process gate asks Claude — policy, trust window,
   pre-approval, voice confirm — so "Run …?" sounds and behaves exactly the same, and then **runs the tool inside
-  the app** and sends the result (text, or the screenshot's image) back. That last part matters: macOS attributes
-  what a helper process does to the CLI that spawned it, so a capture, a key press or an Apple Event issued from
-  the stdio child would be checked against permissions the CLI was never granted. Running it in the app is also
+  the app** and sends the result (text, or the screenshot's image) back. That last part matters: the app process is the one
+  with the foreground rights, the account sign-ins and the audio session, which a helper the CLI spawned (often a
+  hidden console process) doesn't have. Running it in the app is also
   why a timer set through an external brain announces like any other.
 - *The CLI's own shell and file edits* (Codex's `Bash`/`apply_patch`, Antigravity's `run_command`, Copilot's `bash`)
   run with the vendor's own approvals turned off and Veronica's **pre-tool hook** as the only gate: the hook logs
@@ -207,7 +217,7 @@ says "No brain is ready — log into Codex, Antigravity or Claude."
 
 ### Offline
 
-The **Local** brain is a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` running on this Mac,
+The **Local** brain is a [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server.exe` running on this PC,
 with a quantised model file. Nothing leaves the machine: no account, no login, no network call, not even to
 check for one.
 
@@ -217,8 +227,8 @@ ten minutes pass without a turn — a model load costs seconds, so it is worth k
 listening on that port is used as-is rather than replaced.
 
 **Settings → Brain → Offline:** *Use the local model when offline* (`brain_offline_fallback`, default on),
-*Local model* (`local_model`, default `~/Github/sih/manas/models/granite-4.2-3b-q4_k_m.gguf` — small, fast and
-instruction-tuned), *Local server* (`local_server_bin`, default `~/Github/sih/manas/runtime/bin/llama-server`),
+*Local model* (`local_model`, default `%USERPROFILE%\.veronica\models\granite-4.2-3b-q4_k_m.gguf` — small, fast and
+instruction-tuned), *Local server* (`local_server_bin`, default `%USERPROFILE%\.veronica\llama\llama-server.exe`),
 *Local context (tokens)* (`local_ctx`, default 8192) and *Local port* (`local_port`, default 8749). All live, no
 restart. To think with different weights, pick another model from the *Local model* dropdown (the `.gguf` files
 in the same folder as the current one, without `mmproj-*` projectors, embedding models such as `bge-*`, or the
@@ -234,13 +244,13 @@ as the wire returns. Turn it off with `brain_offline_fallback`. By voice, any ti
 mode" / "use the local model" / "offline ho jao" switches to it, and "go online" / "back online" / "online ho
 jao" hands the next turn back to the first ready vendor brain.
 
-**What it can and cannot do.** Tools: **yes** — Veronica's own tools (mac, calendar/mail/reminders/timers,
+**What it can and cannot do.** Tools: **yes** — Veronica's own tools (system, calendar/mail/tasks/timers,
 memory, music, browser, screen control) are offered to the model as function schemas and run in-process, each
 call through the same confirm gate, with the same HUD cards and the same trust window. The web: **no** — there
 is no search and no fetch, and she is told to say so rather than guess. Screenshots: **no** — the default model
 is text-only, so she says she can't see. A small model that ignores the tool schema simply answers in words;
 that is normal and not an error. Expect a short answer in a handful of seconds, and expect it to be less sharp
-than the hosted brains — it is a three-billion-parameter model on a laptop.
+than the hosted brains — it is a three-billion-parameter model on a PC.
 
 If the server won't start she moves to the next ready brain in the failover order and says so once ("The local
 model wouldn't start — switching to Codex."), re-running the request there; the local model gets another try
@@ -265,22 +275,37 @@ path in Settings.").
 - Each brain's session id, hook log and workspace live under `~/.veronica/backends/<brain>/` (Claude keeps its
   session file where it always was).
 
-## Calendar, mail, reminders, timers
+## Calendar, mail, tasks, notes, timers
 
-Veronica can read your Calendar events, unread Mail, and Reminders, and create events/reminders or send mail (all
-via AppleScript/Apple Events — no OAuth, no cloud account of Veronica's own). She can also set simple in-process
-timers ("set a timer for 5 minutes") that speak and show a notification when they fire, even while she's idle.
+Veronica works with your **Google account**: Google Calendar (every calendar you have ticked in Google Calendar,
+merged), Gmail (unread inbox, search across all mail, sending), Google Tasks (reminders) and Google Docs (notes,
+kept in a "Veronica Notes" folder in your Drive). She can also set simple in-process timers ("set a timer for 5
+minutes") that speak and show a Windows notification when they fire, even while she's idle.
 
-Requirements:
+One-time setup (about five minutes, free):
 
-- The relevant account(s) (iCloud, Gmail, Exchange, …) need to be added in System Settings → Internet Accounts (or
-  already configured in Calendar.app / Mail.app / Reminders.app) — Veronica reads/writes through those apps, not a
-  separate login.
-- The first time she touches Calendar, Mail, or Reminders, macOS shows an automation permission prompt ("Terminal"
-  or the app running Veronica wants to control "Calendar"/"Mail"/"Reminders") — approve it once per app. You can
-  review/reset these under System Settings → Privacy & Security → Automation.
-- Reading (calendar events, unread mail, mail search, reminders due, timers) runs automatically; creating an event
-  or reminder, sending mail, and any raw AppleScript still ask "Run …?" first, same as other risky actions.
+1. At https://console.cloud.google.com create a project.
+2. **APIs & Services → Library**: enable Gmail API, Google Calendar API, Google Tasks API, People API and Google
+   Drive API.
+3. **OAuth consent screen**: External, publishing status "Testing", and add your own Google account as a test user.
+4. **Credentials → Create credentials → OAuth client ID**, type **Desktop app**; download the JSON.
+5. Save it as `%USERPROFILE%\.veronica\google_client.json`.
+6. In Veronica: **Settings → General → Accounts → Connect Google**, sign in in the browser and allow every
+   permission. The token is kept in `%USERPROFILE%\.veronica\google_token.json`; Disconnect revokes and deletes it.
+
+While the app stays in "Testing", Google expires the sign-in after 7 days, so you reconnect weekly; publishing it
+(unverified, for personal use) avoids that. Scopes asked for: calendar.readonly, calendar.events, gmail.readonly,
+gmail.send, tasks, contacts.readonly, contacts.other.readonly (to find "mail Priya" in your contacts) and
+drive.file (Veronica only ever sees the notes she created).
+
+Notes:
+
+- Google Tasks stores a due *date* only and never alerts at a time; a time you give ("remind me at 5") is written
+  into the task as "Due at 17:00" and read back from there.
+- Reading (calendar events, unread mail, mail search, tasks due, timers) runs automatically; creating an event or
+  task and sending mail ask "Run …?" first, same as other risky actions. Mail by name confirms the resolved
+  address ("Send mail to Priya Shah (priya@example.com)").
+- Not connected yet? The tools say so ("Google isn't connected — …") instead of failing silently.
 
 ## Memory
 
@@ -327,35 +352,46 @@ also decide to look at the screen on its own mid-conversation via the `screensho
 automatically). With more than one monitor she captures the display your frontmost window is on (the app's real
 window: helper strips such as Chrome's untitled 115 px-tall one, and small popups in front of the main window,
 don't count); Claude can ask for
-one by number (`display=2`) or for every screen at once (`display=all`), and clicks map back to the right monitor.
-Requires **Screen Recording** access — see Permissions below.
+one by number (`display=2`, the primary display is 1) or for every screen at once (`display=all`), and clicks map back to the right monitor.
+Windows needs no permission for this. Veronica runs per-monitor DPI aware, so screenshots and clicks are in
+real pixels on scaled (125 %, 150 %) and mixed-DPI setups.
 
 ## Browser control
 
-Veronica can read and act on the page you have open in **Chrome** or **Safari**. Say "read this page", "summarize
-this article", "find pricing on this page", "click the login button", "type hello in the search box and press
-enter", or "open a new tab with github" — Claude picks the right browser tool for the request.
+Veronica can read and act on the page you have open in **Google Chrome** or **Microsoft Edge**. Say "read this
+page", "summarize this article", "find pricing on this page", "click the login button", "type hello in the search
+box and press enter", or "open a new tab with github" — the brain picks the right browser tool for the request.
 
-One-time setup, per browser:
+It works through a small extension that ships with Veronica (`veronica\browser_extension`). It keeps your normal
+browser profile and logins, and talks only to Veronica on `127.0.0.1`. One-time setup:
 
-- **Chrome** — menu bar **View ▸ Developer ▸ Allow JavaScript from Apple Events**.
-- **Safari** — enable the Develop menu in **Settings ▸ Advanced**, then **Develop ▸ Allow JavaScript from Apple
-  Events**.
+1. Start Veronica once so it creates `%USERPROFILE%\.veronica\browser_token`.
+2. Chrome: open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick the
+   `veronica\browser_extension` folder. Edge: the same at `edge://extensions` (Developer mode is in the left
+   sidebar).
+3. On the options page that opens, paste the contents of `browser_token` and click Save — it should say
+   "Connected to Veronica."
 
-The first time a browser tool runs, macOS prompts for **Automation** access to the browser — allow it (see
-Permissions below). Reading, listing tabs, opening a URL, finding text, scrolling and going back run automatically;
-**clicking** and **typing** always ask for confirmation first, since they act inside your logged-in session.
+You can install it in both browsers; Veronica acts in whichever one was focused last. The default port is 8765;
+change it with `VERONICA_BROWSER_PORT` and the same number in the extension's options. Reading, listing tabs,
+opening a URL, finding text, scrolling and going back run automatically; **clicking** and **typing** always ask
+for confirmation first, since they act inside your logged-in session. Browser pages (`chrome://`, `edge://`, the
+web stores) are off limits to extensions, so she says she can't reach them.
 
 ## Computer use
 
 Veronica can work the screen directly — any app, not just the browser. She takes a screenshot to see what's there,
 then clicks, double-clicks, right-clicks, drags, scrolls, types and presses key combos. Try "click the Save button",
-"type hello in that box and press enter", "scroll down", "press command S", "double-click the file", or
+"type hello in that box and press enter", "scroll down", "press ctrl S", "double-click the file", or
 "where's the Save button?" (find only — she points, she doesn't click).
 
-**Permission.** Screen control needs **Accessibility** access. The first action prompts for it; Veronica must then
-be enabled under **System Settings → Privacy & Security → Accessibility** (see Permissions below). Until it's
-granted, every action reports the missing permission instead of acting.
+**Opening things.** "Open This PC", "open Downloads", "open the Recycle Bin", "open Bluetooth settings", "open
+Device Manager", "open Control Panel", "open Task Manager" and about eighty other Windows folders, Settings pages and
+system tools open directly; any app in the Start menu (Chrome, Spotify, Calculator, Word …) opens by name.
+
+**Permission.** Windows asks for none. One limit: Windows silently drops clicks and keys aimed at a program running
+**as administrator** (Registry Editor, an elevated terminal, installers) unless Veronica itself runs as
+administrator — she tells you when that's the case instead of clicking into nothing.
 
 **Trust window.** Looking, moving the mouse, scrolling and finding text run automatically. Clicks, drags, typing
 and key presses ask for confirmation — but only once per app: after you say yes, further actions in the **same app**
@@ -364,61 +400,56 @@ different app asks again, the window expires on its own, and it's cleared when y
 answer no. Change the length (or set it to 0 to be asked every time — that also closes a window that's already
 open) in **Settings → Brain → Screen-control trust window**. Two things the window never covers: **pressing Enter**
 (a "type … and press enter" or "press return" is confirmed every time — it submits whatever is in front), and
-**terminals** (Terminal, iTerm2, Warp, kitty, WezTerm, Alacritty, Ghostty — no window opens there and none applies,
+**terminals** (Windows Terminal, PowerShell, Command Prompt, Git Bash, WSL and friends — no window opens there and none applies,
 so every screen action in a terminal is confirmed on its own).
 
-**Safety rules.** She never types into a password field; she refuses combos that quit apps, force-quit, log out,
-lock or restart the Mac (cmd+q, cmd+opt+esc, cmd+ctrl+q and friends). System permission dialogs and **System
-Settings** (any pane) are handled as a last line: every action there needs its own confirmation regardless of
-the trust window, and even once confirmed the tools themselves refuse blind clicks, drags, typing and Enter/Space
-while such a window is frontmost — the only buttons she will click there are Don't Allow / Deny / Cancel / Not
-Now / Close and the like, so she can never press Allow or OK (nor an OCR misread of them) on a permission prompt.
+**Safety rules.** She never types into a password field; she refuses combos that close apps, lock, sign out or
+open the security screen (alt+f4, win+l, ctrl+alt+delete, ctrl+shift+esc, win+x and friends). Windows security
+prompts — User Account Control, credential prompts, SmartScreen, Windows Security — and **Windows Settings** are
+handled as a last line: every action there needs its own confirmation regardless of the trust window, and even
+once confirmed the tools refuse blind clicks, drags, typing and Enter/Space while such a window is in front — the
+only buttons she will click there are No / Don't run / Cancel / Close and the like, so she can never press Yes,
+Allow or Run on a security prompt (UAC's secure desktop can't receive synthetic input anyway).
 
 ## Push-to-talk
 
-Hold **Right Option** (⌥, the key to the right of the spacebar) to talk to Veronica without saying the wake word —
-release it when you're done. Works even while she's speaking (it interrupts her, like saying the wake word does).
-Disable with `VERONICA_PTT_ENABLED=false`, or change the key with `VERONICA_PTT_KEYCODE` (macOS virtual keycode;
-61 is Right Option).
-
-Push-to-talk needs **Input Monitoring** access (prompted on first launch) (see Permissions below). If it isn't granted, the menu bar shows
-"Enable Push-to-talk… (Input Monitoring)" — click it to jump straight to the right System Settings pane.
+Hold **Right Ctrl** to talk to Veronica without saying the wake word — release it when you're done. Works even
+while she's speaking (it interrupts her, like saying the wake word does). Disable with `VERONICA_PTT_ENABLED=false`,
+or change the key with `VERONICA_PTT_KEYCODE` (a Windows virtual-key code; 163 / 0xA3 is Right Ctrl, 165 is Right
+Alt — which is AltGr on many layouts). It's a global low-level keyboard hook, so no permission is needed; if the
+hook can't be installed the tray shows "Push-to-talk unavailable".
 
 ## Music
 
 "Pause" / "pause music", "resume" / "play music", "next song" / "skip", "previous", and "what's playing" control
-Spotify (if it's running) or Music.app (otherwise) directly, no round-trip to Claude. Claude can also control
-playback and search for a track/artist mid-conversation via `music_play`, `music_pause`, `music_next`, `music_prev`,
-`music_now_playing`, and `music_volume` (all allow-class).
+whatever is playing through Windows' media controls — Spotify, a browser tab, any media app — with no round-trip to
+the brain. The brain can also use `music_play`, `music_pause`, `music_next`, `music_prev`, `music_now_playing` and
+`music_volume` (all allow-class).
+
+**"Play <song>" actually plays it:**
+
+- **On Spotify**, when it's connected: the top track (or the artist, for "play Coldplay", or "playlist <name>") starts
+  in your Spotify app — she opens Spotify first if it isn't running. Needs **Spotify Premium** (Spotify only allows
+  playback control on Premium). Setup: at https://developer.spotify.com/dashboard create an app, select "Web API",
+  add the redirect URI `http://127.0.0.1:8898/callback` (exactly `127.0.0.1`, not `localhost`), copy its Client ID
+  into **Settings → General → Accounts → Spotify Client ID**, then **Connect Spotify** and approve in the browser.
+- **On YouTube** otherwise (or on a free Spotify account): she finds the top video for the song and opens it in your
+  browser, where it starts playing. No account needed.
 
 ## Notes & dictation
 
-- **Take a note** — "take a note: buy milk" / "note that the wifi password is abc123": creates a note in Notes.app
-  titled with the first 40 characters of what you said plus a timestamp, and says "Noted."
+- **Take a note** — "take a note: buy milk" / "note that the wifi password is abc123": creates a Google Doc in your
+  "Veronica Notes" Drive folder titled with the first 40 characters of what you said plus a timestamp, and says
+  "Noted." (needs Google connected — see Calendar, mail, tasks, notes, timers).
 - **Dictate** — "dictate" / "start dictation": say "Go ahead.", then listen until you say "stop dictation" or pause
-  for 3 seconds, and types everything you said into whichever app is currently focused (via System Events —
-  requires **Accessibility** access, same as push-to-talk).
+  for 3 seconds, and types everything you said into whichever app is currently focused (Unicode keyboard input, so
+  Hindi works too; not into apps running as administrator).
 
-## Shortcuts & Messages
+## PowerShell
 
-| Tool | Can | Cannot |
-| --- | --- | --- |
-| `mac.run_shortcut` | Run any shortcut installed in Shortcuts.app by name ("run the Morning shortcut"), case-insensitively, with optional text input handed over as a file (`shortcuts run <name> --input-path …`). A shortcut gets 2 minutes. | Create or edit shortcuts, or hand back what one returned — the CLI prints nothing on success, so she just says she ran it. A name that isn't installed is refused ("there's no shortcut called 'Morning' on this Mac") rather than guessed at. |
-| `pim.message_send` | Send one iMessage/SMS through Messages.app to a phone number, an Apple ID, or a contact by name ("message Priya: on my way") — the name is looked up in Contacts. | Read your messages, send attachments, or guess: two Priyas ("Which Priya — Priya Shah or Priya Nair?"), a contact with several numbers, or no match comes back as a question instead of a send. |
-
-**Which shortcuts run without asking.** Every shortcut is confirm-class by default — a shortcut is a program you
-wrote, and Veronica can't see what's in it. Settings → Brain → "Shortcuts she may run without asking" is a
-comma-separated list of names (empty out of the box); a shortcut whose name is on that list runs straight away,
-everything else still asks "Run the shortcut 'X'?" first.
-
-**Sending a message always asks.** `message_send` is in `policy.always_confirm` alongside sending mail: the
-screen-control trust window never covers it, saying "just do it" in your request never pre-approves it, and no
-setting turns the question off. The confirm reads the resolved contact, their handle and the first 40 characters
-— "Message Priya Shah (+91 98765 43210): on my way" — and the send goes to that exact handle.
-
-Messages.app needs the usual one-time automation permission the first time she sends (System Settings → Privacy &
-Security → Automation). Messaging someone by name asks once for Contacts access (System Settings → Privacy &
-Security → Contacts); without it she says so and asks for the number. Shortcuts must have been opened once for `shortcuts list` to report anything.
+`system.powershell` runs a PowerShell script (Windows PowerShell 5.1, `-NoProfile`, 2-minute limit) and hands back
+its output. It is **always confirmed** — it can do
+anything you can, so it's never auto-allowed, never covered by "just do it", and never offered to the local model.
 
 ## Voice & speed
 
@@ -433,7 +464,7 @@ Security → Contacts); without it she says so and asks for the number. Shortcut
   and confirm with "Like this?".
 
 Both are handled locally (no round-trip to Claude), persist across restarts in `~/.veronica/prefs.json`, and are
-also in the menu bar / orb popup under **Voice** (the voice list plus Faster / Slower / Normal speed).
+also in the tray menu (also shown when you click the orb) under **Voice** (the voice list plus Faster / Slower / Normal speed).
 
 ## Quick replies
 
@@ -479,10 +510,10 @@ Quick replies show up as a "Quick reply" tool card in the HUD and are logged to 
 ## Briefings & nudges
 
 - **Brief me** — "brief me" / "give me a briefing" / "what's my day look like": a spoken summary of today's
-  calendar, unread mail count and reminders due, composed locally from Calendar.app, Mail.app and Reminders.app.
+  calendar, unread mail count and reminders due, composed locally from Google Calendar, Gmail and Google Tasks.
 - **Daily briefing** — "give me a briefing every morning at 8" / "start the briefing every day at 6 pm" turns on a
   scheduled briefing at that time ("turn on the morning briefing" keeps the stored time, default 08:00); "stop the
-  morning briefing" / "turn off briefings" turns it off. A briefing more than two hours late (the Mac was asleep) is
+  morning briefing" / "turn off briefings" turns it off. A briefing more than two hours late (the PC was asleep) is
   skipped rather than read out mid-afternoon.
 - **Meeting nudges** — "warn me 10 minutes before my meetings" / "remind me before my meetings" / "turn on nudges"
   announces "Heads up, <event> starts in 10 minutes." before each timed calendar event (1–60 minutes, default 5);
@@ -537,11 +568,11 @@ voices, no microphone): `uv run python scripts/eval_voice_isolation.py --quick`.
 
 ## Settings window
 
-A normal macOS window (tabs: General, Voice, Listening, Briefings, Brain, History, About) for everything that
+A normal window (tabs: General, Voice, Listening, Briefings, Brain, History, About) for everything that
 used to need an environment variable or a voice command.
 
-- **Open it** — say "open settings" / "settings" / "preferences" / "settings kholo", pick "Settings…" from the menu
-  bar, or click the HUD orb and choose "Settings…". "Show history" / "what did I ask you" / "history dikhao" opens
+- **Open it** — say "open settings" / "settings" / "preferences" / "settings kholo", pick "Settings…" from the tray menu (or
+  left-click the tray icon), or click the HUD orb and choose "Settings…". "Show history" / "what did I ask you" / "history dikhao" opens
   it straight on the History tab.
 - **Live settings** apply to the running app right away and persist: language mode, voice, Hindi voice, speed (each
   spoken back so you hear the change), HUD mode, hide delay, follow-up window, confirm listen, silence and
@@ -549,7 +580,7 @@ used to need an environment variable or a voice command.
   push-to-talk, noise suppression, the speech level floor and the voice check.
 - **Restart settings** are saved but only picked up on the next launch: wake sensitivity/window/hop, wake phrases,
   brain effort, memory on/off, working folder. Changing one shows a "Restart Veronica to apply" banner with a
-  Restart button (from the built `.app` it quits and relaunches itself once the old process has exited; from a
+  Restart button (from the built `Veronica.exe` it quits and relaunches itself once the old process has exited; from a
   terminal it quits and says "Restart me from the terminal.").
 
 Values you set here override the environment/`.env` defaults (they're stored in `~/.veronica/prefs.json`).
@@ -564,20 +595,20 @@ so.
 ## Version & updates
 
 - **"What version are you"** / "version" / "kaunsa version hai" — says e.g. "Veronica 0.1.0 (a517483, 17 Sep)":
-  the package version plus the commit that's actually running (from the bundle's `build.json` when launched as
-  the app, else live from git). The same line sits at the top of the menu bar menu ("About Veronica — …") and on
+  the package version plus the commit that's actually running (from the exe's `build.json` when launched as
+  the app, else live from git). The same line sits at the top of the tray menu ("About Veronica — …") and on
   the About tab.
 - **"Update yourself"** / "update now" / "check for updates" / "apna update karo" — checks the repo: if
   `origin` has newer commits it says "Updating, back in a moment.", runs `git pull --ff-only`, `uv sync`
-  and rebuilds `dist/Veronica.app`, then relaunches. If there's no remote (or nothing new upstream) but the running
+  and rebuilds `dist\Veronica\Veronica.exe`, then relaunches. If there's no remote (or nothing new upstream) but the running
   build is behind the checked-out code, "update" just rebuilds and restarts you onto the latest local code. Already
   current: "You're already on the latest." Couldn't reach the remote: "Couldn't check for updates, check the log."
   Anything failing mid-update: "The update failed, check the log." Only one update runs at a time — a second
   "update yourself" (or the window/menu) while one is running gets "An update is already running." / "Busy, try
-  again in a moment.". From a terminal run (no app bundle to reopen) it finishes with "Update installed. Restart me
+  again in a moment.". From a terminal run (no exe to reopen) it finishes with "Update installed. Restart me
   from the terminal."
-- **Menu bar** — "Check for Updates…" runs the same check and posts a notification (when running from a terminal
-  there's no notification center, so she says the result instead, next time she's idle); when something newer exists
+- **Tray** — "Check for Updates…" runs the same check and posts a Windows notification (if it can't, she says the
+  result instead, next time she's idle); when something newer exists
   the item below it becomes "Update available — Restart to update" (click to install). Veronica also checks quietly
   once an hour and only flips that item, no notification. The About tab has "Check now", "Update & restart",
   "Restart" and "Open log".
@@ -588,79 +619,39 @@ pull plus rebuild of the local checkout.
 
 ## Permissions
 
-> The bundle's executable is a small native launcher that embeds Python, so every macOS permission
-> prompt and Privacy & Security entry says **Veronica** (not "python3.12"). Building it needs `clang`
-> from the Xcode Command Line Tools (`xcode-select --install`). After upgrading from an older build,
-> re-grant Microphone, Screen Recording, Input Monitoring and Automation to Veronica — the old grants
-> belonged to the Python interpreter.
+Windows asks for very little:
 
-
-Grant these to Veronica (or your terminal, if running with `uv run` instead of the built app) under
-**System Settings → Privacy & Security**:
-
-- **Microphone** — wake word and voice commands (asked automatically on first run).
-- **Automation** — Calendar/Mail/Reminders/Notes/Music/Spotify (asked automatically the first time each is used);
-  **Google Chrome** and **Safari** for the browser tools; **System Events** for browser detection (which browser is
-  in front) and for dictation's typing.
-- **Screen Recording** — screenshots for screen awareness (asked automatically the first time `screenshot` runs).
-- **Input Monitoring** — push-to-talk's global hotkey (asked for on first launch). Not asked for automatically;
-  grant it yourself, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item if push-to-talk shows as
-  unavailable.
-- **Accessibility** — computer use (clicking/typing on screen; asked automatically the first time a screen action
-  runs) and dictation's typing into other apps.
+- **Microphone** — Settings → Privacy & security → Microphone → "Let desktop apps access your microphone" must be on.
+- **Notifications** — timers and update notices use Windows toasts; Focus / Do not disturb hides them (she still
+  speaks the timer).
+- **Administrator** — not needed. Run Veronica normally; only run it as administrator if you want her to click
+  into elevated windows (see Computer use).
+- **Google / Spotify** — your own OAuth sign-ins, connected from Settings → General → Accounts.
 
 ## Run
-    uv run python -m veronica                 # menu bar app
+    uv run python -m veronica                 # tray app
     uv run python -m veronica --text "hello"  # no audio, debug
 
 ## Install as an app
-### Permissions that stick
 
-macOS ties Microphone, Screen Recording and Accessibility grants to an app's
-code signature. Ad-hoc signing is just a hash of the bundle, so every rebuild
-asks again. Run this once:
+Build a real `Veronica.exe` (PyInstaller, one folder) instead of running from a terminal:
 
-```bash
-./scripts/make_signing_cert.sh     # asks for your login password once
-make app
-```
+    uv run python scripts/build_app.py     # or: make app — writes dist\Veronica\Veronica.exe
+    .\dist\Veronica\Veronica.exe
 
-`make app` then signs with that certificate, the grant is keyed on the bundle
-id plus the certificate, and rebuilds keep it. Grant Microphone and Screen
-Recording one final time after the first certificate-signed build.
+(`uv run python scripts/make_icon.py` re-renders `assets\Veronica.ico` from the HUD orb if you want a fresh icon —
+the built one is committed.) Signing is optional (`signtool sign /fd sha256 …` with your own certificate); unsigned,
+SmartScreen may warn once.
 
+The exe uses this checkout: it changes into the repo (so `.env` applies), and the brains' helper processes run with
+the checkout's `.venv\Scripts\python.exe`, so keep the `.venv`, models and CLI logins you set up for `uv run`.
+`VERONICA_HOME` (default `%USERPROFILE%\.veronica`) is unchanged.
 
-Build a real `dist/Veronica.app` menu-bar app bundle instead of running from a terminal:
+**Start at Login** — the tray's "Start at Login" item writes a `Veronica` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` pointing at `Veronica.exe`. It's greyed out until you
+launch Veronica from the built exe at least once. You can also review it under Settings → Apps → Startup.
 
-    make app          # writes dist/Veronica.app, ad-hoc codesigned
-    open dist/Veronica.app
-
-(`make icon` re-renders `assets/Veronica.icns` from the HUD orb first, if you want a fresh icon — the built
-one is already committed, so this is optional.)
-
-On first launch macOS asks for **Microphone** access, and the first time Veronica touches Calendar, Mail,
-Reminders, Notes, Music, Spotify, Chrome, Safari or System Events it asks for **Automation** access to that app; the first `screenshot` prompts
-for **Screen Recording** — approve all of these (System Settings → Privacy & Security). **Accessibility** (for
-push-to-talk and dictation) is not prompted for automatically — grant it yourself under System Settings → Privacy &
-Security → Accessibility, or use the menu bar's "Enable Push-to-talk… (Input Monitoring)" item. Because the bundle is
-ad-hoc codesigned, these approvals stick across rebuilds as long as the bundle identifier (`io.manik.veronica`)
-doesn't change. **Accessibility** is the exception to watch: macOS ties that grant to the launcher's code hash
-(cdhash), which is stable as long as the launcher binary itself doesn't change — rebuilding the app around the
-same launcher keeps the grant, but a rebuilt or updated launcher needs Accessibility re-granted (remove and re-add
-Veronica in System Settings → Privacy & Security → Accessibility).
-
-The bundle's launcher just `cd`s into this repo and execs `.venv/bin/python -m veronica`, so it needs the same
-`.venv` (and `.env`, models, the brain CLI logins) you set up for `uv run` — there's no separate install step.
-`VERONICA_HOME` (default `~/.veronica`) is unchanged when running as a bundle.
-
-**Start at Login** — the menu bar's "Start at Login" item writes a `LaunchAgent` at
-`~/Library/LaunchAgents/io.manik.veronica.plist` that relaunches `dist/Veronica.app` at login. It's greyed out
-("Start at Login (build the app first)") until you launch Veronica from the built `.app` at least once — it needs
-a real bundle path to point the LaunchAgent at.
-
-Logs: `~/.veronica/logs/veronica.log` (the app's own log; when running from the bundle, stdout isn't a TTY, so
-only the file handler is attached — nothing is lost, it's just not duplicated to a terminal) and
-`~/.veronica/logs/launchd.log` (stdout/stderr captured by launchd when started via "Start at Login").
+Logs: `%USERPROFILE%\.veronica\logs\veronica.log`.
 
 ## Troubleshooting
 
@@ -671,18 +662,24 @@ may get more false wakes; raise it if she wakes on noise). "Wake window" and "Wa
 `VERONICA_LOG_LEVEL=DEBUG` and watch `~/.veronica/logs/veronica.log` for `wake hop rms=... gate=...` lines
 to see how loud your voice actually lands at the mic.
 
-**AirPods / USB mic / headphones.** Mic switching is automatic: Veronica polls macOS's default input device
-every couple of seconds and reopens the mic on the new device (`input device changed (...); reopening mic` in
-the log), also re-reading the output device list so speech follows your headphones. The switch waits until any
-in-flight recording finishes. If the mic disappears mid-sentence (AirPods taken out, the Mac sleeping), the
-recording ends within about two seconds with what it already heard (`capture: no audio for 2.0s` in the log)
-instead of holding up the turn.
+**Bluetooth headset / USB mic / headphones.** Mic switching is automatic: Veronica polls Windows' default
+recording device every couple of seconds and reopens the mic on the new device (`input device changed (...);
+reopening mic` in the log), also re-reading the output device list so speech follows your headphones. The switch
+waits until any in-flight recording finishes. If the mic disappears mid-sentence (headset off, the PC sleeping),
+the recording ends within about two seconds with what it already heard (`capture: no audio for 2.0s` in the log)
+instead of holding up the turn. To pick a device, set it as the default in Settings → System → Sound.
 
 **She stopped hearing me after a call / after switching mics.** Call apps with auto-gain (Zoom, Meet,
-FaceTime) and device switches quietly drop the Mac's input volume to ~30 %, which starves the wake check.
+Teams) and device switches can quietly drop the microphone level to ~30 %, which starves the wake check.
 Veronica checks the input volume once a minute and right after every mic switch, and raises it back to the
 "Input volume floor" setting (`input_volume_floor`, default 85; never lowers it). The first fix of a session
 shows on the HUD; every fix is an `input volume 33 → 85 (...)` line in the log. Set the floor to 0 to turn it off.
+
+**Browser tools say no browser is connected.** Check the extension's options page says "Connected to Veronica";
+re-paste `%USERPROFILE%\.veronica\browser_token` if Veronica's home folder was reset.
+
+**"Google isn't connected".** Settings → General → Accounts → Connect Google. In "Testing" mode the sign-in lasts
+7 days.
 
 ## Test
     uv run pytest            # unit
