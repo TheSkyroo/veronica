@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # the whole transcript on resume, so an old one gets slow. 0 = never retire.
     brain_session_max_age_h: int = 48
     brain_cwd: Path = Field(default_factory=Path.home)
+    # Music: the Client ID of the user's own Spotify developer app (PKCE, no
+    # secret). Empty = "play <song>" uses YouTube.
+    spotify_client_id: str = ""
     # Seconds after one approved screen action during which further
     # confirm-class computer actions in the SAME app are auto-allowed. 0 = off.
     computer_trust_s: int = 90
@@ -314,6 +317,10 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
         min=0, max=200, restart=False,
     ),
     "brain_cwd": EditableField("str", "Working folder", "Where shell commands run."),
+    "spotify_client_id": EditableField(
+        "str", "Spotify Client ID",
+        "From developer.spotify.com (redirect URI http://127.0.0.1:8898/callback). Needs Spotify Premium; "
+        "empty = play songs on YouTube.", restart=False),
     "brain_session_max_age_h": EditableField(
         "int", "Start a fresh conversation after (hours)",
         "A long-running conversation gets slower to resume. 0 = keep it forever.",

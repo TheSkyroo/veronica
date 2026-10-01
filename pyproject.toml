@@ -18,7 +18,10 @@ dependencies = [
   "websockets>=13",
   "Pillow>=10",
   "psutil>=5.9",
-  # Windows integration (UI, audio endpoints, input, screen, OCR, Outlook).
+  "google-auth>=2.29",
+  "google-auth-oauthlib>=1.2",
+  "requests>=2.31",
+  # Windows integration (UI, audio endpoints, input, screen, OCR).
   "pywebview>=5; sys_platform == 'win32'",
   "pystray>=0.19; sys_platform == 'win32'",
   "pywin32>=306; sys_platform == 'win32'",

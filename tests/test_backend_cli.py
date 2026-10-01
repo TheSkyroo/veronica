@@ -93,7 +93,7 @@ async def test_native_tool_card_only_for_readonly(tmp_path):
     b, _, cards = build(tmp_path, [
         ev("ToolStart", call_id="1", tool="read_file", input={"file_path": "/a"}, native=True),
         ev("ToolEnd", call_id="1"),
-        ev("ToolStart", call_id="2", tool="mcp__veronica-system__open_app", input={"name": "Safari"}, native=False),
+        ev("ToolStart", call_id="2", tool="mcp__veronica-system__open_app", input={"name": "Microsoft Edge"}, native=False),
         ev("ToolEnd", call_id="2"),
         ev("Done", final_text="done"),
     ])

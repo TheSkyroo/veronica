@@ -7,7 +7,6 @@ import pytest
 from veronica.brain import gateclient
 from veronica.brain.gateclient import ask_gate
 
-
 TOKEN = "s3cret-token"
 
 

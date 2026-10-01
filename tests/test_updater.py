@@ -207,13 +207,13 @@ UPDATE_OK = {
 def test_update_remote_pulls_syncs_builds_in_order():
     run = FakeRun(UPDATE_OK)
     built = []
-    log = updater.update(REPO, _status("remote"), run=run, build=lambda: built.append(1) or Path("/x/Veronica.app"), which=lambda n: "/usr/local/bin/uv")
+    log = updater.update(REPO, _status("remote"), run=run, build=lambda: built.append(1) or Path("/x/dist/Veronica/Veronica.exe"), which=lambda n: "/usr/local/bin/uv")
     assert run.argv_strings == ["git pull --ff-only --quiet", "uv sync"]
     assert built == [1]
     assert all(kw.get("cwd") == REPO for kw in run.kwargs)
     assert "git pull" in log
     assert "uv sync" in log
-    assert "Veronica.app" in log
+    assert "Veronica.exe" in log
 
 
 def test_update_local_skips_pull():
@@ -271,3 +271,14 @@ def test_update_default_build_loads_build_app_script(monkeypatch):
     fn = updater._default_build()
     assert callable(fn)
     assert fn.__name__ == "build_app"
+
+
+def test_console_tools_get_no_window_on_windows(monkeypatch):
+    # From the windowless Veronica.exe, git/uv must not flash a console.
+    monkeypatch.setattr(updater, "_NO_WINDOW", {"creationflags": 0x08000000})
+    run = FakeRun(UPDATE_OK)
+    updater.update(REPO, _status("remote"), run=run, build=lambda: None, which=lambda n: "uv.exe")
+    assert all(kw.get("creationflags") == 0x08000000 for kw in run.kwargs)
+    run = FakeRun(GIT_BASE)
+    updater.check(REPO, run=run, info={"sha": HEAD})
+    assert run.kwargs and all(kw.get("creationflags") == 0x08000000 for kw in run.kwargs)

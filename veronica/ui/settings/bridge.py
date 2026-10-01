@@ -57,7 +57,7 @@ _PUSH_AFTER_TURN = "_push_after_turn"   # internal reply marker, stripped before
 # Which Settings fields each section exposes. Anything in EDITABLE_SETTINGS
 # not listed here is unreachable from the window (deliberately).
 SETTING_SECTIONS: dict[str, tuple[str, ...]] = {
-    "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity"),
+    "general": ("ptt_enabled", "hud_hide_after_s", "hud_particles", "hud_intensity", "spotify_client_id"),
     "listening": ("followup_window_s", "confirm_listen_s", "ack_after_s", "vad_silence_ms", "max_utterance_s",
                   "wake_min_rms", "wake_window_s", "wake_hop_s", "wake_phrases", "input_volume_floor",
                   "noise_suppression", "vad_min_rms", "speaker_verification", "speaker_threshold",
@@ -80,10 +80,28 @@ AUTO_ALLOW_LABELS: dict[str, str] = {
     "mcp__browser__browser_click": "Click in the browser",
     "mcp__browser__browser_type": "Type in the browser",
 }
+# The "Accounts" rows on the General tab: id -> (label, module). The modules
+# are imported lazily (and may be missing a dependency): a row that can't be
+# loaded just shows as unavailable.
+ACCOUNTS: dict[str, tuple[str, str]] = {
+    "spotify": ("Spotify", "veronica.spotify_account"),
+    "google": ("Google", "veronica.google_account"),
+}
+ACCOUNT_SETUP = {
+    "spotify": "Set a Spotify Client ID above (needs Spotify Premium).",
+    "google": "Put your Google OAuth client file in the Veronica folder first.",
+}
+WAITING_FOR_BROWSER = "Finish signing in in your browser."
 BRIEFING_KEYS = ("briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                  "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                  "unread_enabled", "unread_time")
 BRIEFING_TIME_KEYS = ("briefing_time", "quiet_from", "quiet_to", "unread_time")
+
+
+def _import_account(name: str):
+    import importlib
+
+    return importlib.import_module(ACCOUNTS[name][1])
 
 
 def _inline(fn: Callable[[], None]) -> None:
@@ -131,9 +149,13 @@ class SettingsBridge:
         open_path: Callable[[Path | str], None] = _open_path,
         marshal: Callable[[Callable[[], None]], None] = _inline,
         check_backend: Callable[[str], Any] = _check_backend,
+        account_module: Callable[[str], Any] = _import_account,
     ) -> None:
         self._settings = settings
         self._check_backend = check_backend
+        self._account_module = account_module
+        self._connecting: set[str] = set()     # accounts with a sign-in in progress
+        self._accounts_lock = threading.Lock()
         self._get_orch = get_orch
         #: A store, None, or a zero-arg callable returning either (the tray
         #: app passes a callable: its orchestrator — and so the MemoryStore
@@ -181,6 +203,8 @@ class SettingsBridge:
             "open_logs": self.open_logs,
             "open_login_items": self.open_login_items,
             "open_mic_privacy": self.open_mic_privacy,
+            "connect_account": self.connect_account,
+            "disconnect_account": self.disconnect_account,
             "learn_voice": self.learn_voice,
             "forget_voice": self.forget_voice,
         }
@@ -263,6 +287,7 @@ class SettingsBridge:
 
         return {
             "general": {
+                **{name: setting(name) for name in _section_fields("general")},
                 "language": language,
                 "start_at_login": bool(self._login_item.is_enabled()),
                 "ptt_enabled": setting("ptt_enabled"),
@@ -271,6 +296,7 @@ class SettingsBridge:
                 "hud_particles": setting("hud_particles"),
                 "hud_intensity": setting("hud_intensity"),
                 "can_start_at_login": self._exe_path is not None,
+                "accounts": self._accounts(),
             },
             "voice": {
                 "voice": voice,
@@ -649,6 +675,74 @@ class SettingsBridge:
 
         self._run_thread(work)
         return {"ok": True, "message": UPDATING}
+
+    # -- accounts (Spotify, Google) -------------------------------------------------------
+    def _account_row(self, name: str) -> dict:
+        label = ACCOUNTS[name][0]
+        row = {"id": name, "label": label, "configured": False, "connected": False,
+               "busy": name in self._connecting, "detail": ""}
+        try:
+            mod = self._account_module(name)
+            row["configured"] = bool(mod.is_configured())
+            row["connected"] = bool(mod.is_connected())
+            who = getattr(mod, "account", None)
+            who = str(who() or "") if callable(who) and row["connected"] else ""
+        except Exception as e:  # missing dependency, broken token file…
+            log.warning("%s account status unavailable: %s", label, e)
+            row["detail"] = f"{label} isn't available here."
+            return row
+        if row["busy"]:
+            row["detail"] = WAITING_FOR_BROWSER
+        elif row["connected"]:
+            row["detail"] = f"Connected as {who}." if who else "Connected."
+        elif row["configured"]:
+            row["detail"] = "Not connected."
+        else:
+            row["detail"] = ACCOUNT_SETUP.get(name, "")
+        return row
+
+    def _accounts(self) -> list[dict]:
+        return [self._account_row(name) for name in ACCOUNTS]
+
+    def connect_account(self, account: str = "") -> dict:
+        """Interactive sign-in (opens the browser, blocks for minutes): a
+        LONG_COMMAND, so this already runs on a worker thread."""
+        name = str(account or "")
+        if name not in ACCOUNTS:
+            return _fail(f"unknown account {account!r}")
+        label = ACCOUNTS[name][0]
+        with self._accounts_lock:
+            if name in self._connecting:
+                return _fail(f"Already connecting {label}.")
+            self._connecting.add(name)
+        self._push()
+        try:
+            mod = self._account_module(name)
+            if not mod.is_configured():
+                return _fail(ACCOUNT_SETUP.get(name) or f"{label} isn't set up.")
+            said = mod.connect()
+        except Exception as e:  # SpotifyAuthError / GoogleError carry speakable text
+            log.warning("%s connect failed: %s", label, e)
+            return _fail(str(e) or f"Couldn't connect {label}.")
+        finally:
+            with self._accounts_lock:
+                self._connecting.discard(name)
+            self._push()
+        return _ok(message=said if isinstance(said, str) and said else f"{label} is connected.")
+
+    def disconnect_account(self, account: str = "") -> dict:
+        name = str(account or "")
+        if name not in ACCOUNTS:
+            return _fail(f"unknown account {account!r}")
+        label = ACCOUNTS[name][0]
+        try:
+            self._account_module(name).disconnect()
+        except Exception as e:
+            log.warning("%s disconnect failed: %s", label, e)
+            return _fail(str(e) or f"Couldn't disconnect {label}.")
+        finally:
+            self._push()
+        return _ok(message=f"{label} is disconnected.")
 
     # -- restart / logs --------------------------------------------------------------------
     def restart(self) -> dict:

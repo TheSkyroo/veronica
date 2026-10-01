@@ -102,7 +102,7 @@ def build_orchestrator(s: Settings, on_state=None, on_event=None, *, audio: bool
     # Proactive briefings/nudges read the same pim tools the brain uses,
     # just without going through Claude: the ticker gets the tools' text
     # (or a mail count) and composes the announcement itself.
-    # A failed fetch (timeout, Outlook unavailable) raises so build_briefing's
+    # A failed fetch (timeout, Google not connected) raises so build_briefing's
     # guarded fetch logs it and drops the sentence, rather than reading the
     # error text as "Nothing on your calendar today."
     def _text_or_raise(res: dict) -> str:
@@ -250,6 +250,10 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="veronica")
     p.add_argument("--text", help="ask once via text, no audio input (speaks the reply)")
     args = p.parse_args(argv)
+    # Before any window, tray icon or capture exists: per-monitor DPI
+    # awareness keeps screenshots and clicks in the same physical pixels.
+    from veronica.tools.computer_events import ensure_dpi_awareness
+    ensure_dpi_awareness()
     setup_logging()
     if os.environ.get("ANTHROPIC_API_KEY"):
         os.environ.pop("ANTHROPIC_API_KEY")

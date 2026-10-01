@@ -1,5 +1,5 @@
 """Settings page (index.html + settings.js) in headless Chromium. Without
-`window.webkit.messageHandlers.veronica` the page pushes its messages into
+pywebview's `window.pywebview.api` the page pushes its messages into
 `window.__settings.sent`; tests answer them with `window.settings.reply`."""
 import json
 import pathlib
@@ -23,7 +23,12 @@ def fixture_state(**over) -> dict:
     state = {
         "general": {"language": "en", "start_at_login": False, "ptt_enabled": True, "hud_mode": "full",
                     "hud_hide_after_s": 3.0, "hud_particles": 4000, "hud_intensity": 1.0,
-                    "can_start_at_login": True},
+                    "can_start_at_login": True, "spotify_client_id": "",
+                    "accounts": [
+                        {"id": "spotify", "label": "Spotify", "configured": False, "connected": False,
+                         "busy": False, "detail": "Set a Spotify Client ID above (needs Spotify Premium)."},
+                        {"id": "google", "label": "Google", "configured": True, "connected": False,
+                         "busy": False, "detail": "Not connected."}]},
         "voice": {"voice": "af_sarah", "hindi_voice": "hf_alpha", "speed": 1.0,
                   "voices": [{"id": "af_sarah", "name": "Sarah", "hindi": False},
                              {"id": "bm_george", "name": "George", "hindi": False},
@@ -35,8 +40,8 @@ def fixture_state(**over) -> dict:
                       "speaker_threshold": 0.35, "speaker_verification_wake": False,
                       "voice_profile": {"enrolled": False, "created": "", "active": False, "recent": []}},
         "briefings": {"briefing_enabled": False, "briefing_time": "08:00", "nudges_enabled": True, "nudge_minutes": 5},
-        "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "/Users/me", "computer_trust_s": 90,
-                  "preapprove_by_wording": True, "shortcut_allowlist": [],
+        "brain": {"effort": "medium", "memory_enabled": True, "brain_cwd": "C:\\Users\\me", "computer_trust_s": 90,
+                  "preapprove_by_wording": True,
                   "auto_allow_tools": ["mcp__system__clipboard_write"],
                   "auto_allowable": [{"tool": t, "label": lbl} for t, lbl in AUTO_ALLOW_LABELS.items()],
                   "brain_backend": "codex", "brain_failover": True,
@@ -186,7 +191,7 @@ def test_controls_post_set_and_reply_drives_banner():
         # error reply shows the message and reverts the control to state
         reply(page, msg["id"], {"ok": False, "message": "no such folder", "restart_required": True})
         assert page.inner_text("#pane .row[data-key=brain_cwd] .status") == "no such folder"
-        assert page.input_value("#pane input[data-key=brain_cwd]") == "/Users/me"
+        assert page.input_value("#pane input[data-key=brain_cwd]") == "C:\\Users\\me"
 
         # range: label follows drag, message on change; list field → array
         page.evaluate("window.settings.select('listening')")
@@ -229,7 +234,7 @@ def test_history_search_forget_and_clear():
     from playwright.sync_api import sync_playwright
 
     items = [{"id": 2, "ts": "2026-09-17T14:05:00", "heard": "what time is it", "reply": "It is two."},
-             {"id": 1, "ts": "2026-09-16T09:30:00", "heard": "open safari", "reply": "Opening Safari."}]
+             {"id": 1, "ts": "2026-09-16T09:30:00", "heard": "open edge", "reply": "Opening Edge."}]
     with sync_playwright() as p:
         browser, page = open_page(p)
         page.evaluate("window.settings.select('history')")
@@ -321,15 +326,15 @@ def test_state_push_keeps_typing_and_focus_without_posting():
         page.evaluate("window.settings.select('brain')")
         page.click("#pane input[data-key=brain_cwd]")
         page.keyboard.press("End")
-        page.keyboard.type("/proj")
+        page.keyboard.type("\\proj")
         n = len(sent(page))
         page.evaluate("s => window.settings.state(s)", fixture_state())
-        assert page.input_value("#pane input[data-key=brain_cwd]") == "/Users/me/proj"
+        assert page.input_value("#pane input[data-key=brain_cwd]") == "C:\\Users\\me\\proj"
         assert page.evaluate("document.activeElement === document.querySelector('#pane input[data-key=brain_cwd]')")
-        assert page.evaluate("document.activeElement.selectionStart") == len("/Users/me/proj")
+        assert page.evaluate("document.activeElement.selectionStart") == len("C:\\Users\\me\\proj")
         assert len(sent(page)) == n                      # the half-typed value was not posted
         page.keyboard.press("Enter")                     # committing afterwards still works
-        assert sent(page)[-1]["args"] == {"section": "brain", "key": "brain_cwd", "value": "/Users/me/proj"}
+        assert sent(page)[-1]["args"] == {"section": "brain", "key": "brain_cwd", "value": "C:\\Users\\me\\proj"}
         # a focused select survives a push too
         page.focus("#pane select[data-key=effort]")
         page.evaluate("s => window.settings.state(s)", fixture_state())
@@ -499,4 +504,80 @@ def test_local_model_picker_lists_models_and_keeps_the_path_field():
         page.evaluate("s => window.settings.state(s)", fixture_state(brain={"local_models": []}))
         assert page.locator(pick).count() == 0
         assert page.locator("#pane input[data-key=local_model]").count() == 1
+        browser.close()
+
+
+@pytest.mark.live
+def test_pywebview_transport_delivers_queued_and_new_messages():
+    """With pywebview's js_api present, posts go to api.handle(id, cmd, args);
+    anything posted before `pywebviewready` is delivered when it fires."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 720, "height": 520})
+        page.goto(PAGE.as_uri())
+        page.wait_for_function("window.settings !== undefined && window.__settings !== undefined")
+        page.evaluate("s => window.settings.state(s)", fixture_state())
+        page.evaluate("window.settings.select('history')")          # posts before pywebview is ready
+        queued = sent(page)
+        assert queued and queued[-1]["cmd"] == "history"
+        page.evaluate("""() => {
+            window.__calls = [];
+            window.pywebview = {api: {handle: (id, cmd, args) => { window.__calls.push([id, cmd, args]); return Promise.resolve(null); }}};
+            window.dispatchEvent(new Event('pywebviewready'));
+        }""")
+        calls = page.evaluate("window.__calls")
+        assert [c[1] for c in calls] == [m["cmd"] for m in queued]
+        assert sent(page) == []
+        page.evaluate("window.settings.select('about')")
+        page.click("#pane button[data-cmd=open_logs]")
+        last = page.evaluate("window.__calls[window.__calls.length - 1]")
+        assert last[1] == "open_logs" and last[2] == {}
+        # the reply still comes back through window.settings.reply
+        reply(page, last[0], {"ok": True, "message": ""})
+        assert page.evaluate("window.__settings.pending()") == len(calls)
+        browser.close()
+
+
+@pytest.mark.live
+def test_general_tab_links_to_windows_settings():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        page.click("#pane button[data-cmd=open_login_items]")
+        assert sent(page)[-1]["cmd"] == "open_login_items"
+        page.click("#pane button[data-cmd=open_mic_privacy]")
+        assert sent(page)[-1]["cmd"] == "open_mic_privacy"
+        assert "Mac" not in page.inner_text("#pane")
+        browser.close()
+
+
+@pytest.mark.live
+def test_accounts_connect_and_disconnect():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page = open_page(p)
+        assert page.is_visible("#pane input[data-key=spotify_client_id]")
+        assert page.is_disabled("#pane button[data-cmd=connect_account][data-account=spotify]")   # no Client ID
+        page.click("#pane button[data-cmd=connect_account][data-account=google]")
+        msg = sent(page)[-1]
+        assert msg["cmd"] == "connect_account" and msg["args"] == {"account": "google"}
+        assert "browser" in page.inner_text('#pane .row[data-account="google"] .status')
+        # a push while signing in (busy) keeps the waiting text
+        busy = fixture_state()
+        busy["general"]["accounts"][1].update(busy=True, detail="Finish signing in in your browser.")
+        page.evaluate("s => window.settings.state(s)", busy)
+        assert page.is_disabled("#pane button[data-cmd=connect_account][data-account=google]")
+        assert "browser" in page.inner_text('#pane .row[data-account="google"] .status')
+        done = fixture_state()
+        done["general"]["accounts"][1].update(connected=True, detail="Connected as me@gmail.com.")
+        page.evaluate("s => window.settings.state(s)", done)
+        reply(page, msg["id"], {"ok": True, "message": "Google is connected as me@gmail.com."})
+        assert page.inner_text('#pane .row[data-account="google"] .status') == "Google is connected as me@gmail.com."
+        assert page.inner_text("#pane button[data-account=google]") == "Disconnect Google"
+        page.click("#pane button[data-cmd=disconnect_account][data-account=google]")
+        assert sent(page)[-1]["cmd"] == "disconnect_account"
         browser.close()

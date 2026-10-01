@@ -1,381 +1,413 @@
-import contextlib
+import base64
 import datetime as dt
-from types import SimpleNamespace
+import email
+import email.policy
+import json
+import re
 
 import pytest
 
+from veronica import google_account as google
 from veronica.tools import pim
 
-UTC = dt.timezone.utc
+# -- a fake Google HTTP session ----------------------------------------------------
+
+class FakeResponse:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self._body = body
+        self.content = b"" if body is None else json.dumps(body).encode()
+        self.text = self.content.decode()
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no body")
+        return self._body
 
 
-# -- a fake Outlook object model ---------------------------------------------------
+class FakeSession:
+    """Stands in for google.auth's AuthorizedSession: every request is
+    recorded in `calls`, and answered by the first route whose method and
+    URL regex match (a dict body, a FakeResponse, or a callable taking the
+    call). Unrouted requests are 404s."""
 
-class FakeItems:
-    """An Outlook Items collection: Sort/Restrict are recorded, Restrict
-    keeps the items (tests seed only what Outlook would have matched)
-    unless a `matcher` is given, and GetFirst/GetNext walk them."""
-
-    def __init__(self, items=(), log=None, matcher=None):
-        self._items = list(items)
-        self._i = 0
-        self.log = log if log is not None else []
-        self.matcher = matcher
-        self.IncludeRecurrences = False
-        self.added = []
-
-    def Sort(self, key, descending=False):
-        self.log.append(("Sort", key, descending, self.IncludeRecurrences))
-
-    def Restrict(self, flt):
-        self.log.append(("Restrict", flt, self.IncludeRecurrences))
-        keep = [i for i in self._items if self.matcher is None or self.matcher(flt, i)]
-        return FakeItems(keep, self.log)
-
-    def GetFirst(self):
-        self._i = 0
-        return self.GetNext()
-
-    def GetNext(self):
-        if self._i >= len(self._items):
-            return None
-        self._i += 1
-        return self._items[self._i - 1]
-
-    def Add(self, kind):
-        item = FakeItem(kind=kind)
-        self.added.append(item)
-        return item
-
-
-class FakeItem(SimpleNamespace):
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self.saved = self.sent = False
-
-    def Save(self):
-        self.saved = True
-
-    def Send(self):
-        self.sent = True
-
-
-class FakeFolder(SimpleNamespace):
-    pass
-
-
-class FakeRecipient:
-    def __init__(self, ok=False, name="", address=""):
-        self._ok, self.Name = ok, name
-        self.AddressEntry = SimpleNamespace(Address=address)
-
-    def Resolve(self):
-        return self._ok
-
-
-class FakeOutlook:
     def __init__(self):
-        self.log = []
-        self.folders = {
-            pim.FOLDER_CALENDAR: FakeFolder(Name="Calendar", Items=FakeItems(log=self.log), Folders=[]),
-            pim.FOLDER_INBOX: FakeFolder(Name="Inbox", Items=FakeItems(log=self.log), UnReadItemCount=0),
-            pim.FOLDER_TASKS: FakeFolder(Name="Tasks", Items=FakeItems(log=self.log)),
-            pim.FOLDER_CONTACTS: FakeFolder(Name="Contacts", Items=FakeItems(log=self.log)),
-        }
-        self.Stores = []
-        self.created = []
-        self.recipient = FakeRecipient()
+        self.routes = []
+        self.calls = []
 
-    # namespace
-    def GetDefaultFolder(self, n):
-        return self.folders[n]
+    def route(self, method, pattern, answer):
+        self.routes.insert(0, (method, re.compile(pattern), answer))
 
-    def CreateRecipient(self, name):
-        self.log.append(("CreateRecipient", name))
-        return self.recipient
+    def request(self, method, url, timeout=None, **kw):
+        call = {"method": method, "url": url, "timeout": timeout, **kw}
+        self.calls.append(call)
+        for m, rx, answer in self.routes:
+            if m == method and rx.search(url):
+                if callable(answer):
+                    answer = answer(call)
+                return answer if isinstance(answer, FakeResponse) else FakeResponse(200, answer)
+        return FakeResponse(404, {"error": {"code": 404, "message": "Not Found"}})
 
-    # application
-    def CreateItem(self, kind):
-        item = FakeItem(kind=kind)
-        self.created.append(item)
-        return item
-
-    def seed(self, folder, items):
-        self.folders[folder].Items = FakeItems(items, self.log)
+    def find(self, method, pattern):
+        return [c for c in self.calls if c["method"] == method and re.search(pattern, c["url"])]
 
 
 @pytest.fixture
-def outlook(monkeypatch):
-    fake = FakeOutlook()
-
-    @contextlib.contextmanager
-    def session():
-        yield fake, fake
-
-    monkeypatch.setattr(pim, "_outlook_session", session)
+def g(monkeypatch):
+    fake = FakeSession()
+    monkeypatch.setattr(google, "_authorized_session", lambda: fake)
+    monkeypatch.setattr(pim, "_warmed", set())
     return fake
-
-
-@pytest.fixture
-def no_outlook(monkeypatch):
-    @contextlib.contextmanager
-    def session():
-        raise pim.OutlookUnavailable("Invalid class string")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(pim, "_outlook_session", session)
 
 
 def text(res):
     return res["content"][0]["text"]
 
 
-def com_time(y, mo, d, h=0, mi=0):
-    """What pywin32 hands back: Outlook's local wall clock tagged as UTC."""
-    return dt.datetime(y, mo, d, h, mi, tzinfo=UTC)
+def local(y, mo, d, h=0, mi=0) -> str:
+    """A local wall-clock time as Google sends it: RFC 3339 with an offset."""
+    return dt.datetime(y, mo, d, h, mi).astimezone().isoformat()
 
 
-def event(title, start, end, loc=""):
-    return FakeItem(Subject=title, Start=start, End=end, Location=loc)
+# -- not set up / not connected ------------------------------------------------------
 
-
-# -- Outlook missing ---------------------------------------------------------------
-
-@pytest.mark.parametrize("tool, args", [
+TOOL_CALLS = [
     ("calendar_events", {}), ("calendar_create", {"title": "x", "start": "2026-09-20 10:00"}),
     ("mail_unread", {}), ("mail_search", {"query": "x"}), ("mail_send", {"to": "a@b.co"}),
     ("reminders_due", {}), ("reminder_create", {"title": "x"}), ("notes_create", {"title": "x"}),
-])
-async def test_every_tool_says_outlook_is_missing(no_outlook, tool, args):
+]
+
+
+@pytest.mark.parametrize("tool, args", TOOL_CALLS)
+async def test_every_tool_says_google_isnt_set_up(tmp_home, tool, args):
     res = await getattr(pim, tool).handler(args)
-    assert res["is_error"] and text(res) == f"error: {pim.OUTLOOK_MISSING}"
+    assert res["is_error"] and "Google isn't set up" in text(res)
+    assert "google_client.json" in text(res)
 
 
-def test_real_session_without_pywin32_is_unavailable(monkeypatch):
-    monkeypatch.setitem(__import__("sys").modules, "pythoncom", None)     # import fails
-    with pytest.raises(pim.OutlookUnavailable), pim._outlook_session():
-        pass
+@pytest.mark.parametrize("tool, args", TOOL_CALLS)
+async def test_every_tool_says_google_isnt_connected(tmp_home, tool, args):
+    (tmp_home / "google_client.json").write_text("{}")
+    res = await getattr(pim, tool).handler(args)
+    assert res["is_error"] and "Google isn't connected" in text(res) and "connect Google" in text(res)
 
 
-async def test_com_error_text_is_reported(outlook, monkeypatch):
-    class ComError(Exception):
-        pass
-
-    def boom(n):
-        raise ComError(-2147352567, "Exception occurred.",
-                       (4096, "Microsoft Outlook", "The operation failed.", None, 0, -2147467259), None)
-    monkeypatch.setattr(outlook, "GetDefaultFolder", boom)
-    res = await pim.mail_unread.handler({})
-    assert res["is_error"] and text(res) == "error: The operation failed."
+async def test_http_error_is_reported_with_status(g):
+    g.route("GET", r"/calendarList", FakeResponse(500, {"error": {"message": "Backend Error"}}))
+    res = await pim.calendar_events.handler({})
+    assert res["is_error"] and text(res) == "error: Google said 500: Backend Error"
 
 
-# -- calendar_events ----------------------------------------------------------
+async def test_every_request_has_a_timeout(g):
+    g.route("GET", r"/calendarList", {"items": [{"id": "primary@x", "primary": True}]})
+    g.route("GET", r"/events$", {"items": []})
+    await pim.calendar_events.handler({})
+    assert g.calls and all(c["timeout"] == google.TIMEOUT for c in g.calls)
 
-async def test_calendar_events_query_shape(outlook):
+
+# -- calendar_events -----------------------------------------------------------------
+
+def ev(title, start, end, **kw):
+    def when(v):
+        return {"date": v} if len(v) == 10 else {"dateTime": v}
+    return {"summary": title, "start": when(start), "end": when(end), **kw}
+
+
+def calendars(g, *cals):
+    g.route("GET", r"/users/me/calendarList$", {"items": list(cals)})
+
+
+async def test_calendar_events_query_shape(g):
+    calendars(g, {"id": "me@gmail.com", "summary": "me@gmail.com", "primary": True, "selected": True})
+    g.route("GET", r"/events$", {"items": []})
     await pim.calendar_events.handler({"day": "2026-09-20", "days": 2})
-    sort, restrict = outlook.log
-    assert sort == ("Sort", "[Start]", False, False)          # sorted before recurrences are expanded
-    assert restrict == ("Restrict", "[Start] < '2026-09-22 00:00' AND [End] > '2026-09-20 00:00'", True)
+    call, = g.find("GET", r"/events$")
+    assert call["url"] == "https://www.googleapis.com/calendar/v3/calendars/me%40gmail.com/events"
+    p = call["params"]
+    assert (p["singleEvents"], p["orderBy"]) == ("true", "startTime")
+    assert dt.datetime.fromisoformat(p["timeMin"]) == dt.datetime(2026, 9, 20).astimezone()
+    assert dt.datetime.fromisoformat(p["timeMax"]) == dt.datetime(2026, 9, 22).astimezone()
 
 
-async def test_calendar_events_formats_output(outlook):
-    outlook.seed(pim.FOLDER_CALENDAR, [
-        event("Lunch", com_time(2026, 9, 20, 12), com_time(2026, 9, 20, 13)),
-        event("Standup", com_time(2026, 9, 20, 9, 30), com_time(2026, 9, 20, 10), "Teams\nMeeting"),
-    ])
+async def test_calendar_events_formats_output(g):
+    calendars(g, {"id": "me", "summary": "me@gmail.com", "primary": True})
+    g.route("GET", r"/events$", {"items": [
+        ev("Lunch", local(2026, 9, 20, 12), local(2026, 9, 20, 13)),
+        ev("Standup", local(2026, 9, 20, 9, 30), local(2026, 9, 20, 10), location="Meet\nRoom"),
+    ]})
     res = await pim.calendar_events.handler({"day": "2026-09-20"})
-    assert text(res) == ("09:30–10:00  Standup (Calendar) @ Teams Meeting\n"
+    assert text(res) == ("09:30–10:00  Standup (Calendar) @ Meet Room\n"
                          "12:00–13:00  Lunch (Calendar)")
 
 
-async def test_calendar_events_all_day_and_out_of_range(outlook):
-    outlook.seed(pim.FOLDER_CALENDAR, [
-        event("Trip", com_time(2026, 9, 19), com_time(2026, 9, 22)),          # began earlier
-        event("Holiday", com_time(2026, 9, 20), com_time(2026, 9, 21)),
-        event("Tomorrow", com_time(2026, 9, 21, 9), com_time(2026, 9, 21, 10)),
-    ])
+async def test_calendar_events_converts_other_timezones_to_local(g):
+    calendars(g, {"id": "me", "primary": True})
+    start = dt.datetime(2026, 9, 20, 9, 0).astimezone().astimezone(dt.UTC)
+    g.route("GET", r"/events$", {"items": [
+        ev("Call", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+           (start + dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))]})
+    res = await pim.calendar_events.handler({"day": "2026-09-20"})
+    assert text(res) == "09:00–09:30  Call (Calendar)"
+
+
+async def test_calendar_events_all_day_out_of_range_cancelled_declined(g):
+    calendars(g, {"id": "me", "primary": True})
+    g.route("GET", r"/events$", {"items": [
+        ev("Trip", "2026-09-19", "2026-09-22"),                       # began earlier
+        ev("Holiday", "2026-09-20", "2026-09-21"),
+        ev("Tomorrow", local(2026, 9, 21, 9), local(2026, 9, 21, 10)),
+        ev("Gone", local(2026, 9, 20, 9), local(2026, 9, 20, 10), status="cancelled"),
+        ev("Nope", local(2026, 9, 20, 9), local(2026, 9, 20, 10),
+           attendees=[{"self": True, "responseStatus": "declined"}]),
+    ]})
     res = await pim.calendar_events.handler({"day": "2026-09-20"})
     assert text(res) == "00:00–00:00  Holiday (Calendar)"
 
 
-async def test_calendar_events_no_events(outlook):
+async def test_calendar_events_merges_selected_calendars(g):
+    calendars(g,
+              {"id": "me", "summary": "me@gmail.com", "primary": True},
+              {"id": "fam#x@group", "summary": "Family", "selected": True},
+              {"id": "work", "summary": "Work", "summaryOverride": "Office", "selected": True},
+              {"id": "hidden", "summary": "Holidays"})                    # not shown: not read
+    g.route("GET", r"/calendars/me/events", {"items": [ev("Gym", local(2026, 9, 20, 18), local(2026, 9, 20, 19))]})
+    g.route("GET", r"/calendars/fam%23x%40group/events",
+            {"items": [ev("Dinner", local(2026, 9, 20, 20), local(2026, 9, 20, 21))]})
+    g.route("GET", r"/calendars/work/events",
+            {"items": [ev("Standup", local(2026, 9, 20, 9), local(2026, 9, 20, 9, 15))]})
+    res = await pim.calendar_events.handler({"day": "2026-09-20"})
+    assert text(res) == ("09:00–09:15  Standup (Office)\n"
+                         "18:00–19:00  Gym (Calendar)\n"
+                         "20:00–21:00  Dinner (Family)")
+    assert not g.find("GET", r"/calendars/hidden/")
+
+
+async def test_calendar_events_skips_a_failing_secondary_calendar(g):
+    calendars(g, {"id": "me", "primary": True}, {"id": "shared", "summary": "Shared", "selected": True})
+    g.route("GET", r"/calendars/me/events", {"items": [ev("Gym", local(2026, 9, 20, 18), local(2026, 9, 20, 19))]})
+    g.route("GET", r"/calendars/shared/events", FakeResponse(403, {"error": {"message": "Forbidden"}}))
+    res = await pim.calendar_events.handler({"day": "2026-09-20"})
+    assert text(res) == "18:00–19:00  Gym (Calendar)"
+
+
+async def test_calendar_events_follows_pages(g):
+    calendars(g, {"id": "me", "primary": True})
+    g.route("GET", r"/events$", lambda c: (
+        {"items": [ev("B", local(2026, 9, 20, 11), local(2026, 9, 20, 12))]} if c["params"].get("pageToken")
+        else {"items": [ev("A", local(2026, 9, 20, 10), local(2026, 9, 20, 11))], "nextPageToken": "p2"}))
+    res = await pim.calendar_events.handler({"day": "2026-09-20"})
+    assert text(res) == "10:00–11:00  A (Calendar)\n11:00–12:00  B (Calendar)"
+
+
+async def test_calendar_events_no_events(g):
+    calendars(g, {"id": "me", "primary": True})
+    g.route("GET", r"/events$", {})
     res = await pim.calendar_events.handler({"day": "today"})
     assert text(res) == "No events."
 
 
-async def test_calendar_events_bad_day_is_error(outlook):
+async def test_calendar_events_bad_day_is_error(g):
     res = await pim.calendar_events.handler({"day": "not-a-date"})
-    assert res["is_error"] and outlook.log == []
+    assert res["is_error"] and g.calls == []
 
 
-async def test_calendar_events_days_clamped(outlook):
+async def test_calendar_events_days_clamped(g):
+    calendars(g, {"id": "me", "primary": True})
+    g.route("GET", r"/events$", {})
     await pim.calendar_events.handler({"day": "2026-09-01", "days": 999})
-    assert "[Start] < '2026-10-01 00:00'" in outlook.log[1][1]
-    outlook.log.clear()
+    p = g.find("GET", r"/events$")[0]["params"]
+    assert dt.datetime.fromisoformat(p["timeMax"]) == dt.datetime(2026, 10, 1).astimezone()
+    g.calls.clear()
     await pim.calendar_events.handler({"day": "2026-09-01", "days": -5})
-    assert "[Start] < '2026-09-02 00:00'" in outlook.log[1][1]
+    p = g.find("GET", r"/events$")[0]["params"]
+    assert dt.datetime.fromisoformat(p["timeMax"]) == dt.datetime(2026, 9, 2).astimezone()
 
 
-# -- calendar_create ------------------------------------------------------------
+# -- calendar_create -----------------------------------------------------------------
 
-async def test_calendar_create_default_calendar(outlook):
-    res = await pim.calendar_create.handler(
-        {"title": 'Team "Sync"', "start": "2026-09-20 10:00", "minutes": 30})
-    appt, = outlook.created
-    assert appt.kind == pim.ITEM_APPOINTMENT and appt.saved
-    assert appt.Subject == 'Team "Sync"' and appt.Start == dt.datetime(2026, 9, 20, 10)
-    assert appt.Duration == 30
-    assert text(res) == "Created 'Team \"Sync\"'"
-
-
-async def test_calendar_create_named_calendar(outlook):
-    work = FakeFolder(Name="Work", Items=FakeItems())
-    outlook.folders[pim.FOLDER_CALENDAR].Folders = [work]
-    res = await pim.calendar_create.handler({"title": "X", "start": "2026-09-20 10:00", "calendar": "work"})
-    assert not res.get("is_error") and outlook.created == []
-    assert work.Items.added[0].Subject == "X" and work.Items.added[0].saved
+async def test_calendar_create_primary(g):
+    g.route("POST", r"/calendars/primary/events$", {"id": "e1"})
+    res = await pim.calendar_create.handler({"title": "Dentist\n", "start": "2026-09-20 15:30", "minutes": 45})
+    call, = g.calls
+    body = call["json"]
+    assert body["summary"] == "Dentist"
+    assert dt.datetime.fromisoformat(body["start"]["dateTime"]) == dt.datetime(2026, 9, 20, 15, 30).astimezone()
+    assert dt.datetime.fromisoformat(body["end"]["dateTime"]) == dt.datetime(2026, 9, 20, 16, 15).astimezone()
+    assert text(res) == "Created 'Dentist'"
 
 
-async def test_calendar_create_unknown_calendar_is_error(outlook):
-    res = await pim.calendar_create.handler({"title": "X", "start": "2026-09-20 10:00", "calendar": "Nope"})
-    assert res["is_error"] and "no calendar called 'Nope'" in text(res) and outlook.created == []
+async def test_calendar_create_named_calendar(g):
+    calendars(g, {"id": "me", "primary": True, "accessRole": "owner"},
+              {"id": "ro", "summary": "Work", "accessRole": "reader"},
+              {"id": "w@group", "summary": "Work", "accessRole": "writer"})
+    g.route("POST", r"/events$", {"id": "e1"})
+    res = await pim.calendar_create.handler({"title": "Review", "start": "2026-09-20 10:00", "calendar": "work"})
+    call, = g.find("POST", r"/events$")
+    assert call["url"].endswith("/calendars/w%40group/events") and not res.get("is_error")
 
 
-@pytest.mark.parametrize("start", ["nonsense", "2026-13-01 10:00", "20/09/2026 10:00", "0001-01-01 00:00"])
-async def test_calendar_create_bad_start_is_error(outlook, start):
-    res = await pim.calendar_create.handler({"title": "X", "start": start})
-    assert res["is_error"] and outlook.created == []
+async def test_calendar_create_unknown_calendar_is_error(g):
+    calendars(g, {"id": "me", "primary": True, "accessRole": "owner"})
+    res = await pim.calendar_create.handler({"title": "x", "start": "2026-09-20 10:00", "calendar": "Nope"})
+    assert res["is_error"] and "no calendar called 'Nope'" in text(res) and not g.find("POST", "")
 
 
-async def test_calendar_create_missing_title_is_error(outlook):
-    res = await pim.calendar_create.handler({"title": " \n", "start": "2026-09-20 10:00"})
-    assert res["is_error"] and outlook.created == []
+@pytest.mark.parametrize("start", ["tomorrow 3pm", "2026-13-01 10:00", "0001-01-01 00:00", ""])
+async def test_calendar_create_bad_start_is_error(g, start):
+    res = await pim.calendar_create.handler({"title": "x", "start": start})
+    assert res["is_error"] and g.calls == []
 
 
-async def test_calendar_create_minutes_clamped(outlook):
-    await pim.calendar_create.handler({"title": "X", "start": "2026-09-20 10:00", "minutes": 10_000})
-    assert outlook.created[0].Duration == 24 * 60
+async def test_calendar_create_missing_title_is_error(g):
+    res = await pim.calendar_create.handler({"title": " ", "start": "2026-09-20 10:00"})
+    assert res["is_error"] and g.calls == []
 
 
-# -- mail_unread / mail_search --------------------------------------------------
-
-def mail(sender, addr, subject, when, body="", cls=pim.CLASS_MAIL):
-    return FakeItem(SenderName=sender, SenderEmailAddress=addr, Subject=subject,
-                    ReceivedTime=when, Body=body, Class=cls)
-
-
-async def test_mail_unread_query_and_format(outlook):
-    outlook.seed(pim.FOLDER_INBOX, [
-        mail("Alice", "a@x.com", "Hi\tthere", com_time(2026, 9, 16, 9, 5), "Preview\r\ntext"),
-        mail("Bob", "/O=EXCHANGE/CN=bob", "Invite", com_time(2026, 9, 16, 8), cls=53),
-        mail("Bob", "/O=EXCHANGE/CN=bob", "Notes", com_time(2026, 9, 16, 8)),
-    ])
-    res = await pim.mail_unread.handler({})
-    assert outlook.log[:2] == [("Sort", "[ReceivedTime]", True, False), ("Restrict", "[UnRead] = True", False)]
-    assert text(res) == ("2026-09-16 09:05  Alice <a@x.com> — Hi there\n  Preview text\n"
-                         "2026-09-16 08:00  Bob — Notes\n  ")
+async def test_calendar_create_minutes_clamped(g):
+    g.route("POST", r"/events$", {})
+    await pim.calendar_create.handler({"title": "x", "start": "2026-09-20 10:00", "minutes": 99999})
+    body = g.calls[-1]["json"]
+    span = dt.datetime.fromisoformat(body["end"]["dateTime"]) - dt.datetime.fromisoformat(body["start"]["dateTime"])
+    assert span == dt.timedelta(days=1)
 
 
-async def test_mail_unread_limit_clamped(outlook):
-    outlook.seed(pim.FOLDER_INBOX, [mail("A", "a@x.com", f"m{i}", com_time(2026, 9, 1)) for i in range(50)])
-    res = await pim.mail_unread.handler({"limit": 1000})
-    assert text(res).count(" — m") == pim.MAIL_LIMIT_MAX
+# -- mail_unread / mail_search -------------------------------------------------------
+
+def gmail_message(mid, sender, subject, when: dt.datetime, snippet=""):
+    return {"id": mid, "snippet": snippet, "internalDate": str(int(when.timestamp() * 1000)),
+            "payload": {"headers": [{"name": "From", "value": sender}, {"name": "Subject", "value": subject},
+                                    {"name": "Date", "value": "ignored"}]}}
+
+
+def mailbox(g, *messages):
+    g.route("GET", r"/users/me/messages$", {"messages": [{"id": m["id"]} for m in messages]})
+    for m in messages:
+        g.route("GET", rf"/users/me/messages/{m['id']}$", m)
+
+
+async def test_mail_unread_query_and_format(g):
+    mailbox(g,
+            gmail_message("m2", '"Priya Shah" <priya@x.com>', "Re:\tplans", dt.datetime(2026, 9, 20, 9, 5),
+                          "See you &amp; the kids at\n7"),
+            gmail_message("m1", "bank@x.com", "", dt.datetime(2026, 9, 19, 18, 0)))
     res = await pim.mail_unread.handler({"limit": 3})
-    assert text(res).count(" — m") == 3
+    listing, = g.find("GET", r"/messages$")
+    assert listing["url"] == "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    assert listing["params"] == {"q": "is:unread in:inbox", "maxResults": 3}
+    get = g.find("GET", r"/messages/m2$")[0]
+    assert get["params"] == {"format": "metadata", "metadataHeaders": ["From", "Subject", "Date"]}
+    assert text(res) == ("2026-09-20 09:05  Priya Shah <priya@x.com> — Re: plans\n  See you & the kids at 7\n"
+                         "2026-09-19 18:00  bank@x.com — (no subject)\n  ")
 
 
-async def test_mail_preview_is_capped(outlook):
-    outlook.seed(pim.FOLDER_INBOX, [mail("A", "a@x.com", "s", com_time(2026, 9, 1), "x" * 1000)])
-    preview = text(await pim.mail_unread.handler({})).split("\n")[1]
-    assert preview == "  " + "x" * pim.PREVIEW_CHARS
+async def test_mail_unread_limit_clamped(g):
+    mailbox(g)
+    await pim.mail_unread.handler({"limit": 500})
+    assert g.calls[0]["params"]["maxResults"] == pim.MAIL_LIMIT_MAX
 
 
-async def test_mail_unread_no_messages(outlook):
+async def test_mail_preview_is_capped(g):
+    mailbox(g, gmail_message("m1", "a@b.co", "s", dt.datetime(2026, 9, 20), "x" * 500))
+    res = await pim.mail_unread.handler({})
+    assert text(res).splitlines()[1] == "  " + "x" * pim.PREVIEW_CHARS
+
+
+async def test_mail_unread_no_messages(g):
+    g.route("GET", r"/messages$", {"resultSizeEstimate": 0})
     res = await pim.mail_unread.handler({})
     assert text(res) == "No messages."
 
 
-async def test_mail_unread_count(outlook):
-    outlook.folders[pim.FOLDER_INBOX].UnReadItemCount = 7
-    assert await pim.mail_unread_count() == 7
-    outlook.folders[pim.FOLDER_INBOX].UnReadItemCount = 0
-    assert await pim.mail_unread_count() == 0
+async def test_mail_unread_count(g):
+    g.route("GET", r"/labels/INBOX$", {"id": "INBOX", "messagesUnread": 42})
+    assert await pim.mail_unread_count() == 42
 
 
-async def test_mail_unread_count_raises_without_outlook(no_outlook):
-    with pytest.raises(RuntimeError, match="classic Outlook"):
+async def test_mail_unread_count_raises_when_not_connected(tmp_home):
+    with pytest.raises(RuntimeError, match="Google isn't set up"):
         await pim.mail_unread_count()
 
 
-async def test_mail_unread_count_raises_on_garbage(outlook):
-    outlook.folders[pim.FOLDER_INBOX].UnReadItemCount = "lots"
-    with pytest.raises(RuntimeError, match="lots"):
+async def test_mail_unread_count_raises_on_garbage(g):
+    g.route("GET", r"/labels/INBOX$", {"id": "INBOX"})
+    with pytest.raises(RuntimeError, match="unexpected unread count"):
         await pim.mail_unread_count()
 
 
-async def test_mail_search_requires_query(outlook):
-    res = await pim.mail_search.handler({"query": "  "})
-    assert res["is_error"] and outlook.log == []
+async def test_mail_unread_count_raises_on_http_error(g):
+    with pytest.raises(RuntimeError, match="404"):
+        await pim.mail_unread_count()
 
 
-async def test_mail_search_filter_escapes_query(outlook):
-    await pim.mail_search.handler({"query": "o'neil"})
-    flt = outlook.log[1][1]
-    assert flt.startswith("@SQL=")
-    assert "\"urn:schemas:httpmail:subject\" LIKE '%o''neil%'" in flt
-    assert "fromname" in flt and "fromemail" in flt
+async def test_mail_search_requires_query(g):
+    for q in ("", '""'):
+        res = await pim.mail_search.handler({"query": q})
+        assert res["is_error"] and g.calls == []
 
 
-def test_mail_search_filter_drops_wildcards():
-    assert "%_%" not in pim.mail_search_filter("_") and "[" not in pim.mail_search_filter("[x]")
+async def test_mail_search_quotes_the_query(g):
+    mailbox(g)
+    await pim.mail_search.handler({"query": 'invoice" OR from:boss \\ x'})
+    assert g.calls[0]["params"]["q"] == '"invoice OR from:boss x"'
+
+
+def test_mail_search_query_cannot_escape_the_phrase():
+    q = pim.mail_search_query('a"b\\c\nd')
+    assert q == '"a b c d"' and q.count('"') == 2
 
 
 # -- mail_send ------------------------------------------------------------------
 
-async def test_mail_send_to_an_address(outlook):
+def sent(g):
+    call, = g.find("POST", r"/messages/send$")
+    raw = base64.urlsafe_b64decode(call["json"]["raw"])
+    return email.message_from_bytes(raw, policy=email.policy.default)
+
+
+async def test_mail_send_to_an_address(g):
+    g.route("POST", r"/messages/send$", {"id": "s1"})
     res = await pim.mail_send.handler({"to": "x@y.com", "subject": 'Hi "there"', "body": "Line1\nLine2"})
-    msg, = outlook.created
-    assert msg.kind == pim.ITEM_MAIL and msg.sent
-    assert (msg.To, msg.Subject, msg.Body) == ("x@y.com", 'Hi "there"', "Line1\nLine2")
+    msg = sent(g)
+    assert g.calls[0]["url"] == "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+    assert (msg["To"], msg["Subject"]) == ("x@y.com", 'Hi "there"')
+    assert msg.get_content() == "Line1\nLine2\n"
     assert text(res) == "Sent to x@y.com"
 
 
-async def test_mail_send_requires_to(outlook):
+async def test_mail_send_requires_to(g):
     res = await pim.mail_send.handler({"to": "", "subject": "s", "body": "b"})
-    assert res["is_error"] and outlook.created == []
+    assert res["is_error"] and g.calls == []
 
 
-async def test_mail_send_by_name_resolves_through_contacts(outlook, _fake_contacts):
+async def test_mail_send_by_name_resolves_through_contacts(g, _fake_contacts):
     _fake_contacts[0] = ("Priya Shah", ["priya@example.com"])
+    g.route("POST", r"/messages/send$", {"id": "s1"})
     res = await pim.mail_send.handler({"to": "Priya", "subject": "s", "body": "on my way"})
-    assert outlook.created[0].To == "priya@example.com"
+    assert sent(g)["To"] == "Priya Shah <priya@example.com>"
     assert not res.get("is_error") and text(res) == "Sent to Priya Shah"
 
 
-async def test_mail_send_ambiguous_name_asks_and_never_sends(outlook, _fake_contacts):
+async def test_mail_send_ambiguous_name_asks_and_never_sends(g, _fake_contacts):
     _fake_contacts.append(("Priya Nair", ["pn@x.com"]))
     res = await pim.mail_send.handler({"to": "Priya", "body": "hi"})
     assert res["is_error"] and text(res) == "error: Which Priya — Priya Shah or Priya Nair?"
-    assert outlook.created == []
+    assert g.calls == []
 
 
-async def test_mail_send_unknown_name_says_so(outlook):
+async def test_mail_send_unknown_name_says_so(g):
     res = await pim.mail_send.handler({"to": "Zed", "body": "hi"})
-    assert res["is_error"] and "No contact named Zed" in text(res) and outlook.created == []
+    assert res["is_error"] and "No contact named Zed" in text(res) and g.calls == []
 
 
-async def test_mail_send_to_a_phone_number_is_refused(outlook):
-    res = await pim.mail_send.handler({"to": "+1 555 123 4567", "body": "hi"})
-    assert res["is_error"] and "isn't an email address" in text(res) and outlook.created == []
+async def test_mail_send_to_a_phone_number_is_refused(g):
+    res = await pim.mail_send.handler({"to": "+91 98765 43210", "body": "hi"})
+    assert res["is_error"] and "isn't an email address" in text(res) and g.calls == []
 
 
-async def test_mail_send_name_without_outlook_says_why(outlook, monkeypatch):
-    def unavailable(name):
-        raise pim.OutlookUnavailable()
-    monkeypatch.setattr(pim, "_contacts_search", unavailable)
+async def test_mail_send_name_without_google_says_why(tmp_home, monkeypatch):
+    monkeypatch.setattr(pim, "_contacts_search", pim._people_search)
     res = await pim.mail_send.handler({"to": "Priya", "body": "hi"})
-    assert res["is_error"] and "Outlook" in text(res) and "email address" in text(res)
-    assert outlook.created == []
+    assert res["is_error"] and "Google isn't set up" in text(res) and "give me the email address" in text(res)
 
 
 # -- recipients -------------------------------------------------------------------
@@ -412,141 +444,170 @@ async def test_resolve_async(_fake_contacts):
     assert (await pim.resolve_recipient_async("Priya")).handle == "p@x.com"
 
 
-def contact(full, *emails, first="", last="", nick="", cls=40):
-    kw = {f"Email{i + 1}Address": e for i, e in enumerate(emails)}
-    return FakeItem(FullName=full, FirstName=first, LastName=last, NickName=nick, Class=cls, **kw)
+def person(name, *emails):
+    p = {"emailAddresses": [{"value": e} for e in emails]}
+    if name:
+        p["names"] = [{"displayName": name}]
+    return {"person": p}
 
 
-def test_search_outlook_contacts(outlook):
-    outlook.seed(pim.FOLDER_CONTACTS, [
-        contact("Priya Shah", "p@x.com", "/O=EXCH/CN=PRIYA", first="Priya", last="Shah"),
-        contact("Rahul Verma", "r@x.com"),
-        contact("Priya's list", "l@x.com", cls=69),                           # a distribution list
-    ])
-    assert pim._search_outlook(outlook, "shah") == [("Priya Shah", ["p@x.com"])]
-    assert pim._search_outlook(outlook, "pri") == [("Priya Shah", ["p@x.com"])]
-    assert ("CreateRecipient", "pri") not in outlook.log
+def test_people_search_warms_up_then_searches_contacts(g):
+    g.route("GET", r"/people:searchContacts$", lambda c: (
+        {"results": [person("Priya Shah", "p@x.com", "priya@y.com")]} if c["params"]["query"] else {}))
+    assert pim._people_search("pri") == [("Priya Shah", ["p@x.com", "priya@y.com"])]
+    warm, search = g.calls
+    assert warm["url"] == "https://people.googleapis.com/v1/people:searchContacts"
+    assert warm["params"] == {"readMask": "names,emailAddresses", "pageSize": 10, "query": ""}
+    assert search["params"]["query"] == "pri"
+    assert not g.find("GET", r"otherContacts")
+    pim._people_search("pri")                                # warmed once per process
+    assert len(g.find("GET", r"searchContacts")) == 3
 
 
-def test_search_outlook_falls_back_to_the_address_book(outlook):
-    outlook.recipient = FakeRecipient(ok=True, name="Dana Lee", address="dana@corp.com")
-    assert pim._search_outlook(outlook, "Dana") == [("Dana Lee", ["dana@corp.com"])]
-    outlook.recipient = FakeRecipient(ok=False)
-    assert pim._search_outlook(outlook, "Nobody") == []
+def test_people_search_falls_back_to_other_contacts(g):
+    g.route("GET", r"/people:searchContacts$", {})
+    g.route("GET", r"/otherContacts:search$",
+            {"results": [person("", "dana@corp.com"), person("Dana Lee", "dana.lee@corp.com")]})
+    assert pim._people_search("dana") == [("dana@corp.com", ["dana@corp.com"]),
+                                          ("Dana Lee", ["dana.lee@corp.com"])]
 
 
-def test_contacts_search_runs_in_an_outlook_session(outlook, monkeypatch):
-    monkeypatch.undo()                                   # the real _contacts_search, not conftest's fake
-    fake = outlook
-
-    @contextlib.contextmanager
-    def session():
-        yield fake, fake
-    monkeypatch.setattr(pim, "_outlook_session", session)
-    outlook.seed(pim.FOLDER_CONTACTS, [contact("Priya Shah", "p@x.com")])
-    assert pim._contacts_search("priya") == [("Priya Shah", ["p@x.com"])]
+def test_real_contacts_search_resolves_a_name(g, monkeypatch):
+    monkeypatch.setattr(pim, "_contacts_search", pim._people_search)
+    g.route("GET", r"/people:searchContacts$", {"results": [person("Priya Shah", "p@x.com")]})
+    assert pim.resolve_recipient("Priya") == pim.Recipient("Priya Shah", "p@x.com")
 
 
 @pytest.mark.parametrize("to, handle", [
-    ("priya@example.com", True), ("a.b+c@sub.example.co.uk", True),
-    ("+15551234567", False), ("Priya", False), ("Priya Shah", False), ("a@b", False), ("@x.com", False),
+    ("a@b.co", True), ("first.last+tag@sub.example.org", True), ("Priya", False),
+    ("Priya Shah", False), ("a@b", False), ("+91 98765 43210", False), ("", False),
 ])
 def test_is_handle(to, handle):
     assert pim.is_handle(to) is handle
 
 
-# -- reminder_create --------------------------------------------------------------
+# -- reminder_create ------------------------------------------------------------
 
-async def test_reminder_create_no_when(outlook):
+async def test_reminder_create_no_when(g):
+    g.route("POST", r"/tasks$", {"id": "t1"})
     res = await pim.reminder_create.handler({"title": "Buy milk"})
-    task, = outlook.created
-    assert task.kind == pim.ITEM_TASK and task.Subject == "Buy milk" and task.saved
-    assert not hasattr(task, "DueDate") and not hasattr(task, "ReminderTime")
+    call, = g.calls
+    assert call["url"] == "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks"
+    assert call["json"] == {"title": "Buy milk"}
     assert text(res) == "Created reminder 'Buy milk'"
 
 
-async def test_reminder_create_with_when(outlook):
-    await pim.reminder_create.handler({"title": "Call", "when": "2026-09-20 09:00"})
-    task, = outlook.created
-    assert task.DueDate == dt.datetime(2026, 9, 20)
-    assert task.ReminderSet is True and task.ReminderTime == dt.datetime(2026, 9, 20, 9)
+async def test_reminder_create_with_when(g):
+    g.route("POST", r"/tasks$", {"id": "t1"})
+    await pim.reminder_create.handler({"title": "Call mum", "when": "2026-09-21 18:30"})
+    assert g.calls[0]["json"] == {"title": "Call mum", "due": "2026-09-21T00:00:00.000Z",
+                                  "notes": "Due at 18:30"}
 
 
-async def test_reminder_create_bad_when_is_error(outlook):
-    res = await pim.reminder_create.handler({"title": "Call", "when": "garbage"})
-    assert res["is_error"] and outlook.created == []
+async def test_reminder_create_bad_when_is_error(g):
+    res = await pim.reminder_create.handler({"title": "x", "when": "soon"})
+    assert res["is_error"] and g.calls == []
 
 
-async def test_reminder_create_missing_title_is_error(outlook):
+async def test_reminder_create_missing_title_is_error(g):
     res = await pim.reminder_create.handler({"title": ""})
-    assert res["is_error"] and outlook.created == []
+    assert res["is_error"] and g.calls == []
 
 
 # -- reminders_due --------------------------------------------------------------
 
-def task(subject, due=None, reminder=None):
-    return FakeItem(Subject=subject, DueDate=due or com_time(4501, 1, 1),
-                    ReminderSet=reminder is not None, ReminderTime=reminder or com_time(4501, 1, 1))
+def gtask(title, due: dt.date | None = None, notes=None, **kw):
+    t = {"title": title, "status": "needsAction", **kw}
+    if due is not None:
+        t["due"] = f"{due:%Y-%m-%d}T00:00:00.000Z"
+    if notes is not None:
+        t["notes"] = notes
+    return t
 
 
-async def test_reminders_due_formats_and_filters(outlook):
+def tasks(g, *items, title="My Tasks"):
+    g.route("GET", r"/users/@me/lists/@default$", {"id": "x", "title": title})
+    g.route("GET", r"/lists/@default/tasks$", {"items": list(items)})
+
+
+async def test_reminders_due_formats_and_filters(g):
     now = dt.datetime.now()
-    soon = now + dt.timedelta(hours=2)
-    soon_utc = com_time(soon.year, soon.month, soon.day, soon.hour, soon.minute)
-    outlook.seed(pim.FOLDER_TASKS, [
-        task("Someday"),                                                    # undated
-        task("Far off", due=com_time(now.year + 2, 1, 1)),
-        task("Call\nmum", due=com_time(soon.year, soon.month, soon.day), reminder=soon_utc),
-        task("Overdue", due=com_time(2020, 1, 2)),
-    ])
+    soon = (now + dt.timedelta(hours=2)).replace(second=0, microsecond=0)
+    tasks(g,
+          gtask("Someday"),                                                    # undated
+          gtask("Far off", dt.date(now.year + 2, 1, 1)),
+          gtask("Call\nmum", soon.date(), notes=f"Due at {soon:%H:%M}"),
+          gtask("Overdue", dt.date(2020, 1, 2)),
+          gtask("Done", dt.date(2020, 1, 1), status="completed"))
     res = await pim.reminders_due.handler({"days": 3})
-    assert outlook.log[0] == ("Restrict", "[Complete] = False", False)
-    assert text(res) == (f"2020-01-02 00:00  Overdue (Tasks)\n"
-                         f"{soon:%Y-%m-%d %H:%M}  Call mum (Tasks)")
+    call, = g.find("GET", r"/tasks$")
+    end = now + dt.timedelta(days=3)
+    assert call["params"] == {"showCompleted": "false", "showHidden": "false", "maxResults": 100,
+                              "dueMax": f"{end:%Y-%m-%d}T23:59:59Z"}
+    assert text(res) == (f"2020-01-02 00:00  Overdue (My Tasks)\n"
+                         f"{soon:%Y-%m-%d %H:%M}  Call mum (My Tasks)")
 
 
-async def test_reminders_due_none(outlook):
+async def test_reminders_due_ignores_a_bogus_time_note(g):
+    tasks(g, gtask("Odd", dt.date(2020, 1, 2), notes="Due at 99:99"))
+    assert text(await pim.reminders_due.handler({})) == "2020-01-02 00:00  Odd (My Tasks)"
+
+
+async def test_reminders_due_none(g):
+    tasks(g)
     res = await pim.reminders_due.handler({})
     assert text(res) == "No reminders due."
 
 
-async def test_reminders_due_days_clamped(outlook):
+async def test_reminders_due_days_clamped(g):
     far = dt.datetime.now() + dt.timedelta(days=pim.REMINDERS_DAYS_MAX - 1)
-    outlook.seed(pim.FOLDER_TASKS, [task("Later", due=com_time(far.year, far.month, far.day))])
+    tasks(g, gtask("Later", far.date()))
     assert "Later" in text(await pim.reminders_due.handler({"days": 200}))
     assert "Later" not in text(await pim.reminders_due.handler({"days": -5}))
 
 
 # -- notes_create ----------------------------------------------------------------
 
-async def test_notes_create(outlook):
-    res = await pim.notes_create.handler({"title": "Groceries", "body": "milk\neggs"})
-    note, = outlook.created
-    assert note.kind == pim.ITEM_NOTE and note.saved
-    assert note.Body == "Groceries\r\nmilk\r\neggs"
+def upload_parts(call):
+    ctype = call["headers"]["Content-Type"]
+    assert ctype.startswith("multipart/related; boundary=")
+    msg = email.message_from_bytes(f"Content-Type: {ctype}\r\n\r\n".encode() + call["data"],
+                                   policy=email.policy.default)
+    meta, content = msg.iter_parts()
+    return json.loads(meta.get_content()), content.get_content().rstrip("\r\n")
+
+
+async def test_notes_create_makes_the_folder_then_a_doc(g):
+    g.route("GET", r"/drive/v3/files$", {"files": []})
+    g.route("POST", r"com/drive/v3/files$", {"id": "folder1"})
+    g.route("POST", r"/upload/drive/v3/files$", {"id": "doc1"})
+    res = await pim.notes_create.handler({"title": "Groceries", "body": "milk\r\neggs"})
+    find, = g.find("GET", r"/files$")
+    assert find["params"]["q"] == ("name = 'Veronica Notes' and mimeType = "
+                                   "'application/vnd.google-apps.folder' and trashed = false")
+    mkdir, = g.find("POST", r"com/drive/v3/files$")
+    assert mkdir["json"] == {"name": "Veronica Notes", "mimeType": "application/vnd.google-apps.folder"}
+    up, = g.find("POST", r"/upload/")
+    assert up["params"] == {"uploadType": "multipart", "fields": "id"}
+    meta, content = upload_parts(up)
+    assert meta == {"name": "Groceries", "mimeType": "application/vnd.google-apps.document",
+                    "parents": ["folder1"]}
+    assert content.replace("\r\n", "\n") == "milk\neggs"
     assert text(res) == "Created note 'Groceries'"
 
 
-async def test_notes_create_text_is_literal(outlook):
-    await pim.notes_create.handler({"title": "R&D <b>", "body": 'say "hi" & <script>'})
-    assert outlook.created[0].Body == 'R&D <b>\r\nsay "hi" & <script>'
+async def test_notes_create_reuses_the_folder(g):
+    g.route("GET", r"/drive/v3/files$", {"files": [{"id": "f9"}]})
+    g.route("POST", r"/upload/drive/v3/files$", {"id": "doc1"})
+    await pim.notes_create.handler({"title": "Idea"})
+    assert not g.find("POST", r"com/drive/v3/files$")
+    meta, content = upload_parts(g.find("POST", r"/upload/")[0])
+    assert meta["parents"] == ["f9"] and content == ""
 
 
-async def test_notes_create_no_body(outlook):
-    await pim.notes_create.handler({"title": "Reminder"})
-    assert outlook.created[0].Body == "Reminder"
-
-
-async def test_notes_create_missing_title_is_error(outlook):
+async def test_notes_create_missing_title_is_error(g):
     res = await pim.notes_create.handler({"title": "", "body": "x"})
-    assert res["is_error"] and outlook.created == []
-
-
-# -- helpers ----------------------------------------------------------------------
-
-def test_naive_drops_the_bogus_utc_tag():
-    assert pim._naive(com_time(2026, 9, 20, 9, 30)) == dt.datetime(2026, 9, 20, 9, 30)
-    assert pim._naive(None) is None
+    assert res["is_error"] and g.calls == []
 
 
 # -- timers -----------------------------------------------------------------------

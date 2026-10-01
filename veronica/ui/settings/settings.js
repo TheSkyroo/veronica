@@ -280,6 +280,44 @@
     return box;
   }
 
+  // Connect / Disconnect one account. Signing in can take minutes (it waits
+  // for the browser), so the reply's text is kept per account across the
+  // state pushes that re-render the tab meanwhile.
+  const accountStatus = {};   // id -> {text, cls, sig}
+  function accountRow(a) {
+    const id = String(a.id || '');
+    const st = accountStatus[id] || (accountStatus[id] = {text: '', cls: '', sig: undefined});
+    const sig = (a.connected ? 'c' : '-') + (a.busy ? 'b' : '-');
+    if (st.sig !== undefined && st.sig !== sig && !a.busy && !st.pending) { st.text = ''; st.cls = ''; }
+    st.sig = sig;
+    const status = el('span', {class: 'status' + (st.cls ? ' ' + st.cls : ''), text: st.text});
+    const r = el('div', {class: 'row' + (a.configured ? '' : ' disabled'), 'data-section': 'general', 'data-key': 'account', 'data-account': id});
+    r.appendChild(el('span', {class: 'label', text: a.label || id}));
+    r.appendChild(el('span', {class: 'help', text: a.detail || ''}));
+    const cmd = a.connected ? 'disconnect_account' : 'connect_account';
+    const verb = a.connected ? 'Disconnect' : 'Connect';
+    const btn = button(verb + ' ' + (a.label || id), {
+      class: a.connected ? 'btn' : 'btn primary', disabled: !a.configured || !!a.busy,
+      attrs: {'data-cmd': cmd, 'data-account': id},
+      onclick: () => {
+        st.text = a.connected ? 'Disconnecting…' : 'Waiting for your browser…'; st.cls = ''; st.pending = true;
+        status.textContent = st.text; status.className = 'status';
+        btn.disabled = true;
+        post(cmd, {account: id}).then(res => {
+          st.pending = false;
+          st.text = res.message || (res.ok === false ? 'Failed' : '');
+          st.cls = res.ok === false ? 'error' : 'good';
+          const live = document.querySelector('#pane .row[data-account="' + id + '"] .status');
+          if (live) { live.textContent = st.text; live.className = 'status ' + st.cls; }
+          btn.disabled = false;
+        });
+      },
+    });
+    r.appendChild(el('div', {class: 'control'}, [btn]));
+    r.appendChild(status);
+    return r;
+  }
+
   function button(label, opts) {
     const o = opts || {};
     return el('button', Object.assign({type: 'button', class: o.class || 'btn', text: label, disabled: o.disabled}, o.attrs || {},
@@ -303,6 +341,10 @@
       frag.push(settingRow('general', 'hud_particles'));
       frag.push(settingRow('general', 'hud_intensity'));
       frag.push(settingRow('general', 'ptt_enabled'));
+      frag.push(el('h3', {text: 'Accounts'}));
+      frag.push(el('p', {class: 'lead', text: 'Spotify plays your songs; Google lets her read your mail and calendar. Signing in opens your browser.'}));
+      frag.push(settingRow('general', 'spotify_client_id', {wide: true}));
+      for (const a of (Array.isArray(g.accounts) ? g.accounts : [])) frag.push(accountRow(a));
       frag.push(el('div', {class: 'actions'}, [
         button('Open Startup Apps…', {attrs: {'data-cmd': 'open_login_items'}, onclick: () => post('open_login_items')}),
         button('Microphone Privacy…', {attrs: {'data-cmd': 'open_mic_privacy'}, onclick: () => post('open_mic_privacy')}),

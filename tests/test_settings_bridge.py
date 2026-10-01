@@ -1,4 +1,4 @@
-"""SettingsBridge: every command driven with fakes — no AppKit, no prefs.json,
+"""SettingsBridge: every command driven with fakes — no GUI, no prefs.json,
 no orchestrator loop. `run_on_loop` runs the coroutine to completion inline
 and `run_thread` runs its function inline so the update flow is synchronous."""
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 from veronica.brain.policy import classify
 from veronica.config import EDITABLE_SETTINGS, Settings, load_settings
 from veronica.proactive import Schedule
+from veronica.ui.settings import bridge as bridge_mod
 from veronica.ui.settings.bridge import AUTO_ALLOW_LABELS, SettingsBridge
 
 
@@ -162,9 +163,38 @@ def run_thread(fn):
     fn()
 
 
+class FakeAccount:
+    """spotify_account / google_account stand-in."""
+
+    def __init__(self, configured=True, connected=False, who="", connect_error=None, said=None):
+        self.configured, self.connected, self.who = configured, connected, who
+        self.connect_error, self.said = connect_error, said
+        self.calls = []
+
+    def is_configured(self):
+        return self.configured
+
+    def is_connected(self):
+        return self.connected
+
+    def account(self):
+        return self.who
+
+    def connect(self):
+        self.calls.append("connect")
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+        return self.said
+
+    def disconnect(self):
+        self.calls.append("disconnect")
+        self.connected = False
+
+
 class Harness:
-    def __init__(self, *, orch: FakeOrch | None = None, warming=False, bundle=Path("/tmp/Veronica.app"),
-                 updater=None, prefs=None, login=None):
+    def __init__(self, *, orch: FakeOrch | None = None, warming=False, exe=Path("/tmp/Veronica/Veronica.exe"),
+                 updater=None, prefs=None, login=None, accounts=None):
         self.orch = orch if orch is not None else (None if warming else FakeOrch())
         self.prefs = prefs or FakePrefs()
         self.store = FakeStore()
@@ -174,10 +204,18 @@ class Harness:
         self.opened: list = []
         self.states: list[dict] = []
         self.settings = Settings()
+        self.accounts = accounts if accounts is not None else {
+            "spotify": FakeAccount(configured=False), "google": FakeAccount()}
+
+        def account_module(name):
+            acct = self.accounts[name]
+            if isinstance(acct, Exception):
+                raise acct
+            return acct
 
         def relaunch():
             self.relaunches += 1
-            return bundle is not None
+            return exe is not None
 
         self.bridge = SettingsBridge(
             settings=self.settings,
@@ -189,10 +227,11 @@ class Harness:
             version=FAKE_VERSION,
             updater=self.updater,
             relaunch=relaunch,
-            bundle_path=bundle,
+            exe_path=exe,
             repo=Path("/repo"),
             run_thread=run_thread,
             open_path=self.opened.append,
+            account_module=account_module,
         )
         self.bridge.on_state_changed = self.states.append
 
@@ -215,7 +254,7 @@ def test_state_has_every_section_and_key(h):
     assert set(st["briefings"]) == {"briefing_enabled", "briefing_time", "nudges_enabled", "nudge_minutes",
                                     "quiet_enabled", "quiet_from", "quiet_to", "battery_enabled",
                                     "unread_enabled", "unread_time"}
-    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording", "shortcut_allowlist",
+    assert set(st["brain"]) == {"effort", "memory_enabled", "memory_facts_max", "brain_cwd", "computer_trust_s", "preapprove_by_wording",
                                 "auto_allow_tools", "auto_allowable",
                                 "brain_backend", "brain_failover", "brain_failover_order", "brain_limit_cooldown_min",
                                 "codex_native_tools", "antigravity_native_tools", "copilot_native_tools",
@@ -287,7 +326,7 @@ def test_set_language_runs_language_turn(h):
 
 def _deferred_harness(**kw):
     """A harness whose run_on_loop only *schedules* (collects coroutines),
-    like the real menubar `_schedule` from the AppKit thread, and whose
+    like the real tray app's `_schedule` from the UI thread, and whose
     run_thread only collects thunks."""
     pending: list = []
     threads: list = []
@@ -342,14 +381,14 @@ def test_set_language_rejects_unknown_mode(h):
 
 def test_set_start_at_login_enables_and_disables(h):
     assert h.bridge.set("general", "start_at_login", True)["ok"]
-    assert h.login.calls == [("enable", Path("/tmp/Veronica.app"))]
+    assert h.login.calls == [("enable", Path("/tmp/Veronica/Veronica.exe"))]
     assert h.bridge.get_state()["general"]["start_at_login"] is True
     assert h.bridge.set("general", "start_at_login", False)["ok"]
     assert h.login.calls[-1] == ("disable",)
 
 
-def test_set_start_at_login_needs_bundle():
-    h = Harness(bundle=None)
+def test_set_start_at_login_needs_the_built_exe():
+    h = Harness(exe=None)
     res = h.bridge.set("general", "start_at_login", True)
     assert res["ok"] is False and res["message"] == "Build the app first."
     assert h.login.calls == []
@@ -680,8 +719,8 @@ def test_restart_relaunches(h):
     assert h.relaunches == 1
 
 
-def test_restart_without_bundle_says_so():
-    h = Harness(bundle=None)
+def test_restart_without_the_built_exe_says_so():
+    h = Harness(exe=None)
     res = h.bridge.restart()
     assert res["ok"] is True and res["message"] == "Restart me from the terminal."
     assert h.relaunches == 1
@@ -698,8 +737,8 @@ def test_restart_replies_before_relaunch_is_scheduled():
     assert h.relaunches == 1
 
 
-def test_restart_without_bundle_replies_before_quit():
-    h, _, threads = _deferred_harness(bundle=None)
+def test_restart_without_the_built_exe_replies_before_quit():
+    h, _, threads = _deferred_harness(exe=None)
     res = h.bridge.restart()
     assert res["message"] == "Restart me from the terminal."
     assert h.relaunches == 0
@@ -707,11 +746,22 @@ def test_restart_without_bundle_replies_before_quit():
     assert h.relaunches == 1
 
 
-def test_open_logs_and_login_items(h):
+def test_open_logs_startup_apps_and_mic_privacy(h):
     assert h.bridge.open_logs()["ok"]
     assert h.opened == [h.settings.log_file]
     assert h.bridge.open_login_items()["ok"]
-    assert h.opened[-1].startswith("x-apple.systempreferences:")
+    assert h.opened[-1] == "ms-settings:startupapps"
+    assert h.bridge.handle("open_mic_privacy", {})["ok"]
+    assert h.opened[-1] == "ms-settings:privacy-microphone"
+
+
+def test_default_open_path_uses_the_windows_shell(monkeypatch):
+    from veronica.ui.settings import bridge as bridge_mod
+
+    opened = []
+    monkeypatch.setattr(bridge_mod._win32, "open_target", opened.append)
+    bridge_mod._open_path("ms-settings:startupapps")
+    assert opened == ["ms-settings:startupapps"]
 
 
 # -- handle ---------------------------------------------------------------------------
@@ -729,7 +779,7 @@ def test_handle_dispatches_and_reports_errors(h):
     assert res == {"ok": False, "message": "boom"}
 
 
-def test_bridge_imports_no_appkit():
+def test_bridge_imports_no_gui_toolkit():
     import ast
 
     import veronica.ui.settings.bridge as mod
@@ -741,7 +791,7 @@ def test_bridge_imports_no_appkit():
             names |= {a.name for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             names.add(node.module or "")
-    assert not {n for n in names if n.split(".")[0] in ("AppKit", "WebKit", "objc", "Foundation", "rumps")}
+    assert not {n for n in names if n.split(".")[0] in ("webview", "pystray", "win32api", "win32gui", "winreg")}
 
 
 # -- fix round 1 ----------------------------------------------------------------------
@@ -780,7 +830,7 @@ def test_marshal_is_a_constructor_kwarg(h):
     b = SettingsBridge(
         settings=h.settings, get_orch=lambda: h.orch, store=h.store, run_on_loop=run_on_loop,
         prefs=h.prefs, login_item=h.login, version=FAKE_VERSION, updater=h.updater,
-        relaunch=lambda: True, bundle_path=None, repo=Path("/repo"), run_thread=run_thread,
+        relaunch=lambda: True, exe_path=None, repo=Path("/repo"), run_thread=run_thread,
         marshal=lambda fn: calls.append(fn),
     )
     b.on_state_changed = lambda st: None
@@ -990,16 +1040,16 @@ def test_set_brain_failover_fields_are_live(h):
     assert h.bridge.get_state()["brain"]["copilot_native_tools"] is False
 
 
-def test_shortcut_allowlist_is_editable_and_has_a_row(h):
-    # the list field takes a comma-separated string from the window
-    assert h.bridge.set("brain", "shortcut_allowlist", "Morning, Pay Rent")["ok"]
-    assert h.orch.s.shortcut_allowlist == ["Morning", "Pay Rent"]
-    assert ("shortcut_allowlist", ["Morning", "Pay Rent"]) in h.prefs.overrides
-    assert h.bridge.get_state()["brain"]["shortcut_allowlist"] == ["Morning", "Pay Rent"]
-    assert EDITABLE_SETTINGS["shortcut_allowlist"].kind == "list"
-    # ...and settings.js hand-lists a row for it, or the window can't reach it
-    js = (Path(__file__).resolve().parents[1] / "veronica" / "ui" / "settings" / "settings.js").read_text()
-    assert "settingRow('brain', 'shortcut_allowlist'" in js
+def test_sections_skip_fields_config_no_longer_offers(monkeypatch):
+    # A field dropped from config.EDITABLE_SETTINGS (shortcut_allowlist went
+    # with Shortcuts) must neither break get_state nor stay settable.
+    from veronica.ui.settings import bridge as bridge_mod
+
+    monkeypatch.setitem(bridge_mod.SETTING_SECTIONS, "brain", bridge_mod.SETTING_SECTIONS["brain"] + ("gone_field",))
+    h = Harness()
+    assert "gone_field" not in h.bridge.get_state()["brain"]
+    res = h.bridge.set("brain", "gone_field", 1)
+    assert res["ok"] is False and "unknown setting" in res["message"]
 
 
 # -- auto-allow tools ---------------------------------------------------------
@@ -1024,7 +1074,7 @@ def test_auto_allow_tools_is_editable_and_round_trips_through_prefs(h):
 def test_clearing_the_field_revokes_everything(h):
     assert h.bridge.set("brain", "auto_allow_tools", "")["ok"]
     assert h.orch.s.auto_allow_tools == []
-    assert classify("mcp__system__clipboard_write", {"text": "hi"}, (), h.orch.s.auto_allow_tools) == "confirm"
+    assert classify("mcp__system__clipboard_write", {"text": "hi"}, h.orch.s.auto_allow_tools) == "confirm"
 
 
 def test_the_default_ships_with_clipboard_write_ticked(h):
@@ -1134,3 +1184,70 @@ def test_speaker_threshold_applies_live():
     assert ("speaker_threshold", 0.5) in h.prefs.overrides
     h.bridge.set("listening", "noise_suppression", False)
     assert h.orch.s.noise_suppression is False
+
+
+# -- accounts (Spotify, Google) -------------------------------------------------------
+
+def test_accounts_in_state(h):
+    h.accounts["google"] = FakeAccount(connected=True, who="me@gmail.com")
+    rows = {r["id"]: r for r in h.bridge.get_state()["general"]["accounts"]}
+    assert list(rows) == ["spotify", "google"]
+    assert rows["spotify"] == {"id": "spotify", "label": "Spotify", "configured": False, "connected": False,
+                               "busy": False, "detail": bridge_mod.ACCOUNT_SETUP["spotify"]}
+    assert rows["google"]["connected"] is True and rows["google"]["detail"] == "Connected as me@gmail.com."
+    assert "spotify_client_id" in h.bridge.get_state()["general"]
+
+
+def test_account_that_cannot_load_shows_unavailable(h):
+    h.accounts["google"] = ImportError("No module named 'google_auth_oauthlib'")
+    rows = {r["id"]: r for r in h.bridge.get_state()["general"]["accounts"]}
+    assert rows["google"]["configured"] is False and "isn't available" in rows["google"]["detail"]
+
+
+def test_connect_account_signs_in_and_pushes_busy_then_done(h):
+    h.accounts["google"].said = "Google is connected as me@gmail.com."
+    res = h.bridge.handle("connect_account", {"account": "google"})
+    assert res == {"ok": True, "message": "Google is connected as me@gmail.com."}
+    assert h.accounts["google"].calls == ["connect"]
+    busy = [next(r for r in st["general"]["accounts"] if r["id"] == "google")["busy"] for st in h.states]
+    assert busy == [True, False]                      # "waiting for the browser", then the result
+    assert h.states[0]["general"]["accounts"][1]["detail"] == bridge_mod.WAITING_FOR_BROWSER
+
+
+def test_connect_account_default_message_and_failure_text(h):
+    h.accounts["spotify"] = FakeAccount()
+    assert h.bridge.connect_account("spotify") == {"ok": True, "message": "Spotify is connected."}
+    h.accounts["spotify"] = FakeAccount(connect_error=RuntimeError("Spotify sign-in timed out."))
+    res = h.bridge.connect_account("spotify")
+    assert res == {"ok": False, "message": "Spotify sign-in timed out."}
+    assert h.bridge._connecting == set()              # the slot is released either way
+
+
+def test_connect_account_refuses_when_not_set_up_or_already_connecting(h):
+    res = h.bridge.connect_account("spotify")         # no Client ID
+    assert res["ok"] is False and res["message"] == bridge_mod.ACCOUNT_SETUP["spotify"]
+    assert h.accounts["spotify"].calls == []
+    h.bridge._connecting.add("google")
+    assert h.bridge.connect_account("google") == {"ok": False, "message": "Already connecting Google."}
+    assert h.bridge.connect_account("myspace")["ok"] is False
+
+
+def test_disconnect_account(h):
+    h.accounts["google"] = FakeAccount(connected=True)
+    assert h.bridge.handle("disconnect_account", {"account": "google"}) == {
+        "ok": True, "message": "Google is disconnected."}
+    assert h.accounts["google"].calls == ["disconnect"]
+    assert h.states and h.states[-1]["general"]["accounts"][1]["connected"] is False
+    assert h.bridge.disconnect_account("nope")["ok"] is False
+
+
+def test_account_commands_run_off_the_ui_thread():
+    from veronica.ui.settings import LONG_COMMANDS
+
+    assert {"connect_account", "disconnect_account"} <= LONG_COMMANDS
+
+
+def test_default_account_modules_are_the_real_ones():
+    assert bridge_mod.ACCOUNTS["spotify"][1] == "veronica.spotify_account"
+    assert bridge_mod.ACCOUNTS["google"][1] == "veronica.google_account"
+    assert bridge_mod._import_account("spotify").__name__ == "veronica.spotify_account"

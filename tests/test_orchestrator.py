@@ -4764,11 +4764,11 @@ async def test_start_brain_starts_switcher_and_gate_server(tmp_path, monkeypatch
     await o.start_brain()
     try:
         assert o.switcher.started == 1
-        assert o.s.gate_socket.exists()
+        assert o.s.gate_endpoint.exists()
         assert ("hud", {"backend": "Claude"}) in ev
     finally:
         await o.stop_brain()
-    assert not o.s.gate_socket.exists()
+    assert not o.s.gate_endpoint.exists()
 
 
 async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
@@ -4778,7 +4778,7 @@ async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
 
     class W:
         async def wait(self, threshold=None, suppress=None):
-            seen["socket_during_run"] = o.s.gate_socket.exists()
+            seen["socket_during_run"] = o.s.gate_endpoint.exists()
             raise asyncio.CancelledError
 
         def stop(self):
@@ -4792,7 +4792,7 @@ async def test_run_forever_starts_and_stops_gate_server(tmp_path, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await o.run_forever()
     assert seen["socket_during_run"] is True
-    assert not o.s.gate_socket.exists()
+    assert not o.s.gate_endpoint.exists()
     assert ("hud", {"backend": "Claude"}) in ev
 
 

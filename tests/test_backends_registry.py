@@ -1,5 +1,3 @@
-import subprocess
-
 from veronica.brain.backends import BACKENDS, Availability, check_backend, make_brain
 from veronica.brain.backends.antigravity import AntigravityBrain
 from veronica.brain.backends.claude import ClaudeBrain
@@ -20,7 +18,7 @@ def test_registry_order_and_commands():
     assert BACKENDS["codex"].install_cmd == "npm i -g @openai/codex" and BACKENDS["codex"].login_cmd == "codex login"
     assert BACKENDS["copilot"].install_cmd == "npm i -g @github/copilot"
     assert BACKENDS["claude"].install_cmd == "npm i -g @anthropic-ai/claude-code"
-    assert "antigravity.google/cli/install.sh" in BACKENDS["antigravity"].install_cmd
+    assert "antigravity.google" in BACKENDS["antigravity"].install_cmd
     assert BACKENDS["codex"].login_markers == (".codex/auth.json",)
     assert BACKENDS["copilot"].login_markers == (".copilot/config.json",)
     assert BACKENDS["claude"].login_markers == ()
@@ -63,27 +61,38 @@ def test_check_backend_copilot_marker(tmp_path):
 def test_check_backend_antigravity_dir_marker_first(tmp_path):
     calls = []
 
-    def run(argv, **kw):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 44)
+    def credentials(pattern):
+        calls.append(pattern)
+        return []
 
-    a = check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, run=run)
+    a = check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, credentials=credentials)
     assert a.reason == "not logged in" and a.hint == "Antigravity isn't logged in — run agy in a terminal."
-    assert calls == [["security", "find-generic-password", "-a", "antigravity"]]
+    assert calls == ["*antigravity*"]
     (tmp_path / ".gemini" / "antigravity-cli" / "conversations").mkdir(parents=True)
     calls.clear()
-    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, run=run).ok
-    assert calls == []   # the directory marker settles it; the Keychain is not consulted
+    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, credentials=credentials).ok
+    assert calls == []   # the directory marker settles it; Credential Manager is not consulted
 
 
-def test_check_backend_antigravity_keychain_fallback(tmp_path):
-    run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0)
-    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, run=run).ok
+def test_check_backend_antigravity_credential_manager_fallback(tmp_path):
+    found = lambda pattern: ["LegacyGeneric:target=Antigravity/oauth"]
+    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, credentials=found).ok
+    other = lambda pattern: ["git:https://github.com"]
+    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path,
+                         credentials=other).reason == "not logged in"
 
-    def boom(argv, **kw):
-        raise OSError("no security binary")
+    def boom(pattern):
+        raise ImportError("no pywin32")
 
-    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path, run=boom).reason == "not logged in"
+    assert check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path,
+                         credentials=boom).reason == "not logged in"
+
+
+def test_the_default_credential_lookup_fails_as_not_logged_in(tmp_path):
+    """Without pywin32 (this Linux test venv) the real lookup raises, and
+    that reads as "not logged in", never as an error."""
+    a = check_backend("antigravity", which=lambda b: "/x/agy", home=tmp_path)
+    assert a.reason == "not logged in"
 
 
 def test_check_backend_exists_override(tmp_path):

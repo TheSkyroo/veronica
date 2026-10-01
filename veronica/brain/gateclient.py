@@ -7,7 +7,7 @@ connection, no answer, bad JSON -> deny.
 Two questions: `ask_gate` is "may I" (what brain.hook needs — the CLI runs
 its own tool itself), `call_gate` is "may I, and if so run it for me" (what
 tools.serve needs — our tools must run in the app process, which owns the
-screen, the clipboard, the Outlook session and the timers)."""
+screen, the clipboard, the account sign-ins and the timers)."""
 import json
 import os
 import socket
