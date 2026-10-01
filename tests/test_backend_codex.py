@@ -8,6 +8,7 @@ import pytest
 from tests.brains_fakes import FakeProc
 from veronica.brain import gateclient, hook
 from veronica.brain.backends import cli
+from veronica.brain.backends import codex as codex_mod
 from veronica.brain.backends.codex import CodexBrain, toml_str, unwrap_shell
 from veronica.brain.gate import ToolGate
 from veronica.config import EDITABLE_SETTINGS, Settings, coerce_setting
@@ -240,13 +241,14 @@ def test_config_warnings_are_not_turn_errors(tmp_path, caplog):
     Codex emit this as an `error` event on every turn, and every turn
     failed. It's a warning; the turn goes on."""
     b, _ = make(tmp_path)
+    codex_mod._NOTICES_LOGGED.clear()
     msg = ("Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n"
            "  user (C:\\Users\\lenovo\\.codex\\config.toml): `mcp_servers.code-review-graph.type` is ignored.")
     with caplog.at_level("WARNING", logger="veronica.brain"):
         assert b.parse(json.dumps({"type": "error", "message": msg})) == []
         assert b.parse(json.dumps({"type": "item.completed",
                                    "item": {"id": "i", "type": "error", "message": msg}})) == []
-    assert "unrecognized configuration setting" in caplog.text
+    assert caplog.text.count("unrecognized configuration setting") == 1   # logged once, not every turn
     # the hook-trust bypass notice stays silent
     bypass = "`--dangerously-bypass-hook-trust` is enabled"
     caplog.clear()
