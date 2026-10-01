@@ -1,13 +1,17 @@
 """Global push-to-talk hotkey monitor: a Win32 low-level keyboard hook
-(SetWindowsHookExW(WH_KEYBOARD_LL)) watching one hotkey's hold and release.
+(SetWindowsHookExW(WH_KEYBOARD_LL)) watching for one of the push-to-talk
+keys being held and released.
 
-The hotkey is either a combo — modifiers plus one key, "win+space" by
-default — or a single key ("right_ctrl"). A combo's key is swallowed while
-it belongs to us, so Win+Space doesn't also switch the keyboard layout, and
-a masking key is injected while Win/Alt are held so letting go of them
-doesn't open the Start menu (or focus a menu bar). A single key is only
-watched, never swallowed. Releasing either the key or a required modifier
-ends the hold.
+Each key is either a combo — modifiers plus one key, such as
+"ctrl+alt+space" or "copilot" (a laptop's Copilot key, which Windows
+receives as Win+Shift+F23) — or a single key ("right_ctrl", "f9"). The
+default is the Copilot key or Ctrl+Alt+Space. A combo's key is swallowed
+while it belongs to us, so it doesn't also do its usual job (open Copilot,
+type a space), and a masking key is injected while Win/Alt are held so
+letting go of them doesn't open the Start menu (or focus a menu bar). A
+single key is only watched, never swallowed. Releasing either the key or a
+required modifier ends the hold; whether that was a hold or a tap is the
+orchestrator's call (see Orchestrator.ptt_end).
 
 The hook needs no permission on Windows; if it can't be installed
 (user32 unavailable, SetWindowsHookExW fails) `available` is False and
@@ -51,7 +55,12 @@ VK_MENU = 0x12       # Alt, side-neutral
 VK_MASK = 0xE8
 
 RIGHT_CTRL_KEYCODE = VK_RCONTROL
-DEFAULT_HOTKEY = "win+space"
+DEFAULT_HOTKEY = "copilot, ctrl+alt+space"
+# Named keys that are really combos. A laptop's Copilot key (the one that
+# replaced Right Ctrl on many 2024+ keyboards) reaches Windows as
+# Win+Shift+F23.
+PRESETS = {"copilot": "win+shift+f23", "copilot_key": "win+shift+f23"}
+PRESET_NAMES = {"win+shift+f23": "Copilot key"}
 
 # Modifier name -> every VK that counts as holding it.
 MODIFIERS: dict[str, frozenset[int]] = {
@@ -137,30 +146,54 @@ def resolve_keycode(key: int | str) -> int:
 
 
 def parse_hotkey(spec: int | str) -> tuple[frozenset[str], int]:
-    """(required modifiers, trigger VK) for "win+space", "ctrl+alt+p",
-    "right_ctrl" or a bare VK code. Anything unparseable (an unknown key,
-    a combo of modifiers only, "fn" — which Windows never sees) falls back
-    to DEFAULT_HOTKEY, logged."""
+    """(required modifiers, trigger VK) for one hotkey: "ctrl+alt+space",
+    "copilot", "right_ctrl" or a bare VK code. Raises ValueError for
+    anything unusable (an unknown key, modifiers only, "fn" — which Windows
+    never sees)."""
     if isinstance(spec, int):
         return frozenset(), spec
-    parts = [p.strip().lower() for p in str(spec).replace(" ", "").split("+") if p.strip()]
+    text = str(spec).strip().lower().replace(" ", "")
+    text = PRESETS.get(text, text)
+    parts = [p for p in text.split("+") if p]
     mods = {_MODIFIER_ALIASES.get(p, p) for p in parts[:-1]}
     key = parts[-1] if parts else ""
     if (parts and mods <= MODIFIERS.keys() and key in KEY_NAMES
             and not (mods and _MODIFIER_ALIASES.get(key, key) in MODIFIERS)):
         return frozenset(mods), KEY_NAMES[key]
-    if spec != DEFAULT_HOTKEY:
-        log.warning("hotkey monitor: can't use hotkey %r, using %s", spec, DEFAULT_HOTKEY)
-    return parse_hotkey(DEFAULT_HOTKEY)
+    raise ValueError(f"not a usable push-to-talk key: {spec!r}")
+
+
+def parse_hotkeys(spec: int | str) -> list[tuple[frozenset[str], int]]:
+    """Every hotkey in a comma-separated list ("copilot, ctrl+alt+space");
+    unusable entries are skipped (logged), and if none is left the default
+    list is used."""
+    entries = [spec] if isinstance(spec, int) else [e for e in str(spec).split(",") if e.strip()]
+    combos = []
+    for entry in entries:
+        try:
+            combos.append(parse_hotkey(entry))
+        except ValueError:
+            log.warning("hotkey monitor: can't use push-to-talk key %r", entry)
+    if combos or spec == DEFAULT_HOTKEY:
+        return combos
+    log.warning("hotkey monitor: no usable key in %r, using %s", spec, DEFAULT_HOTKEY)
+    return parse_hotkeys(DEFAULT_HOTKEY)
+
+
+def _describe_one(mods: frozenset[str], vk: int) -> str:
+    for preset, label in PRESET_NAMES.items():
+        if parse_hotkey(preset) == (mods, vk):
+            return label
+    names = {v: k for k, v in KEY_NAMES.items()
+             if not k.endswith("bar") and k not in ("apps", "right_control", "left_control")}
+    key = names.get(vk, f"VK {vk:#x}").replace("_", " ").title()
+    return "+".join([m.title() for m in ("ctrl", "alt", "shift", "win") if m in mods] + [key])
 
 
 def describe_hotkey(spec: int | str) -> str:
-    """"Win+Space", "Right Ctrl": the hotkey as the UI should name it."""
-    mods, vk = parse_hotkey(spec)
-    names = {v: k for k, v in KEY_NAMES.items() if not k.endswith("bar") and k not in ("apps", "right_control", "left_control")}
-    key = names.get(vk, f"VK {vk:#x}").replace("_", " ").title()
-    order = [m for m in ("ctrl", "alt", "shift", "win") if m in mods]
-    return "+".join([m.title() for m in order] + [key])
+    """"Copilot key or Ctrl+Alt+Space", "Right Ctrl": the push-to-talk keys
+    as the UI and her voice should name them."""
+    return " or ".join(_describe_one(m, vk) for m, vk in parse_hotkeys(spec))
 
 
 class _KEYBDINPUT(ctypes.Structure):
@@ -256,12 +289,13 @@ class HotkeyMonitor:
     ) -> None:
         self._on_press = on_press
         self._on_release = on_release
-        self._mods, self._keycode = parse_hotkey(hotkey)
+        self._combos = parse_hotkeys(hotkey)
         self.description = describe_hotkey(hotkey)
         self.available = True
         self._pressed = False
         self._held: set[int] = set()     # modifier VKs physically down right now
-        self._swallowing = False         # the trigger's down was ours: eat its up too
+        self._swallowing: set[int] = set()  # triggers whose down was ours: eat their up too
+        self._owner: tuple[frozenset[str], int] | None = None   # the combo holding push-to-talk
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._win32: _Win32 | None = None
@@ -373,44 +407,48 @@ class HotkeyMonitor:
             return 0
 
     def _on_key(self, message: int, vk: int, flags: int) -> bool:
-        """Track the key; True when this event must be swallowed."""
+        """Track the keys; True when this event must be swallowed."""
         if flags & LLKHF_INJECTED:
             return False
         is_down, is_up = message in _DOWN, message in _UP
-        if any(vk in MODIFIERS[m] for m in MODIFIERS) and vk != self._keycode:
+        triggers = {k for _, k in self._combos}
+        if vk not in triggers and any(vk in MODIFIERS[m] for m in MODIFIERS):
             if is_down:
                 self._held.add(vk)
             elif is_up:
                 self._held.discard(vk)
-                if self._pressed and not self._mods_held():
-                    self._dispatch(False)     # let go of Win first: the hold ends
+                if self._pressed and self._owner is not None and not self._mods_held(self._owner[0]):
+                    self._dispatch(False)     # let go of a modifier first: the hold ends
             return False
-        if vk != self._keycode:
-            return False
-        if not self._mods:                    # a single key: watch, never swallow
-            if is_down:
-                self._dispatch(True)
-            elif is_up:
-                self._dispatch(False)
+        if vk not in triggers:
             return False
         if is_down:
-            if self._swallowing:
+            if vk in self._swallowing:
                 return True                   # auto-repeat of a hold we own
-            if self._mods_held():
-                self._swallowing = True
-                if self._mods & {"win", "alt"}:
-                    self._request_mask()
+            for combo in self._combos:
+                mods, key = combo
+                if key != vk or not self._mods_held(mods):
+                    continue
+                if self._pressed:
+                    return bool(mods)         # already held through another combo
+                self._owner = combo
+                if mods:
+                    self._swallowing.add(vk)
+                    if mods & {"win", "alt"}:
+                        self._request_mask()
                 self._dispatch(True)
-                return True
+                return bool(mods)             # a single key is watched, never swallowed
             return False
-        if is_up and self._swallowing:
-            self._swallowing = False
-            self._dispatch(False)
-            return True
+        if is_up:
+            swallowed = vk in self._swallowing
+            self._swallowing.discard(vk)
+            if self._pressed and self._owner is not None and self._owner[1] == vk:
+                self._dispatch(False)
+            return swallowed
         return False
 
-    def _mods_held(self) -> bool:
-        return all(self._held & MODIFIERS[m] for m in self._mods)
+    def _mods_held(self, mods: frozenset[str]) -> bool:
+        return all(self._held & MODIFIERS[m] for m in mods)
 
     def _dispatch(self, is_down: bool) -> None:
         if is_down == self._pressed:

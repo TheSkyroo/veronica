@@ -236,7 +236,7 @@ class FakeHotkeyMonitor:
     instances = []
     available_on_start = True
 
-    def __init__(self, on_press, on_release, hotkey="win+space"):
+    def __init__(self, on_press, on_release, hotkey="copilot, ctrl+alt+space"):
         self.on_press = on_press
         self.on_release = on_release
         self.hotkey = hotkey
@@ -1550,7 +1550,7 @@ def test_listening_menu_reflects_and_switches_mode(fake_env):
     app, orch = _make_app(env, orch_holder)
     try:
         assert app._listen_items["always"].state and not app._listen_items["ptt"].state
-        assert "Win+Space" in app._listen_items["ptt"].title
+        assert "Copilot key or Ctrl+Alt+Space" in app._listen_items["ptt"].title
         scheduled = []
         app._schedule = lambda coro: (scheduled.append(coro), coro.close())
         orch.set_listen_mode = lambda mode: _Noop(mode)

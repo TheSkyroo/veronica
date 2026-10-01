@@ -78,39 +78,43 @@ def up(mon, vk=hotkey.VK_RCONTROL, flags=0):
     return key(mon, hotkey.WM_KEYUP, vk, flags)
 
 
-def test_default_hotkey_is_win_space():
+def test_default_hotkeys_are_copilot_and_ctrl_alt_space():
     mon = HotkeyMonitor(lambda: None, lambda: None)
-    assert mon._mods == {"win"} and mon._keycode == hotkey.VK_SPACE
-    assert mon.description == "Win+Space"
+    assert mon._combos == [(frozenset({"win", "shift"}), 0x86), (frozenset({"ctrl", "alt"}), hotkey.VK_SPACE)]
+    assert mon.description == "Copilot key or Ctrl+Alt+Space"
 
 
 @pytest.mark.parametrize("spec, mods, vk", [
     ("win+space", {"win"}, hotkey.VK_SPACE),
     ("Windows + Space", {"win"}, hotkey.VK_SPACE),
     ("ctrl+alt+p", {"ctrl", "alt"}, ord("P")),
+    ("copilot", {"win", "shift"}, 0x86),          # F23
     ("right_ctrl", set(), hotkey.VK_RCONTROL),
+    ("f9", set(), 0x78),
     (0xA5, set(), 0xA5),
-    ("fn", {"win"}, hotkey.VK_SPACE),             # Windows never sees fn: default
-    ("win+ctrl", {"win"}, hotkey.VK_SPACE),       # modifiers only: default
-    ("hyper+space", {"win"}, hotkey.VK_SPACE),    # unknown modifier: default
 ])
 def test_parse_hotkey(spec, mods, vk):
     assert hotkey.parse_hotkey(spec) == (frozenset(mods), vk)
 
 
+@pytest.mark.parametrize("spec", ["fn", "win+ctrl", "hyper+space", ""])
+def test_parse_hotkey_rejects_unusable_keys(spec):
+    with pytest.raises(ValueError):
+        hotkey.parse_hotkey(spec)
+
+
+def test_parse_hotkeys_skips_bad_entries_and_falls_back_when_none_left():
+    assert hotkey.parse_hotkeys("fn, right_ctrl") == [(frozenset(), hotkey.VK_RCONTROL)]
+    assert hotkey.parse_hotkeys("fn") == hotkey.parse_hotkeys(hotkey.DEFAULT_HOTKEY)
+
+
 @pytest.mark.parametrize("spec, text", [
     ("win+space", "Win+Space"), ("alt+shift+f5", "Alt+Shift+F5"), ("right_ctrl", "Right Ctrl"),
+    ("copilot", "Copilot key"), ("win+shift+f23", "Copilot key"),
+    ("copilot, ctrl+alt+space", "Copilot key or Ctrl+Alt+Space"),
 ])
 def test_describe_hotkey(spec, text):
     assert hotkey.describe_hotkey(spec) == text
-
-
-@pytest.mark.parametrize("value, vk", [
-    (0xA5, 0xA5), ("right_alt", hotkey.VK_RMENU), ("Right_Ctrl", hotkey.VK_RCONTROL),
-    (" f13 ", hotkey.VK_F13), ("fn", hotkey.VK_RCONTROL), ("bogus", hotkey.VK_RCONTROL),
-])
-def test_resolve_keycode(value, vk):
-    assert hotkey.resolve_keycode(value) == vk
 
 
 def test_install_hook_success_sets_available_true(fake_win32):
@@ -358,3 +362,44 @@ def test_mask_message_injects_the_mask_key(fake_win32):
     inputs = hotkey._mask_inputs()
     assert [i.ki.wVk for i in inputs] == [hotkey.VK_MASK] * 2
     assert [i.ki.dwFlags for i in inputs] == [0, hotkey.KEYEVENTF_KEYUP]
+
+
+# -- several keys / the Copilot key ---------------------------------------------------
+
+VK_F23 = 0x86
+
+
+def test_copilot_key_is_a_combo_and_is_swallowed(fake_win32):
+    """The Copilot key arrives as LWin + LShift + F23: F23 must not reach
+    Windows (it would open Copilot), and the Win release must be masked."""
+    mon, events = combo(fake_win32, "copilot")
+    down(mon, vk=hotkey.VK_LWIN)
+    down(mon, vk=hotkey.VK_LSHIFT)
+    assert down(mon, vk=VK_F23) == SWALLOWED
+    assert up(mon, vk=VK_F23) == SWALLOWED
+    up(mon, vk=hotkey.VK_LSHIFT)
+    up(mon, vk=hotkey.VK_LWIN)
+    assert events == ["press", "release"]
+    assert fake_win32.posted == [(4242, hotkey.WM_APP_MASK)]
+
+
+def test_either_of_two_hotkeys_works(fake_win32):
+    mon, events = combo(fake_win32, "copilot, ctrl+alt+space")
+    down(mon, vk=hotkey.VK_LCONTROL)
+    down(mon, vk=hotkey.VK_LMENU)
+    assert down(mon, vk=hotkey.VK_SPACE) == SWALLOWED
+    assert up(mon, vk=hotkey.VK_SPACE) == SWALLOWED
+    assert events == ["press", "release"]
+    assert fake_win32.posted == [(4242, hotkey.WM_APP_MASK)]     # alt is held: masked
+
+
+def test_a_second_hotkey_during_a_hold_does_not_double_press(fake_win32):
+    mon, events = combo(fake_win32, "right_ctrl, ctrl+alt+space")
+    down(mon, vk=hotkey.VK_RCONTROL)                 # right ctrl alone: press
+    down(mon, vk=hotkey.VK_LCONTROL)
+    down(mon, vk=hotkey.VK_LMENU)
+    assert down(mon, vk=hotkey.VK_SPACE) == SWALLOWED  # also matches, but already held
+    up(mon, vk=hotkey.VK_SPACE)
+    assert events == ["press"]                        # owned by right ctrl, not released
+    up(mon, vk=hotkey.VK_RCONTROL)
+    assert events == ["press", "release"]

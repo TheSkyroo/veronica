@@ -51,7 +51,7 @@ def test_defaults(tmp_home):
     assert s.memory_recent_turns == 6
     assert s.memory_path == tmp_home / "memory.db"
     assert s.ptt_enabled is True
-    assert s.ptt_hotkey == "win+space"
+    assert s.ptt_hotkey == "copilot, ctrl+alt+space"
     assert s.listen_mode == "always"
     assert s.dictation_max_s == 60
     assert s.language == "en"
@@ -331,3 +331,33 @@ def test_brain_failover_fields_are_live():
     assert f.kind == "int" and f.restart is False and (f.min, f.max) == (5, 1440)
     assert coerce_setting("brain_limit_cooldown_min", 1) == 5
     assert coerce_setting("brain_limit_cooldown_min", 99999) == 1440
+
+
+def test_logging_survives_non_cp1252_text(tmp_path, monkeypatch):
+    """A Windows console/file defaults to cp1252, which can't encode "→" or
+    Devanagari; logging must not drop such records with a 'Logging error'."""
+    import io
+    import logging as _logging
+
+    from veronica import config
+
+    monkeypatch.setattr(config.settings, "home", tmp_path)
+    log = _logging.getLogger("veronica")
+    saved = log.handlers[:]
+    log.handlers.clear()
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    console.isatty = lambda: True
+    monkeypatch.setattr(config.sys, "stderr", console)
+    monkeypatch.setattr(config.sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+    try:
+        config.setup_logging(_logging.INFO)
+        log.info("input volume %d → %d — नमस्ते", 28, 85)
+        for h in log.handlers:
+            h.flush()
+        assert "28 → 85 — नमस्ते" in config.settings.log_file.read_text(encoding="utf-8")
+        assert "28 → 85".encode() in raw.getvalue()
+    finally:
+        for h in log.handlers:
+            h.close()
+        log.handlers[:] = saved

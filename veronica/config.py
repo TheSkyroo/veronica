@@ -165,10 +165,12 @@ class Settings(BaseSettings):
     # False = it interrupts and replaces the current one.
     queue_requests: bool = True
 
-    # push-to-talk: a held hotkey — modifiers + key ("win+space", "ctrl+alt+p")
-    # or a single key ("right_ctrl"); see veronica.audio.hotkey.parse_hotkey.
+    # push-to-talk: one or more keys, comma-separated — modifiers + key
+    # ("ctrl+alt+space"), a single key ("right_ctrl", "f9"), or "copilot"
+    # (a laptop's Copilot key); see veronica.audio.hotkey.parse_hotkeys.
+    # Hold to talk, or tap to talk until you stop speaking.
     ptt_enabled: bool = True
-    ptt_hotkey: str = "win+space"
+    ptt_hotkey: str = "copilot, ctrl+alt+space"
     ptt_max_s: int = 30     # hard cap on one held capture (onset wait + recording)
 
     # dictation
@@ -338,7 +340,8 @@ EDITABLE_SETTINGS: dict[str, EditableField] = {
     "ptt_enabled": EditableField("bool", "Push-to-talk (hold the push-to-talk keys)"),
     "ptt_hotkey": EditableField(
         "str", "Push-to-talk keys",
-        "Hold to talk: modifiers + key like win+space or ctrl+alt+p, or one key like right_ctrl."),
+        "Hold to talk (or tap, and talk until you stop). Comma-separated: copilot (the Copilot key), "
+        "ctrl+alt+space, right_ctrl, f9…"),
     "effort": EditableField("choice", "Brain effort", "Higher is smarter and slower.",
                              choices=("low", "medium", "high")),
     "memory_enabled": EditableField("bool", "Remember conversations"),
@@ -520,6 +523,18 @@ def log_level_from_env(default: int = logging.INFO) -> int:
     return level
 
 
+def _utf8_console() -> None:
+    """Make the console streams UTF-8 (unencodable characters replaced
+    rather than raising): a Windows terminal defaults to cp1252."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def setup_logging(level: int | None = None) -> logging.Logger:
     settings.ensure_dirs()
     log = logging.getLogger("veronica")
@@ -527,7 +542,9 @@ def setup_logging(level: int | None = None) -> logging.Logger:
         return log
     log.setLevel(level if level is not None else log_level_from_env())
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    fh = RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=5)
+    # UTF-8 explicitly: Windows' default (cp1252) can't hold "→" or Devanagari,
+    # and a record that can't be encoded is lost with a "Logging error".
+    fh = RotatingFileHandler(settings.log_file, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
     log.addHandler(fh)
     # When launched windowless (pythonw.exe, a Start-menu or login
@@ -535,6 +552,7 @@ def setup_logging(level: int | None = None) -> logging.Logger:
     # StreamHandler so nothing tries to write to a closed/redirected stream,
     # and rely on the log file alone.
     if sys.stderr is not None and sys.stderr.isatty():
+        _utf8_console()
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         log.addHandler(sh)

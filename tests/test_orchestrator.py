@@ -53,6 +53,9 @@ def _replace_mode_by_default(monkeypatch):
     what stop / hold on / "…instead" do); the queueing tests turn
     queue_requests back on themselves."""
     monkeypatch.setenv("VERONICA_QUEUE_REQUESTS", "false")
+    # Tests press and release push-to-talk instantly; unless a test is about
+    # taps, treat every press as a hold (hold to talk).
+    monkeypatch.setattr(Orchestrator, "PTT_TAP_S", 0.0)
 
 
 class Player:
@@ -5411,7 +5414,7 @@ async def test_listen_mode_voice_intents(saved_overrides):
     o, states, ev = build3(rec_pcms=[np.zeros(1, np.int16)] * 2, stt_texts=["push-to-talk mode", "always listen"])
     await o.one_turn()
     assert o.s.listen_mode == "ptt"
-    assert o.tts.said == ["Push-to-talk only. Hold Win+Space to talk to me."]
+    assert o.tts.said == ["Push-to-talk only. Press Copilot key or Ctrl+Alt+Space to talk to me."]
     assert states[-1] == "idle"
     await o.one_turn()
     assert o.s.listen_mode == "always"
@@ -5577,3 +5580,44 @@ async def test_queue_off_restores_interrupt_and_replace():
 ])
 def test_replaces_current(text, replaces):
     assert Orchestrator._replaces_current(text) is replaces
+
+
+# -- push-to-talk: tap to talk --------------------------------------------------------
+
+async def test_ptt_tap_before_capture_listens_until_silence(monkeypatch):
+    monkeypatch.setattr(Orchestrator, "PTT_TAP_S", 10.0)
+    o, _ = build_ptt(stt_texts=["tell me a joke"], pcms=[np.zeros(1, np.int16), None])
+    o.ptt_start()
+    o.ptt_end()                                    # released at once: a tap
+    assert o._ptt_tap is True
+    t = asyncio.create_task(o.one_turn(ptt=True))
+    await _settle()
+    assert o.recorder.hold_calls == [False]        # an ordinary, silence-ended capture
+    o.recorder.finish()
+    await _settle()
+    assert o.brain.asked == ["tell me a joke"]
+    o.recorder.stop()
+    await _settle()
+    await asyncio.wait_for(t, 1)
+
+
+async def test_ptt_tap_during_hold_capture_switches_it_to_silence_end(monkeypatch):
+    monkeypatch.setattr(Orchestrator, "PTT_TAP_S", 10.0)
+    o, _ = build_ptt()
+    released = []
+    o.recorder.release_to_vad = lambda wait_s: released.append(wait_s)
+    o.ready = True
+    o.ptt_start()
+    o._ptt_capturing = True                        # the hold capture is already running
+    o.ptt_end()
+    assert released == [o.s.listen_wait_s] and o.recorder.finish_calls == 0
+
+
+def test_ptt_long_hold_still_finishes_on_release():
+    o, _ = build()
+    o.ready = True
+    o.ptt_start()
+    o._ptt_down_at -= 5                            # held for five seconds
+    o._ptt_capturing = True
+    o.ptt_end()
+    assert o.recorder.finish_calls == 1
