@@ -150,6 +150,71 @@ _BUILTIN_APPS = frozenset({
     "notepad", "mspaint", "explorer", "taskmgr", "control", "charmap", "osk", "magnify",
     "snippingtool", "wordpad", "write", "regedit", "msinfo32", "resmon", "perfmon",
 })
+# Windows places and system tools people ask for by name that have no
+# Start-menu shortcut of their own (or one under a different name). Targets
+# are fixed shell folders, ms-settings: pages and System32 consoles — never
+# anything built from what was heard.
+_MY_COMPUTER = "shell:MyComputerFolder"
+SYSTEM_TARGETS: dict[str, str] = {
+    # Shell folders
+    "this pc": _MY_COMPUTER, "my computer": _MY_COMPUTER, "computer": _MY_COMPUTER,
+    "file explorer": "explorer", "explorer": "explorer", "files": "explorer",
+    "documents": "shell:Personal", "my documents": "shell:Personal",
+    "downloads": "shell:Downloads", "desktop": "shell:Desktop",
+    "pictures": "shell:My Pictures", "photos folder": "shell:My Pictures",
+    "music folder": "shell:My Music", "videos": "shell:My Video",
+    "recycle bin": "shell:RecycleBinFolder", "trash": "shell:RecycleBinFolder",
+    "network": "shell:NetworkPlacesFolder", "startup folder": "shell:Startup",
+    "fonts": "shell:Fonts", "printers": "shell:PrintersFolder",
+    # Settings and its common pages
+    "settings": "ms-settings:", "windows settings": "ms-settings:",
+    "bluetooth settings": "ms-settings:bluetooth", "bluetooth": "ms-settings:bluetooth",
+    "wifi settings": "ms-settings:network-wifi", "wi-fi settings": "ms-settings:network-wifi",
+    "wifi": "ms-settings:network-wifi", "network settings": "ms-settings:network",
+    "display settings": "ms-settings:display", "sound settings": "ms-settings:sound",
+    "notification settings": "ms-settings:notifications", "power settings": "ms-settings:powersleep",
+    "battery settings": "ms-settings:batterysaver", "storage settings": "ms-settings:storagesense",
+    "apps settings": "ms-settings:appsfeatures", "installed apps": "ms-settings:appsfeatures",
+    "default apps": "ms-settings:defaultapps", "windows update": "ms-settings:windowsupdate",
+    "update settings": "ms-settings:windowsupdate", "personalization": "ms-settings:personalization",
+    "background settings": "ms-settings:personalization-background",
+    "mouse settings": "ms-settings:mousetouchpad", "touchpad settings": "ms-settings:devices-touchpad",
+    "keyboard settings": "ms-settings:typing", "language settings": "ms-settings:regionlanguage",
+    "date and time settings": "ms-settings:dateandtime", "accounts": "ms-settings:yourinfo",
+    "privacy settings": "ms-settings:privacy", "microphone settings": "ms-settings:privacy-microphone",
+    "camera settings": "ms-settings:privacy-webcam", "about this pc": "ms-settings:about",
+    # System tools
+    "control panel": "control", "task manager": "taskmgr", "device manager": "devmgmt.msc",
+    "disk management": "diskmgmt.msc", "services": "services.msc", "event viewer": "eventvwr.msc",
+    "computer management": "compmgmt.msc", "task scheduler": "taskschd.msc",
+    "programs and features": "appwiz.cpl", "network connections": "ncpa.cpl",
+    "system properties": "sysdm.cpl", "power options": "powercfg.cpl", "sound": "mmsys.cpl",
+    "command prompt": "cmd", "cmd": "cmd", "powershell": "powershell",
+    "registry editor": "regedit", "system information": "msinfo32",
+    "resource monitor": "resmon", "on-screen keyboard": "osk", "on screen keyboard": "osk",
+    "magnifier": "magnify", "character map": "charmap", "run dialog": "shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}",
+}
+
+
+def system_target(name: str) -> str | None:
+    """The fixed target for a Windows place or system tool `name` ("this PC",
+    "bluetooth settings", "device manager"), ignoring a leading "the"/"my"
+    and a trailing "folder"/"window"/"app"; None if it isn't one."""
+    q = _norm(name.replace("'", ""))
+    candidates = [q]
+    for lead in ("the ", "open "):
+        if q.startswith(lead):
+            candidates.append(q[len(lead):])
+    for c in list(candidates):
+        for tail in (" folder", " window", " app", " page"):
+            if c.endswith(tail):
+                candidates.append(c[: -len(tail)])
+    for c in candidates:
+        if c in SYSTEM_TARGETS:
+            return SYSTEM_TARGETS[c]
+    return None
+
+
 _APP_NAME_RE = re.compile(r"[\w][\w .&+'()-]{0,79}")
 _AUMID_RE = re.compile(r"[^\x00-\x1f\"<>|*?]+")
 
@@ -236,6 +301,10 @@ def best_match(name: str, candidates: list[tuple[str, str]]) -> tuple[str, str] 
 
 
 def _open_app_sync(name: str) -> dict:
+    target = system_target(name)
+    if target is not None:
+        _startfile(target)
+        return _ok("ok")
     hit = best_match(name, _start_menu_shortcuts())
     if hit is not None:
         _startfile(hit[1])
@@ -258,7 +327,8 @@ def _open_app_sync(name: str) -> dict:
     return _err(f"there's no app called {name!r} on this PC")
 
 
-@tool("open_app", "Open a Windows application by name, e.g. Notepad, Microsoft Edge, Spotify",
+@tool("open_app", "Open a Windows application, folder or system tool by name, e.g. Notepad, Microsoft Edge, "
+      "Spotify, This PC, Downloads, Recycle Bin, Bluetooth settings, Device Manager, Control Panel",
       {"name": str})
 @_guard
 async def open_app(args: dict) -> dict:
