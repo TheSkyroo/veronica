@@ -89,6 +89,10 @@ def text(res):
     return res["content"][0]["text"]
 
 
+# A located element with something on top of it: the click falls back to a script click.
+COVERED = {"found": True, "covered": True, "described": "A Docs"}
+
+
 # -- security ---------------------------------------------------------------------
 async def test_hello_with_right_token_is_accepted(bridge):
     conn = await connect(bridge)
@@ -293,7 +297,7 @@ async def test_find_not_found(bridge):
 
 
 async def test_click_reports_element(bridge):
-    conn = await connect(bridge, replies({"click": ("ok", {"clicked": "BUTTON Log in"})}))
+    conn = await connect(bridge, replies({"locate": ("ok", COVERED), "click": ("ok", {"clicked": "BUTTON Log in"})}))
     res = await b.browser_click.handler({"target": "Log in"})
     assert text(res) == "Clicked BUTTON Log in"
     assert conn.requests("click")[0]["target"] == "Log in"
@@ -347,7 +351,7 @@ async def test_open_waits_for_page_to_load(bridge):
 
 
 async def test_click_waits_for_page_to_load(bridge):
-    conn = await connect(bridge, replies({"click": ("ok", {"clicked": "A Docs"}),
+    conn = await connect(bridge, replies({"locate": ("ok", COVERED), "click": ("ok", {"clicked": "A Docs"}),
                                           "ready_state": ready_sequence([("ok", "loading"), ("ok", "complete")])}))
     assert text(await b.browser_click.handler({"target": "Docs"})) == "Clicked A Docs"
     assert len(conn.requests("ready_state")) == 2
@@ -428,3 +432,113 @@ async def test_real_websocket_server(tmp_path, monkeypatch):
             assert text(res) == "T\nhttps://x\nhello"
     finally:
         b.stop_bridge()
+
+
+# -- numbered elements and real clicks ------------------------------------------------
+
+GEOMETRY = {"found": True, "covered": False, "x": 100, "y": 50, "dpr": 1.5, "zoom": 1.0,
+            "screenX": -8, "screenY": -8, "outerWidth": 1296, "outerHeight": 736,
+            "innerWidth": 1280, "innerHeight": 640, "described": "A Samay Raina video"}
+
+
+async def test_elements_lists_numbered_controls(bridge):
+    els = [{"ref": 1, "role": "searchbox", "name": "Search", "in_view": True, "value": "samay raina"},
+           {"ref": 2, "role": "link", "name": "Samay Raina | India's Got Latent", "in_view": True,
+            "href": "/watch?v=abc"},
+           {"ref": 3, "role": "video", "name": "", "in_view": True, "playing": False}]
+    conn = await connect(bridge, replies({"elements": ("ok", {"title": "YouTube", "url": "https://youtube.com",
+                                                                "total": 40, "elements": els})}))
+    out = text(await b.browser_elements.handler({}))
+    assert '[1] * searchbox "Search" value="samay raina"' in out
+    assert '[2] * link "Samay Raina | India\'s Got Latent" -> /watch?v=abc' in out
+    assert '[3] * video "" playing=false' in out
+    assert "+37 more" in out
+    assert conn.requests("elements")[0]["max"] == b.ELEMENTS_DEFAULT
+
+
+async def test_click_by_ref_uses_the_real_mouse(bridge, monkeypatch):
+    clicks = []
+    monkeypatch.setattr(b, "_mouse_click", lambda x, y: clicks.append((x, y)) or True)
+    conn = await connect(bridge, replies({"locate": ("ok", GEOMETRY)}))
+    res = await b.browser_click.handler({"ref": 2, "target": "Samay Raina video"})
+    assert text(res) == "Clicked A Samay Raina video"
+    assert conn.requests("locate")[0]["ref"] == 2
+    assert conn.requests("click") == []                       # no script click needed
+    assert clicks == [b._screen_point(GEOMETRY)]
+
+
+async def test_click_falls_back_to_a_script_click_when_the_mouse_cant(bridge, monkeypatch):
+    monkeypatch.setattr(b, "_mouse_click", lambda x, y: False)    # e.g. HUD on top, browser not in front
+    conn = await connect(bridge, replies({"locate": ("ok", GEOMETRY), "click": ("ok", {"clicked": "A Video"})}))
+    assert text(await b.browser_click.handler({"ref": 2})) == "Clicked A Video"
+    assert conn.requests("click")[0]["ref"] == 2
+
+
+async def test_click_on_a_covered_element_never_uses_the_mouse(bridge, monkeypatch):
+    monkeypatch.setattr(b, "_mouse_click", lambda x, y: pytest.fail("mouse used on a covered element"))
+    await connect(bridge, replies({"locate": ("ok", COVERED), "click": ("ok", {"clicked": "A Docs"})}))
+    assert text(await b.browser_click.handler({"ref": 5})) == "Clicked A Docs"
+
+
+async def test_click_on_a_missing_ref(bridge):
+    await connect(bridge, replies({"locate": ("ok", {"found": False}), "click": ("ok", {"clicked": None})}))
+    res = await b.browser_click.handler({"ref": 99})
+    assert res.get("is_error") and "no element 99" in text(res)
+
+
+@pytest.mark.parametrize("args", [{}, {"ref": "abc"}, {"ref": True}, {"target": "  "}])
+async def test_click_needs_a_ref_or_target(bridge, args):
+    await connect(bridge, replies({}))
+    res = await b.browser_click.handler(args)
+    assert res.get("is_error") and ("ref" in text(res))
+
+
+async def test_type_by_ref(bridge):
+    conn = await connect(bridge, replies({"type": ("ok", {"typed": "INPUT Search"})}))
+    await b.browser_type.handler({"ref": 1, "text": "samay raina", "submit": True})
+    req = conn.requests("type")[0]
+    assert (req["ref"], req["text"], req["submit"]) == (1, "samay raina", True)
+
+
+def test_screen_point_maps_page_pixels_to_physical_screen_pixels():
+    # 150 % scaling, a maximised window (its 8 px borders off screen at
+    # -8,-8; 88 DIP of frame above the page, borders included): the viewport
+    # starts at DIP (0, 80) -> physical (0, 120); the element point (100, 50)
+    # CSS px adds (150, 75).
+    assert b._screen_point(GEOMETRY) == (150, 195)
+    zoomed = {**GEOMETRY, "zoom": 1.25, "dpr": 1.875, "innerWidth": 1024, "innerHeight": 512}
+    # same window at 125 % page zoom: CSS px are 1.25 DIP each
+    assert b._screen_point(zoomed) == (188, 214)
+    assert b._screen_point({"found": True}) is None
+
+
+class _Front:
+    def __init__(self, exe, pid=42):
+        self.bundle_id, self.pid = exe, pid
+
+
+@pytest.fixture
+def fake_input(monkeypatch):
+    from veronica.tools import computer_events as ce
+
+    state = {"front": _Front("chrome.exe"), "pid_at": 42, "blocked": False, "clicks": []}
+    monkeypatch.setattr(ce, "ensure_dpi_awareness", lambda: "per-monitor-v2")
+    monkeypatch.setattr(ce, "frontmost", lambda: state["front"])
+    monkeypatch.setattr(ce, "input_blocked", lambda: state["blocked"])
+    monkeypatch.setattr(ce, "click", lambda x, y: state["clicks"].append((x, y)))
+    monkeypatch.setattr(b, "_window_pid_at", lambda x, y: state["pid_at"])
+    return state
+
+
+def test_mouse_click_lands_only_on_the_browser_in_front(fake_input):
+    assert b._mouse_click(10, 20) is True and fake_input["clicks"] == [(10, 20)]
+
+
+@pytest.mark.parametrize("change", [
+    {"front": _Front("notepad.exe")},       # the browser isn't in front
+    {"pid_at": 7},                          # something else (Veronica's HUD) is on top at that point
+    {"blocked": True},                      # an elevated browser ignores our input
+])
+def test_mouse_click_refuses_when_it_might_miss(fake_input, change):
+    fake_input.update(change)
+    assert b._mouse_click(10, 20) is False and fake_input["clicks"] == []

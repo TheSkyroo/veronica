@@ -192,8 +192,18 @@ const OPS = {
   },
   read: () => inPage('read'),
   find: (m) => inPage('find', { text: m.text, max_lines: m.max_lines }),
-  click: (m) => inPage('click', { target: m.target }),
-  type: (m) => inPage('type', { target: m.target, text: m.text, submit: !!m.submit }),
+  elements: (m) => inPage('elements', { max: m.max }),
+  async locate(m) {
+    // Where an element is on screen, for a real mouse click by Veronica.
+    // The window comes to the front first: the click has to land on it.
+    const tab = await activeTab();
+    await chrome.windows.update(tab.windowId, { focused: true });
+    const res = await inPage('locate', { ref: m.ref, target: m.target });
+    if (res && res.found) res.zoom = await chrome.tabs.getZoom(tab.id);
+    return res;
+  },
+  click: (m) => inPage('click', { ref: m.ref, target: m.target }),
+  type: (m) => inPage('type', { ref: m.ref, target: m.target, text: m.text, submit: !!m.submit }),
   scroll: (m) => inPage('scroll', { direction: m.direction }),
 };
 
@@ -233,6 +243,75 @@ function pageOp(op, args, rawMax) {
   }
   function bodyText() { return (document.body && document.body.innerText) || ''; }
 
+  // -- numbered elements (browser_elements) --------------------------------
+  // Every visible thing that can be clicked or typed into gets a number,
+  // written onto the element as data-veronica-ref, so the brain can say
+  // "click 12" instead of guessing an element's exact text.
+  const REF_ATTR = 'data-veronica-ref';
+  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),textarea,select,summary,video,' +
+    '[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=checkbox],[role=radio],' +
+    '[role=switch],[role=textbox],[role=searchbox],[role=combobox],[onclick],[contenteditable=""],' +
+    '[contenteditable=true],[tabindex]:not([tabindex="-1"])';
+  function roleOf(el) {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const tag = el.tagName;
+    if (tag === 'A') return 'link';
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'TEXTAREA' || el.isContentEditable) return 'textbox';
+    if (tag === 'VIDEO') return 'video';
+    if (tag === 'INPUT') {
+      const t = (el.type || 'text').toLowerCase();
+      if (['button', 'submit', 'reset', 'image'].includes(t)) return 'button';
+      if (t === 'checkbox' || t === 'radio') return t;
+      return t === 'search' ? 'searchbox' : 'textbox';
+    }
+    return 'clickable';
+  }
+  function nameOf(el) {
+    const by = el.getAttribute('aria-labelledby');
+    let n = el.getAttribute('aria-label') || '';
+    if (!n && by) n = by.split(/\s+/).map((id) => (document.getElementById(id) || {}).innerText || '').join(' ');
+    if (!n && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      n = (el.labels && el.labels[0] && el.labels[0].innerText) || el.placeholder || el.name || '';
+    }
+    if (!n) n = el.innerText || '';
+    if (!n) n = el.title || '';
+    if (!n) { const img = el.querySelector && el.querySelector('img[alt]'); if (img) n = img.alt; }
+    return (n || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  }
+  function inView(r) {
+    return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+  }
+  function byRef(ref) {
+    return document.querySelector('[' + REF_ATTR + '="' + String(Number(ref)) + '"]');
+  }
+  function target(args, sel) {
+    if (args.ref !== undefined && args.ref !== null && args.ref !== '') {
+      const el = byRef(args.ref);
+      if (!el) throw new Error('element ' + args.ref + ' is gone; call browser_elements again');
+      return el;
+    }
+    if (!norm(args.target)) return null;
+    return findEl(sel, args.target);
+  }
+  // A real user's click as far as page scripts can tell: the pointer and
+  // mouse sequence many sites listen to, then click().
+  function pressClick(el) {
+    const r = el.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0,
+                clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    for (const t of ['pointerover', 'pointerenter', 'mouseover', 'pointerdown', 'mousedown']) {
+      el.dispatchEvent(t.startsWith('pointer') ? new PointerEvent(t, { ...o, pointerType: 'mouse', isPrimary: true })
+                                               : new MouseEvent(t, o));
+    }
+    if (el.focus) el.focus({ preventScroll: true });
+    el.dispatchEvent(new PointerEvent('pointerup', { ...o, pointerType: 'mouse', isPrimary: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    el.click();
+  }
+
   if (op === 'read') {
     const t = bodyText().replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').slice(0, rawMax);
     return { title: document.title, url: location.href, text: t };
@@ -246,15 +325,68 @@ function pageOp(op, args, rawMax) {
     }
     return { lines: out };
   }
+  const CLICKABLE = 'a,button,input[type=submit],input[type=button],[role=button],[role=link],[role=tab],' +
+    '[role=menuitem],[role=option],[onclick],summary,label,video';
+  if (op === 'elements') {
+    for (const old of document.querySelectorAll('[' + REF_ATTR + ']')) old.removeAttribute(REF_ATTR);
+    const max = Math.max(10, Math.min(300, args.max || 150));
+    const seen = new Set(), inside = [], outside = [];
+    for (const el of document.querySelectorAll(INTERACTIVE)) {
+      if (!visible(el) || el.closest('[aria-hidden=true]')) continue;
+      const role = roleOf(el), name = nameOf(el);
+      if (!name && !['video', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio'].includes(role)) continue;
+      const href = el.tagName === 'A' ? el.getAttribute('href') || '' : '';
+      // a nested control with the same name as its interactive parent
+      // (a <span> inside the <a>) adds nothing
+      const parent = el.parentElement && el.parentElement.closest(INTERACTIVE);
+      if (parent && visible(parent) && nameOf(parent) === name) continue;
+      const key = role + '|' + name + '|' + href;
+      if (name && seen.has(key)) continue;
+      seen.add(key);
+      (inView(el.getBoundingClientRect()) ? inside : outside).push({ el, role, name, href });
+    }
+    const picked = inside.concat(outside).slice(0, max);
+    const items = picked.map((it, i) => {
+      it.el.setAttribute(REF_ATTR, String(i + 1));
+      const out = { ref: i + 1, role: it.role, name: it.name, in_view: inside.includes(it) };
+      if (it.href) out.href = it.href.slice(0, 120);
+      if (it.el.disabled) out.disabled = true;
+      if (it.role === 'checkbox' || it.role === 'radio') out.checked = !!it.el.checked;
+      if ('value' in it.el && it.el.value && it.role !== 'button') out.value = String(it.el.value).slice(0, 60);
+      if (it.role === 'video') out.playing = !it.el.paused;
+      return out;
+    });
+    return { title: document.title, url: location.href, total: inside.length + outside.length, elements: items };
+  }
+  if (op === 'locate') {
+    const el = target(args, CLICKABLE);
+    if (!el) return { found: false };
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    // a point on the element that isn't covered by something else (a
+    // sticky header, a cookie banner)
+    let pt = null;
+    for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.5], [0.7, 0.5], [0.5, 0.3], [0.5, 0.7]]) {
+      const x = r.left + r.width * fx, y = r.top + r.height * fy;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && (hit === el || el.contains(hit) || hit.contains(el))) { pt = [x, y]; break; }
+    }
+    return {
+      found: true, covered: !pt, x: pt ? pt[0] : r.left + r.width / 2, y: pt ? pt[1] : r.top + r.height / 2,
+      dpr: window.devicePixelRatio, screenX: window.screenX, screenY: window.screenY,
+      outerWidth: window.outerWidth, outerHeight: window.outerHeight,
+      innerWidth: window.innerWidth, innerHeight: window.innerHeight, described: describe(el),
+    };
+  }
   if (op === 'click') {
-    const el = findEl('a,button,input[type=submit],input[type=button],[role=button],[role=link],[onclick],summary,label', args.target);
+    const el = target(args, CLICKABLE);
     if (!el) return { clicked: null };
-    el.scrollIntoView({ block: 'center' });
-    el.click();
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    pressClick(el);
     return { clicked: describe(el) };
   }
   if (op === 'type') {
-    const el = findEl('input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable]:not([contenteditable=false]),[role=textbox]', args.target);
+    const el = target(args, 'input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable]:not([contenteditable=false]),[role=textbox],[role=searchbox],[role=combobox]');
     if (!el) return { typed: null };
     el.scrollIntoView({ block: 'center' });
     el.focus();
