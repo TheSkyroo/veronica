@@ -1,13 +1,11 @@
 import asyncio
+import base64
 import contextlib
-import os
 import subprocess
 import time
-from types import SimpleNamespace
 
 import pytest
 
-from veronica.brain import policy
 from veronica.tools import system
 
 
@@ -28,97 +26,249 @@ def fake_run(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def started(monkeypatch):
+    """os.startfile replaced: records what would have been launched."""
+    opened = []
+    monkeypatch.setattr(system, "_startfile", opened.append)
+    return opened
+
+
+@pytest.fixture
+def apps(monkeypatch):
+    """A fake Start menu, Get-StartApps list and App Paths registry."""
+    state = {
+        "lnk": [("Microsoft Edge", r"C:\SM\Microsoft Edge.lnk"),
+                ("Spotify", r"C:\Users\u\SM\Spotify.lnk"),
+                ("Uninstall Spotify", r"C:\SM\Uninstall Spotify.lnk"),
+                ("Visual Studio Code", r"C:\SM\Visual Studio Code\Visual Studio Code.lnk")],
+        "uwp": [("Calculator", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+                ("Settings", "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel")],
+        "known": {"winword"},
+        "uwp_calls": 0,
+    }
+
+    def uwp():
+        state["uwp_calls"] += 1
+        return state["uwp"]
+
+    monkeypatch.setattr(system, "_start_menu_shortcuts", lambda: state["lnk"])
+    monkeypatch.setattr(system, "_start_apps", uwp)
+    monkeypatch.setattr(system, "_known_bare_app", lambda n: n.casefold() in state["known"])
+    return state
+
+
 def text(res):
     return res["content"][0]["text"]
 
 
-async def test_open_app(fake_run):
-    res = await system.open_app.handler({"name": "Safari"})
-    assert fake_run[0][0] == ["open", "-a", "Safari"]
-    assert fake_run[0][1]["timeout"] == 10 and "shell" not in fake_run[0][1]
+# -- open_app ---------------------------------------------------------------------
+
+async def test_open_app_start_menu_shortcut(apps, started):
+    res = await system.open_app.handler({"name": "spotify"})
+    assert started == [r"C:\Users\u\SM\Spotify.lnk"]
     assert text(res) == "ok" and not res.get("is_error")
+    assert apps["uwp_calls"] == 0          # Get-StartApps is slow; only asked on a miss
 
 
-async def test_open_app_rejects_paths(fake_run):
-    res = await system.open_app.handler({"name": "/tmp/evil.app"})
-    assert res["is_error"] and fake_run == []
+async def test_open_app_prefix_match_prefers_shortest(apps, started):
+    apps["lnk"].append(("Microsoft Edge Dev", r"C:\SM\Edge Dev.lnk"))
+    await system.open_app.handler({"name": "Microsoft"})
+    assert started == [r"C:\SM\Microsoft Edge.lnk"]
 
 
-async def test_open_app_rejects_hidden(fake_run):
-    res = await system.open_app.handler({"name": ".hidden"})
-    assert res["is_error"] and fake_run == []
+async def test_open_app_inner_word_match(apps, started):
+    await system.open_app.handler({"name": "code"})
+    assert started == [r"C:\SM\Visual Studio Code\Visual Studio Code.lnk"]
 
 
-async def test_open_app_rejects_flag(fake_run):
-    res = await system.open_app.handler({"name": "-e"})
-    assert res["is_error"] and fake_run == []
+async def test_open_app_never_picks_an_uninstaller(apps, started):
+    apps["lnk"] = [("Uninstall Spotify", r"C:\SM\Uninstall Spotify.lnk")]
+    apps["uwp"] = []
+    res = await system.open_app.handler({"name": "Spotify"})
+    assert res["is_error"] and started == []
 
 
-async def test_open_app_missing_name_is_error(fake_run):
+async def test_open_app_uwp_by_aumid(apps, started):
+    res = await system.open_app.handler({"name": "calculator"})
+    assert started == [r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]
+    assert not res.get("is_error")
+
+
+async def test_open_app_known_bare_name(apps, started):
+    res = await system.open_app.handler({"name": "winword"})
+    assert started == ["winword"] and not res.get("is_error")
+
+
+async def test_open_app_unknown_is_a_spoken_error(apps, started):
+    res = await system.open_app.handler({"name": "Nope"})
+    assert res["is_error"] and "no app called 'Nope'" in text(res) and started == []
+
+
+@pytest.mark.parametrize("name", [
+    "/tmp/evil.exe", r"C:\Windows\evil.exe", "..\\x", ".hidden", "-e", "a:b", "x|y", "",
+])
+async def test_open_app_rejects_paths_flags_hidden(apps, started, name):
+    res = await system.open_app.handler({"name": name})
+    assert res["is_error"] and started == [] and apps["uwp_calls"] == 0
+
+
+async def test_open_app_missing_name_is_error(apps, started):
     res = await system.open_app.handler({})
-    assert res["is_error"] and fake_run == []
+    assert res["is_error"] and started == []
 
 
-async def test_open_url_rejects_non_http(fake_run):
-    res = await system.open_url.handler({"url": "file:///etc/passwd"})
-    assert res["is_error"] and fake_run == []
+def test_best_match_exact_wins_over_prefix():
+    cands = [("Notepad++", "a"), ("Notepad", "b")]
+    assert system.best_match("notepad", cands) == ("Notepad", "b")
 
 
-async def test_open_url(fake_run):
-    await system.open_url.handler({"url": "https://x.y"})
-    assert fake_run[0][0] == ["open", "https://x.y"]
+def test_best_match_needs_word_boundary():
+    assert system.best_match("edge", [("Knowledge Base", "x")]) is None
 
 
-async def test_clipboard_read(fake_run):
-    assert text(await system.clipboard_read.handler({})) == "OUT"
-    assert fake_run[0][0] == ["pbpaste"]
+def test_start_apps_parses_json(monkeypatch):
+    rows = '[{"Name":"Calculator","AppID":"Calc!App"},{"Name":"","AppID":"x"}]'
+    monkeypatch.setattr(system, "powershell", lambda script, *a, **k: system._ok(rows))
+    assert system._start_apps() == [("Calculator", "Calc!App")]
+    monkeypatch.setattr(system, "powershell", lambda script, *a, **k: system._ok('{"Name":"A","AppID":"B"}'))
+    assert system._start_apps() == [("A", "B")]
+    monkeypatch.setattr(system, "powershell", lambda script, *a, **k: system._err("no"))
+    assert system._start_apps() == []
 
 
-async def test_clipboard_write(fake_run):
-    await system.clipboard_write.handler({"text": "hello"})
-    assert fake_run[0][0] == ["pbcopy"] and fake_run[0][1]["input"] == "hello"
+# -- open_url ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "javascript:alert(1)", "https://x.y/a b", "ms-settings:"])
+async def test_open_url_rejects_non_http(started, url):
+    res = await system.open_url.handler({"url": url})
+    assert res["is_error"] and started == []
 
 
-async def test_notify(fake_run):
-    await system.notify.handler({"title": "T", "message": "M"})
-    assert fake_run[0][0][:2] == ["osascript", "-e"]
-    assert 'display notification "M" with title "T"' in fake_run[0][0][2]
+async def test_open_url(started):
+    res = await system.open_url.handler({"url": "https://x.y"})
+    assert started == ["https://x.y"] and not res.get("is_error")
 
 
-async def test_notify_escapes_quotes(fake_run):
-    await system.notify.handler({"title": 'a"b', "message": "m"})
-    assert '\\"' in fake_run[0][0][2]
+# -- clipboard --------------------------------------------------------------------
+
+async def test_clipboard_read(monkeypatch):
+    monkeypatch.setattr(system, "_clip_get", lambda: "a\r\nb")
+    assert text(await system.clipboard_read.handler({})) == "a\nb"
 
 
-async def test_volume_set_clamps(fake_run):
+async def test_clipboard_read_empty(monkeypatch):
+    monkeypatch.setattr(system, "_clip_get", lambda: "")
+    assert text(await system.clipboard_read.handler({})) == "The clipboard has no text."
+
+
+async def test_clipboard_write_uses_crlf(monkeypatch):
+    got = []
+    monkeypatch.setattr(system, "_clip_set", got.append)
+    res = await system.clipboard_write.handler({"text": "hello\nworld"})
+    assert got == ["hello\r\nworld"] and not res.get("is_error")
+
+
+async def test_clipboard_busy_is_error(monkeypatch):
+    def busy():
+        raise RuntimeError("the clipboard is busy in another app")
+    monkeypatch.setattr(system, "_clip_get", busy)
+    res = await system.clipboard_read.handler({})
+    assert res["is_error"] and "busy" in text(res)
+
+
+# -- notify -----------------------------------------------------------------------
+
+def test_toast_xml_escapes():
+    xml = system.toast_xml('a <b> & "c"', "m")
+    assert "<text>a &lt;b&gt; &amp; \"c\"</text>" in xml and "<text>m</text>" in xml
+
+
+async def test_notify_uses_winrt(monkeypatch):
+    shown = []
+    monkeypatch.setattr(system, "_toast_winrt", lambda t, m: shown.append((t, m)))
+    res = await system.notify.handler({"title": "T", "message": "M"})
+    assert shown == [("T", "M")] and not res.get("is_error")
+
+
+async def test_notify_falls_back_to_powershell(monkeypatch, fake_run):
+    def no_winrt(t, m):
+        raise ImportError("no winrt")
+    monkeypatch.setattr(system, "_toast_winrt", no_winrt)
+    await system.notify.handler({"title": "T'); Remove-Item x; ('", "message": "M"})
+    argv, kw = fake_run[0]
+    assert argv == system.POWERSHELL
+    # the user's text never appears as script, only inside base64
+    assert "Remove-Item" not in kw["input"]
+    inner = base64.b64decode(kw["input"].split("FromBase64String('")[1].split("'")[0]).decode()
+    assert "Remove-Item" not in inner and "ToastNotificationManager" in inner
+
+
+# -- volume -----------------------------------------------------------------------
+
+async def test_volume_get(monkeypatch):
+    monkeypatch.setattr(system, "_get_volume", lambda: 42)
+    assert text(await system.volume_get.handler({})) == "42"
+
+
+async def test_volume_set_clamps(monkeypatch):
+    got = []
+    monkeypatch.setattr(system, "_set_volume", got.append)
     await system.volume_set.handler({"level": 250})
-    assert fake_run[0][0] == ["osascript", "-e", "set volume output volume 100"]
     await system.volume_set.handler({"level": -5})
-    assert fake_run[1][0] == ["osascript", "-e", "set volume output volume 0"]
-
-
-async def test_volume_set_bad_level_is_error(fake_run):
-    res = await system.volume_set.handler({"level": None})
-    assert res["is_error"] and fake_run == []
-    res = await system.volume_set.handler({"level": "abc"})
-    assert res["is_error"] and fake_run == []
     await system.volume_set.handler({"level": "30"})
-    assert fake_run[0][0] == ["osascript", "-e", "set volume output volume 30"]
+    assert got == [100, 0, 30]
 
 
-async def test_volume_get(fake_run):
-    await system.volume_get.handler({})
-    assert fake_run[0][0] == ["osascript", "-e", "output volume of (get volume settings)"]
+async def test_volume_set_bad_level_is_error(monkeypatch):
+    got = []
+    monkeypatch.setattr(system, "_set_volume", got.append)
+    assert (await system.volume_set.handler({"level": None}))["is_error"]
+    assert (await system.volume_set.handler({"level": "abc"}))["is_error"]
+    assert got == []
 
 
-async def test_applescript(fake_run):
-    await system.applescript.handler({"script": 'tell application "Music" to play'})
-    assert fake_run[0][0] == ["osascript", "-e", 'tell application "Music" to play']
+async def test_volume_failure_is_error(monkeypatch):
+    def broken():
+        raise OSError("no audio device")
+    monkeypatch.setattr(system, "_get_volume", broken)
+    res = await system.volume_get.handler({})
+    assert res["is_error"] and "no audio device" in text(res)
+
+
+# -- powershell -------------------------------------------------------------------
+
+def _decoded(stdin: str) -> str:
+    return base64.b64decode(stdin.split("FromBase64String('")[1].split("'")[0]).decode("utf-8")
+
+
+async def test_powershell_runs_script_on_stdin(fake_run):
+    script = 'if ($true) {\n  "héllo"\n}\nelse { "no" }'
+    res = await system.powershell_tool.handler({"script": script})
+    argv, kw = fake_run[0]
+    assert argv == ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                    "-Command", "-"]
+    assert kw["timeout"] == system.POWERSHELL_TIMEOUT_S and "shell" not in kw
+    assert kw["input"].isascii() and kw["input"].count("\n") == 1
+    assert _decoded(kw["input"]) == script
+    assert kw["encoding"] == "utf-8"
+    assert text(res) == "OUT"
+
+
+async def test_powershell_requires_script(fake_run):
+    res = await system.powershell_tool.handler({"script": "  "})
+    assert res["is_error"] and fake_run == []
+
+
+async def test_powershell_stderr_only_is_error(monkeypatch):
+    monkeypatch.setattr(system.subprocess, "run", lambda *a, **k: Done(rc=0, err="Get-Foo : not recognized"))
+    res = await system.powershell_tool.handler({"script": "Get-Foo"})
+    assert res["is_error"] and "not recognized" in text(res)
 
 
 async def test_nonzero_exit_is_error(monkeypatch):
     monkeypatch.setattr(system.subprocess, "run", lambda *a, **k: Done(rc=1, err="nope"))
-    res = await system.open_app.handler({"name": "Nope"})
+    res = await system.powershell_tool.handler({"script": "exit 1"})
     assert res["is_error"] and "nope" in text(res)
 
 
@@ -127,8 +277,8 @@ async def test_timeout_is_error(monkeypatch):
         raise subprocess.TimeoutExpired(cmd="x", timeout=10)
 
     monkeypatch.setattr(system.subprocess, "run", run)
-    res = await system.applescript.handler({"script": "delay 100"})
-    assert res["is_error"]
+    res = await system.powershell_tool.handler({"script": "Start-Sleep 1000"})
+    assert res["is_error"] and "timed out" in text(res)
 
 
 async def test_handlers_do_not_block_loop(monkeypatch):
@@ -147,7 +297,7 @@ async def test_handlers_do_not_block_loop(monkeypatch):
 
     ticker_task = asyncio.create_task(ticker())
     try:
-        await system.applescript.handler({"script": "delay 1"})
+        await system.powershell_tool.handler({"script": "Start-Sleep 1"})
     finally:
         ticker_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -155,137 +305,91 @@ async def test_handlers_do_not_block_loop(monkeypatch):
     assert len(ticks) >= 2
 
 
+# -- read_battery -----------------------------------------------------------------
+
+@pytest.mark.parametrize("status, expected", [
+    ((1, 8, 72), (72, "charging")),
+    ((1, 1, 100), (100, "charged")),
+    ((0, 1, 35), (35, "discharging")),
+    ((0, 2 | 4, 4), (4, "discharging")),
+    ((1, 1, 98), (98, None)),               # plugged in, not charging (battery-health hold)
+    ((1, 128, 255), (None, None)),          # desktop: no system battery
+    ((255, 255, 255), (None, None)),        # unknown
+    ((255, 255, 50), (50, None)),
+])
+def test_read_battery(status, expected):
+    assert system.read_battery(status=lambda: status) == expected
+
+
+def test_read_battery_failure():
+    def boom():
+        raise OSError("no kernel32")
+    assert system.read_battery(status=boom) == (None, None)
+
+
 # -- dictate_type (A4 dictation; not a Claude tool, called directly) ----------
 
-def test_dictate_type_single_line(fake_run):
-    res = system.dictate_type("hello world")
-    assert fake_run[0][0][:2] == ["osascript", "-e"]
-    script = fake_run[0][0][2]
-    assert 'tell application "System Events"' in script
-    assert 'keystroke "hello world"' in script
-    assert "keystroke return" not in script
-    assert not res.get("is_error")
+U = system.KEYEVENTF_UNICODE
+UP = system.KEYEVENTF_KEYUP
 
 
-def test_dictate_type_multiline_uses_keystroke_return(fake_run):
-    system.dictate_type("line one\nline two\nline three")
-    script = fake_run[0][0][2]
-    assert 'keystroke "line one"' in script
-    assert 'keystroke "line two"' in script
-    assert 'keystroke "line three"' in script
-    assert script.count("keystroke return") == 2
-    # ordering: line, return, line, return, line
-    idx1 = script.index('keystroke "line one"')
-    idxr1 = script.index("keystroke return")
-    idx2 = script.index('keystroke "line two"')
-    assert idx1 < idxr1 < idx2
+def test_key_events_single_line():
+    assert system.key_events("hi") == [(0, ord("h"), U), (0, ord("h"), U | UP),
+                                       (0, ord("i"), U), (0, ord("i"), U | UP)]
 
 
-def test_dictate_type_escapes_quotes(fake_run):
-    system.dictate_type('she said "hi"')
-    script = fake_run[0][0][2]
-    assert '\\"hi\\"' in script
+def test_key_events_newlines_press_enter():
+    ev = system.key_events("a\nb\r\nc")
+    enters = [e for e in ev if e[0] == system.VK_RETURN]
+    assert enters == [(system.VK_RETURN, 0, 0), (system.VK_RETURN, 0, UP)] * 2
+    typed = [chr(e[1]) for e in ev if e[0] == 0 and not e[2] & UP]
+    assert typed == ["a", "b", "c"]
+    # ordering: a, Enter, b, Enter, c
+    assert ev.index((system.VK_RETURN, 0, 0)) > ev.index((0, ord("a"), U))
 
 
-def test_dictate_type_error_propagates(monkeypatch):
-    monkeypatch.setattr(system.subprocess, "run", lambda *a, **k: Done(rc=1, err="no access"))
-    res = system.dictate_type("hi")
-    assert res["is_error"] and "no access" in res["content"][0]["text"]
+def test_key_events_non_bmp_is_a_surrogate_pair():
+    ev = system.key_events("😀")
+    downs = [e[1] for e in ev if not e[2] & UP]
+    assert downs == [0xD83D, 0xDE00]
+
+
+def test_dictate_type_sends_everything():
+    got = []
+
+    def send(events):
+        got.extend(events)
+        return len(events)
+
+    res = system.dictate_type('she said "hi"\nok', send=send)
+    assert not res.get("is_error") and got == system.key_events('she said "hi"\nok')
+
+
+def test_dictate_type_blocked_input_is_error():
+    res = system.dictate_type("hi", send=lambda events: 0)
+    assert res["is_error"] and "administrator" in text(res)
+
+
+def test_dictate_type_error_propagates():
+    def send(events):
+        raise OSError("no access")
+    res = system.dictate_type("hi", send=send)
+    assert res["is_error"] and "no access" in text(res)
+
+
+def test_dictate_type_empty_is_a_no_op():
+    assert not system.dictate_type("", send=lambda e: pytest.fail("sent")).get("is_error")
 
 
 def test_server_and_names():
     assert system.system_server["name"] == "system"
-    assert set(system.MAC_TOOL_NAMES) == {
+    assert set(system.SYSTEM_TOOL_NAMES) == {
         "open_app", "open_url", "clipboard_read", "clipboard_write",
-        "notify", "volume_get", "volume_set", "applescript", "run_shortcut",
+        "notify", "volume_get", "volume_set", "powershell",
     }
 
 
 @pytest.mark.live
-async def test_live_open_finder():
-    res = await system.open_app.handler({"name": "Finder"})
+async def test_live_open_notepad():
+    res = await system.open_app.handler({"name": "Notepad"})
     assert not res.get("is_error")
-
-
-# -- run_shortcut ---------------------------------------------------------------
-
-@pytest.fixture
-def fake_shortcuts(monkeypatch):
-    """subprocess.run stubbed per `shortcuts` subcommand: `list` returns the
-    installed names, `run` succeeds. Returns the call log plus knobs."""
-    calls = []
-    state = {"installed": "Morning\nPay Rent\n", "list_rc": 0, "run_rc": 0, "run_err": ""}
-
-    def run(argv, **kw):
-        calls.append((argv, kw))
-        if argv[:2] == ["shortcuts", "list"]:
-            return Done(rc=state["list_rc"], out=state["installed"], err="shortcuts: no access")
-        return Done(rc=state["run_rc"], err=state["run_err"])
-
-    monkeypatch.setattr(system.subprocess, "run", run)
-    return SimpleNamespace(calls=calls, state=state)
-
-
-async def test_run_shortcut_runs_an_installed_one(fake_shortcuts):
-    res = await system.run_shortcut.handler({"name": "Morning"})
-    assert [c[0] for c in fake_shortcuts.calls] == [["shortcuts", "list"], ["shortcuts", "run", "Morning"]]
-    assert fake_shortcuts.calls[1][1]["timeout"] == system.SHORTCUT_TIMEOUT_S
-    assert text(res) == "Ran Morning" and not res.get("is_error")
-
-
-async def test_run_shortcut_matches_the_installed_spelling(fake_shortcuts):
-    await system.run_shortcut.handler({"name": "  pay rent "})
-    assert fake_shortcuts.calls[1][0] == ["shortcuts", "run", "Pay Rent"]
-
-
-async def test_run_shortcut_folds_case_the_way_the_gate_does(fake_shortcuts):
-    """The allowlist check in policy compares with casefold(); matching the
-    installed name with lower() lets the gate and the tool resolve two
-    different shortcuts."""
-    fake_shortcuts.state["installed"] = "Stra\u00dfe\n"
-    assert policy._shortcut_allowed("STRASSE", ["stra\u00dfe"])
-    await system.run_shortcut.handler({"name": "STRASSE"})
-    assert fake_shortcuts.calls[1][0] == ["shortcuts", "run", "Stra\u00dfe"]
-
-
-async def test_run_shortcut_passes_input_through_a_temp_file(fake_shortcuts):
-    await system.run_shortcut.handler({"name": "Morning", "input": "hello"})
-    argv = fake_shortcuts.calls[1][0]
-    assert argv[:3] == ["shortcuts", "run", "Morning"] and argv[3] == "--input-path"
-    path = argv[4]
-    assert not os.path.exists(path)          # cleaned up after the run
-
-
-async def test_run_shortcut_unknown_name_is_a_spoken_error(fake_shortcuts):
-    res = await system.run_shortcut.handler({"name": "Nope"})
-    assert res["is_error"] and "no shortcut called 'Nope'" in text(res)
-    assert [c[0] for c in fake_shortcuts.calls] == [["shortcuts", "list"]]   # never ran
-
-
-async def test_run_shortcut_no_shortcuts_installed(fake_shortcuts):
-    fake_shortcuts.state["installed"] = ""
-    res = await system.run_shortcut.handler({"name": "Morning"})
-    assert res["is_error"] and "no shortcut called" in text(res)
-
-
-async def test_run_shortcut_reports_a_broken_cli(fake_shortcuts):
-    fake_shortcuts.state["list_rc"] = 1
-    res = await system.run_shortcut.handler({"name": "Morning"})
-    assert res["is_error"] and "couldn't read the shortcuts list" in text(res)
-
-
-async def test_run_shortcut_reports_a_failed_run(fake_shortcuts):
-    fake_shortcuts.state["run_rc"] = 1
-    fake_shortcuts.state["run_err"] = "Error: the shortcut failed"
-    res = await system.run_shortcut.handler({"name": "Morning"})
-    assert res["is_error"] and "the shortcut failed" in text(res)
-
-
-async def test_run_shortcut_requires_a_name(fake_shortcuts):
-    res = await system.run_shortcut.handler({"name": "  "})
-    assert res["is_error"] and fake_shortcuts.calls == []
-
-
-async def test_run_shortcut_rejects_a_flag_name(fake_shortcuts):
-    res = await system.run_shortcut.handler({"name": "--help"})
-    assert res["is_error"] and fake_shortcuts.calls == []
