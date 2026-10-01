@@ -14,6 +14,10 @@ VOICES: dict[str, str] = {
     "isabella": "bf_isabella",
     "george": "bm_george",
     "lewis": "bm_lewis",
+    # Kokoro's top-graded English voice and the most natural by predicted MOS
+    # (docs/superpowers/specs/2026-10-01-veronica-voice-model-options.md) —
+    # the default. Last, so "an American woman" still means Sarah.
+    "heart": "af_heart",
 }
 VOICE_IDS: list[str] = list(VOICES.values())
 
@@ -25,7 +29,10 @@ HINDI_VOICES: dict[str, str] = {
     "psi": "hm_psi",
 }
 HINDI_VOICE_IDS: list[str] = list(HINDI_VOICES.values())
-DEFAULT_HINDI_VOICE = "hf_alpha"
+# hf_beta: lower and steadier than hf_alpha (median 186 Hz vs 214 Hz), which
+# users heard as a child's voice, and the most intelligible in the
+# read-back test (CER 0.02 vs 0.05).
+DEFAULT_HINDI_VOICE = "hf_beta"
 
 ALL_VOICE_IDS: list[str] = VOICE_IDS + HINDI_VOICE_IDS
 

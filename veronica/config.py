@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     language: str = "en"
     whisper_model: str = "small.en"
     whisper_multilingual_model: str = "small"
-    kokoro_voice: str = "af_sarah"
+    kokoro_voice: str = "af_heart"
     partial_stt: bool = True
     partial_stt_model: str = "tiny.en"
     partial_stt_multilingual_model: str = "tiny"

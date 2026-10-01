@@ -762,7 +762,7 @@ def test_popup_menu_handler_forwards_to_app_callbacks(fake_env):
 
 # -- commit: Voice submenu (voices, faster/slower/normal) ----------------------
 
-VOICE_NAMES = ["Sarah", "Bella", "Nicole", "Sky", "Adam", "Michael", "Emma", "Isabella", "George", "Lewis"]
+VOICE_NAMES = ["Sarah", "Bella", "Nicole", "Sky", "Adam", "Michael", "Emma", "Isabella", "George", "Lewis", "Heart"]
 HINDI_VOICE_NAMES = ["Alpha", "Beta", "Omega", "Psi"]
 ALL_VOICE_NAMES = VOICE_NAMES + HINDI_VOICE_NAMES
 
@@ -798,12 +798,12 @@ def test_voice_submenu_lists_voices_and_speed(fake_env):
         assert sub in app.menu
         assert app.menu.index(sub) == app.menu.index(app._hud_mode_item) + 1
         titles = [i.title if i is not None else None for i in sub.children]
-        assert titles[:10] == VOICE_NAMES
-        assert titles[10] is None  # separator
-        assert titles[11:15] == HINDI_VOICE_NAMES
-        assert titles[15] is None  # separator
+        assert titles[:11] == VOICE_NAMES
+        assert titles[11] is None  # separator
+        assert titles[12:16] == HINDI_VOICE_NAMES
+        assert titles[16] is None  # separator
         assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
-        assert len(titles) == 19
+        assert len(titles) == 20
         assert list(app._voice_items) == ALL_VOICE_NAMES
         assert list(app._speed_items) == ["Faster", "Slower", "Normal speed"]
         assert all(i.callback == app._pick_voice for i in app._voice_items.values())
@@ -904,13 +904,13 @@ def test_popup_menu_voice_submenu_mirrors_menu_bar(fake_env, monkeypatch):
         sub = voice_item.submenu
         assert sub.title == "Voice"
         titles = [i.title for i in sub.items]
-        assert titles[:10] == VOICE_NAMES
-        assert titles[10] == "-"
-        assert titles[11:15] == HINDI_VOICE_NAMES
-        assert titles[15] == "-"
+        assert titles[:11] == VOICE_NAMES
+        assert titles[11] == "-"
+        assert titles[12:16] == HINDI_VOICE_NAMES
+        assert titles[16] == "-"
         assert titles[-3:] == ["Faster", "Slower", "Normal speed"]
-        voice_items = sub.items[:10] + sub.items[11:15]
-        assert [i.action for i in voice_items] == ["onPickVoice:"] * 14
+        voice_items = sub.items[:11] + sub.items[12:16]
+        assert [i.action for i in voice_items] == ["onPickVoice:"] * 15
         assert [i.action for i in sub.items[-3:]] == ["onSpeed:"] * 3
         assert [i.representedObject() for i in voice_items] == ALL_VOICE_NAMES
         assert [i.representedObject() for i in sub.items[-3:]] == ["Faster", "Slower", "Normal speed"]

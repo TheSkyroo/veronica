@@ -50,10 +50,16 @@ def test_clamp_speed():
     assert v.clamp_speed(1.0) == 1.0
 
 
-def test_all_ten_voices_present():
-    assert len(v.VOICES) == 10
+def test_all_english_voices_present():
+    assert len(v.VOICES) == 11
     assert set(v.VOICES) == {"sarah", "bella", "nicole", "sky", "adam", "michael",
-                             "emma", "isabella", "george", "lewis"}
+                             "emma", "isabella", "george", "lewis", "heart"}
+
+
+def test_default_voices_are_heart_and_beta():
+    from veronica.config import Settings
+    assert Settings().kokoro_voice == "af_heart"
+    assert v.DEFAULT_HINDI_VOICE == "hf_beta"
 
 
 def test_hindi_voices():

@@ -21,7 +21,7 @@ from veronica.ui.settings.bridge import AUTO_ALLOW_LABELS, SettingsBridge
 class FakeTTS:
     def __init__(self):
         self.voice = "af_sarah"
-        self.hindi_voice = "hf_alpha"
+        self.hindi_voice = "hf_beta"
         self.speed = 1.0
 
 
@@ -848,7 +848,7 @@ def test_state_tolerates_partial_tts(h):
     h.orch.tts = SimpleNamespace()
     st = h.bridge.get_state()
     assert st["voice"]["voice"] == "af_sarah"
-    assert st["voice"]["hindi_voice"] == "hf_alpha"
+    assert st["voice"]["hindi_voice"] == "hf_beta"
     assert st["voice"]["speed"] == 1.0
 
 

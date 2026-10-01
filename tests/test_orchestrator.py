@@ -3113,7 +3113,7 @@ async def test_voice_intent_unknown_lists_voices(monkeypatch):
     assert o.tts.voice == "af_sarah"
     assert saved == []
     assert o.tts.said[-1].startswith("I don't have that voice. I have Sarah, Bella")
-    assert o.tts.said[-1].endswith("George, Lewis, and in Hindi Alpha, Beta, Omega and Psi.")
+    assert o.tts.said[-1].endswith("George, Lewis, Heart, and in Hindi Alpha, Beta, Omega and Psi.")
 
 
 async def test_voice_intent_next_cycles(monkeypatch):

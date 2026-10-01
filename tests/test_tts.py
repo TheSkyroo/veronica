@@ -69,11 +69,11 @@ def test_synth_picks_hindi_voice_for_devanagari_or_lang(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Synthesizer, "_kokoro_cls", FakeKokoro)
     s = Synthesizer("af_sarah", tmp_path)
-    assert s.hindi_voice == "hf_alpha"
+    assert s.hindi_voice == "hf_beta"
     s.synth("नमस्ते")
-    assert calls[-1] == ("hf_alpha", "hi")
+    assert calls[-1] == ("hf_beta", "hi")
     s.synth("kal teen baje", lang="hi")
-    assert calls[-1] == ("hf_alpha", "hi")
+    assert calls[-1] == ("hf_beta", "hi")
     s.synth("hello", lang="en")
     assert calls[-1] == ("af_sarah", "en-us")
     s.synth("hello")

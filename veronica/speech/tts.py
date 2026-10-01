@@ -19,7 +19,7 @@ class Synthesizer:
         voice: str,
         models_dir: Path,
         speed: float = 1.0,
-        hindi_voice: str = "hf_alpha",
+        hindi_voice: str = "hf_beta",
     ) -> None:
         self.voice = voice
         self.speed = speed

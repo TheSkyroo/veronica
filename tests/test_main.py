@@ -583,7 +583,7 @@ async def test_build_orchestrator_applies_saved_hindi_voice(monkeypatch, tmp_hom
 async def test_build_orchestrator_ignores_bad_hindi_voice(monkeypatch, tmp_home):
     _patch_audio_fakes(monkeypatch, {"tts_hindi_voice": "af_sarah"})
     orch = main_mod.build_orchestrator(Settings(memory_enabled=False), audio=False)
-    assert orch.tts.hindi_voice == "hf_alpha"
+    assert orch.tts.hindi_voice == "hf_beta"
     memory_tools.bind(None)
 
 
