@@ -6,6 +6,7 @@ can swap each OS call for a fake through the small `_...` seams below."""
 import asyncio
 import base64
 import contextlib
+import difflib
 import json
 import os
 import re
@@ -325,6 +326,30 @@ def _open_app_sync(name: str) -> dict:
         _startfile(name)
         return _ok("ok")
     return _err(f"there's no app called {name!r} on this PC")
+
+
+def open_locally(name: str) -> str | None:
+    """For the orchestrator's "open X" fast path: open `name` if it's a
+    Windows place/tool (also when slightly misheard, "this DC" -> This PC)
+    or an installed app, and return what was opened; None if there's no
+    such thing here — the request then goes to the brain instead."""
+    name = name.strip()
+    if (not name or any(c in name for c in "/\\:*?\"<>|") or name.startswith((".", "-"))
+            or not _APP_NAME_RE.fullmatch(name)):
+        return None
+    target = system_target(name)
+    if target is None:
+        close = difflib.get_close_matches(_norm(name), SYSTEM_TARGETS, n=1, cutoff=0.8)
+        if close:
+            name, target = close[0], SYSTEM_TARGETS[close[0]]
+    if target is not None:
+        _startfile(target)
+        return name
+    try:
+        res = _open_app_sync(name)
+    except Exception:
+        return None
+    return None if res.get("is_error") else name
 
 
 @tool("open_app", "Open a Windows application, folder or system tool by name, e.g. Notepad, Microsoft Edge, "

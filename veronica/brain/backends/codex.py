@@ -41,6 +41,7 @@ differ):
   (`server`, `tool`, `arguments`) and are gated inside tools.serve.
 """
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -58,7 +59,21 @@ from veronica.brain.backends.cli import (
 )
 from veronica.brain.gateclient import HOOK_TIMEOUT_S
 
+log = logging.getLogger("veronica.brain")
+
 BYPASS_NOTICE = "--dangerously-bypass-hook-trust` is enabled"
+# Codex also reports warnings as `error` events/items — notably about the
+# user's own ~/.codex/config.toml ("Codex is ignoring 1 unrecognized
+# configuration setting… `mcp_servers.x.type` is ignored", left there by
+# some other tool). The turn carries on after them; a real failure still
+# arrives as `turn.failed` or a non-zero exit.
+NOTICE_MARKERS = (
+    BYPASS_NOTICE,
+    "unrecognized configuration setting",
+    "is ignoring",
+    "is ignored",
+    "deprecated",
+)
 
 
 def toml_str(s: str) -> str:
@@ -183,6 +198,15 @@ class CodexBrain(CliBrain):
             return stream_key in logged_key or Path(stream_key).name in logged_key
         return logged_key == stream_key or logged_key == unwrap_shell(stream_key) or logged_key in stream_key
 
+    def _error_or_notice(self, msg: str) -> list[Event]:
+        """An `error` event: a warning to log and carry on past (see
+        NOTICE_MARKERS), or the turn's failure."""
+        if msg and any(m in msg for m in NOTICE_MARKERS):
+            if BYPASS_NOTICE not in msg:
+                log.warning("codex: %s", msg.strip().replace("\n", " "))
+            return []
+        return [Error(msg or "error")]
+
     def parse(self, line: str) -> list[Event]:  # shapes: tests/fixtures/brains/codex-*.jsonl
         e = json.loads(line)
         kind = e.get("type")
@@ -194,7 +218,7 @@ class CodexBrain(CliBrain):
             err = e.get("error") or {}
             return [Error(str(err.get("message") if isinstance(err, dict) else err) or "turn failed")]
         if kind == "error":
-            return [Error(str(e.get("message") or "error"))]
+            return self._error_or_notice(str(e.get("message") or ""))
         if kind not in ("item.started", "item.completed"):
             return []
         item = e.get("item") or {}
@@ -204,8 +228,7 @@ class CodexBrain(CliBrain):
             text = item.get("text")
             return [Text(text)] if done and text else []
         if itype == "error":
-            msg = str(item.get("message") or "")
-            return [] if BYPASS_NOTICE in msg else [Error(msg or "error")]
+            return self._error_or_notice(str(item.get("message") or ""))
         if itype == "command_execution":
             if done:
                 return [ToolEnd(item_id)]

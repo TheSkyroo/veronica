@@ -145,6 +145,37 @@ def match_language_intent(text: str) -> LanguageMode | None:
     return None
 
 
+# "Open This PC" / "launch Spotify" / "downloads kholo": handled locally
+# (system.open_locally) without a brain round trip. Whole utterance only, a
+# short target, and nothing that needs more than opening it ("open github
+# in chrome", "open a new tab" stay with the brain).
+_OPEN_LEADS = re.compile(r"^(?:please\s+)?(?:open|launch|start|run|show me|go to|take me to)\s+(.+)$")
+_OPEN_HINGLISH = re.compile(r"^(.+?)\s+(?:kholo|khol do|kholiye|chalu karo|open karo)$")
+_OPEN_BLOCKERS = frozenset({"in", "on", "with", "and", "then", "for", "from", "to", "a", "an", "new", "tab",
+                            "website", "site", "page", "link", "url", "file", "document", "it", "that", "this"})
+_OPEN_FILLERS = re.compile(r"^(?:the|my|up)\s+")
+
+
+def match_open_intent(text: str) -> str | None:
+    """The thing to open for a plain "open X" request, or None."""
+    for candidate in _candidates_for(normalize(text)):
+        m = _OPEN_LEADS.match(candidate) or _OPEN_HINGLISH.match(candidate)
+        if not m:
+            continue
+        target = m.group(1).strip().removesuffix(" please").strip()
+        while _OPEN_FILLERS.match(target):
+            target = _OPEN_FILLERS.sub("", target, count=1)
+        words = target.split()
+        # "this PC" is the one name that starts with "this" — and whisper
+        # often hears it as "this DC"/"this BC", so let a short second word
+        # through for the fuzzy match to settle.
+        this_pc = len(words) == 2 and words[0] == "this" and len(words[1]) <= 3
+        if not words or len(words) > 4 or (set(words) & _OPEN_BLOCKERS and not this_pc):
+            continue
+        return target
+    return None
+
+
 # Settings window / history tab / version / self-update (Batch D). All
 # whole-utterance only (no clause split): "open edge settings", "history
 # of rome" and "update my calendar" must stay with the brain.
